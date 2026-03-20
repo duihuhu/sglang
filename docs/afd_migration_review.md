@@ -173,8 +173,71 @@ python -m sglang.launch_server --disaggregation-mode decode --afd-perspective at
 
 | 编号 | 描述 | 状态 |
 |------|------|------|
-| F1 | StepMesh 尚未适配 N:M 拓扑（仅 ZMQ 路径支持分片并行） | 待实现 |
+| F1 | StepMesh N:M 双向分片通信（详见下方） | **已实现** |
 | F2 | 需要 `--disable-cuda-graph --disable-overlap-schedule` | 待实现 |
 | F3 | TBO 与 AFD 互斥，不能同时启用 | 设计决策（可后续扩展） |
 | F4 | 自动 profiling + `afd_attn_ratio` 自适应调参 | 待实现 |
 | F5 | Qwen2（不使用 LayerCommunicator 的旧 Dense 模型）不支持 AFD | 需重构 Qwen2DecoderLayer |
+
+---
+
+## 七、F1 StepMesh N:M 双向分片通信
+
+### 设计原理
+
+通过调研 StepMesh 源码（`af_tensor_app.h` + `public.hpp`）发现：
+
+1. **`push_pull` 支持多个 pull_tensor**：`pull_tensors` 数组大小 = `server_count × batch_size`，每个 Server 有独立的 pull 缓冲区，不会覆盖
+2. **`get_batch` 按 Worker rank 排序返回**：内部用 `q_[worker_rank]` 队列，返回顺序即 rank 顺序
+3. **`respond` 按 key 匹配**：Server respond 的数据写入 Worker 对应 key 的 pull 缓冲区
+4. **`RegisterRecvTensor` 支持按 Worker 分片注册**：同一 tensor 的不同 chunk 注册给不同 Worker
+
+### 实现方式
+
+**A→F 方向（分片广播）**：
+- `attn_send`：每个 Attn rank 只 push 1/TP_A 的 token shard（广播到所有 FFN）
+- 同时注册 **TP_F 个 pull_tensor**（每个 FFN Server 一个独立缓冲区用于接收 F→A shard）
+- `ffn_recv`：`get_batch()` 返回 TP_A 个 shard（按 Worker rank 排序），`torch.cat` 拼接
+
+**F→A 方向（分片 respond）**：
+- `ffn_send`：每个 FFN rank respond 自己的 1/TP_F shard 给每个 Worker（按 key 匹配写入 Worker 对应的 pull 缓冲区）
+- `attn_recv`：`wait` 后所有 TP_F 个 pull_tensor 已填充，`torch.cat` + 截断 padding
+
+### 跨节点流量（4A:8F 示例）
+
+| 方向 | 流量 |
+|------|------|
+| A→F | 4 × (NH/4) × 8 = 8NH（每个 Attn 发 1/4，广播 8 份） |
+| F→A | 8 × (NH/8) × 4 = 4NH（每个 FFN 发 1/8，respond 给 4 个 Worker） |
+| **总计** | **12NH**（vs 同构 1:1 的 2NH，vs 全广播的 64NH） |
+
+### 向后兼容
+
+同构 TP（`attn_tp == ffn_tp`）时 `_heterogeneous=False`，所有方法走原始 1:1 代码路径。
+
+### 本轮 Review 已修复的问题
+
+| 编号 | 问题 | 修复 |
+|------|------|------|
+| H1 | `attn_send` 中 `self.key += 2` 只留 2 个 key 空间，但 pull 需要 TP_F 个 key，第二次调用时 key 碰撞 | 改为 `self.key += 1 + self.ffn_tp` |
+| H2 | docstring 描述了旧的"选择性 respond + all_gather"方案 | 更新为多 pull_tensor 方案 |
+| H3 | `ffn_recv` 只为第一个 Worker 的 key 注册了 recv buffer | 改为为每个 Worker 的 key 都注册 |
+
+### 遗留事项
+
+| 编号 | 描述 |
+|------|------|
+| G3 | token 数不整除 TP 时末尾 shard 较短，StepMesh RDMA 写入到较大的 pull_buf 时尾部有未初始化数据。`attn_recv` 中 `full[:original_num_tokens]` 已截断，但 RDMA 层是否要求 respond 数据大小 == pull_buf 大小需实际验证 |
+| G6 | `attn_send` 异构路径没有 buffer 复用（每次 `torch.empty_like`），同构路径用 `StepMeshTensorCache` + free pool。异构路径可优化但不影响正确性 |
+
+### F→A 流量优化分析
+
+当前 F→A 流量为 4NH（4A:8F 示例），原因是每个 FFN Server 必须 respond 给每个 Worker（StepMesh `push_pull` 要求所有 pull 请求都被 respond，否则 Worker hang）。
+
+**进一步优化方案**：每个 Worker 只注册 1 个 pull_tensor（只从 1 个 Server 取 1/TP_F shard），Attn 侧 NVLink all_gather 拼回完整 tensor。F→A 跨节点降到 NH，代价是增加一次节点内 all_gather（NVLink ~600GB/s，延迟 5-10us）。
+
+但此方案在 StepMesh 层有限制：`ZPull_` 内部 `pull_tensors.size() / server_count` 计算 `pull_batch_size`，如果 pull_tensor 数 < server_count 则 `pull_batch_size=0`，不发 pull。因此 **Worker 必须传 server_count 的整数倍个 pull_tensor**。
+
+可行的折中方案：传 TP_F 个 pull_tensor 但只让需要的 Server respond 真实数据、其余 respond 空占位（避免 hang），然后 Attn 只取需要的 shard + all_gather。这等价于当前实现 + 加 all_gather 但不减少跨节点流量（仍是 4NH），无实际收益。
+
+**结论**：4NH 是 StepMesh push_pull API 的固有下限（每个 Server 必须 respond 每个 Worker 的 pull）。真正降到 NH 需要分组 StepMesh 实例（极高复杂度），建议作为远期目标。实际部署中 RDMA 200Gbps+ 下 4NH 的绝对延迟仍在 SLA 范围内。

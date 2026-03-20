@@ -233,14 +233,30 @@ def _stepmesh_scheduler_process():
 
 
 class StepMeshTensorCommunicator(FifoTensorCommunicator):
-    """RDMA-based tensor communicator via StepMesh (fserver_lib)."""
+    """RDMA-based tensor communicator via StepMesh (fserver_lib).
 
-    # C3 optimization: dynamic buffer pool size
+    Supports N:M sharded communication for heterogeneous TP (TP_A != TP_F):
+    - A->F: each Attn rank pushes 1/TP_A token shard (broadcast to all FFN);
+            FFN concatenates shards from all Workers.
+    - F->A: each FFN rank responds its 1/TP_F shard to each Worker via
+            separate pull_tensors; Attn concatenates all pull buffers.
+    - StepMesh's push_pull natively supports multiple pull_tensors per
+      Server, so each Server writes to its own buffer (no data overwrite).
+    """
+
     MAX_FREE_BUFFERS = 30
 
     def __init__(self, afd_perspective: AFDPerspective):
         self.perspective = afd_perspective
         super().__init__()
+
+        # Resolve TP configuration
+        server_args = get_global_server_args()
+        local_tp = server_args.tp_size
+        self.attn_tp = getattr(server_args, "afd_attn_tp", None) or local_tp
+        self.ffn_tp = getattr(server_args, "afd_ffn_tp", None) or local_tp
+        self.local_rank = dist.get_rank() % local_tp if dist.is_initialized() else 0
+        self._heterogeneous = self.attn_tp != self.ffn_tp
 
         import fserver_lib as f
 
@@ -258,9 +274,17 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
 
         self.comm_ids: deque = deque()
         self.waits: deque = deque()
-        # C3 optimization: use deque for O(1) popleft
         self.free_tensors: Dict[torch.Size, deque] = {}
         self.register_buf: Dict[int, torch.Tensor] = {}
+        self._worker_count_per_recv: deque = deque()
+        self._tp_group = None
+
+    def _get_tp_group(self):
+        if self._tp_group is None:
+            from sglang.srt.distributed import get_tp_group
+
+            self._tp_group = get_tp_group()
+        return self._tp_group
 
     @staticmethod
     def _env_def(env: str, v: str):
@@ -288,8 +312,9 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
         gpu = str(torch.cuda.current_device())
 
         self._env_def("DMLC_NODE_RANK", "0")
-        self._env_def("DMLC_NUM_SERVER", "1")
-        self._env_def("DMLC_NUM_WORKER", "1")
+        # F1 Step 1: dynamic DMLC_NUM_WORKER / DMLC_NUM_SERVER
+        self._env_def("DMLC_NUM_WORKER", str(self.attn_tp))
+        self._env_def("DMLC_NUM_SERVER", str(self.ffn_tp))
         self._env_def("DMLC_GROUP_SIZE", "1")
         self._env_def("DMLC_PS_ROOT_PORT", "8123")
         self._env_def("DMLC_ENABLE_RDMA", "ibverbs")
@@ -323,59 +348,143 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
             self.free_tensors[shape] = q
         return q
 
+    # --- A->F: Attn sends shard, FFN receives and concatenates ---
+
     def attn_send(self, x: torch.Tensor):
-        free = self._get_or_create_free_deque(x.shape)
+        if not self._heterogeneous:
+            # Homogeneous: original 1:1 behavior
+            free = self._get_or_create_free_deque(x.shape)
+            if len(free) < self.MAX_FREE_BUFFERS:
+                self.key += 2
+                t = StepMeshTensorCache()
+                t.push_tensor = torch.empty_like(x)
+                t.pull_tensor = torch.empty_like(x)
+                t.push_key = self.key
+                t.pull_key = self.key + 1
+            else:
+                t = free.popleft()
+            t.push_tensor.copy_(x)
+            t.h = self.f.push_pull(
+                [t.push_tensor], [t.push_key], [t.pull_tensor], [t.pull_key]
+            )
+            self.waits.append(t)
+            return
 
-        if len(free) < self.MAX_FREE_BUFFERS:
-            self.key += 2
-            t = StepMeshTensorCache()
-            t.push_tensor = torch.empty_like(x)
-            # C3: removed unnecessary zero_()
-            t.pull_tensor = torch.empty_like(x)
-            t.push_key = self.key
-            t.pull_key = self.key + 1
-        else:
-            # C3: deque.popleft() is O(1)
-            t = free.popleft()
+        # Heterogeneous N:M sharded communication:
+        # Push: only this rank's 1/TP_A token shard (broadcast to all FFN)
+        # Pull: TP_F separate pull buffers (one per FFN Server, each receives a shard)
+        num_tokens = x.shape[0]
+        chunk_size = (num_tokens + self.attn_tp - 1) // self.attn_tp
+        start = self.local_rank * chunk_size
+        end_idx = min(start + chunk_size, num_tokens)
+        push_shard = x[start:end_idx].contiguous()
 
-        t.push_tensor.copy_(x)
-        t.h = self.f.push_pull(
-            [t.push_tensor], [t.push_key], [t.pull_tensor], [t.pull_key]
+        # Allocate TP_F pull buffers — each FFN Server will respond its shard
+        f2a_chunk = (num_tokens + self.ffn_tp - 1) // self.ffn_tp
+        pull_tensors = []
+        pull_keys = []
+        # Reserve 1 push_key + TP_F pull_keys to avoid key collision
+        self.key += 1 + self.ffn_tp
+        push_key = self.key
+        for s in range(self.ffn_tp):
+            pull_buf = torch.empty(f2a_chunk, x.shape[1], dtype=x.dtype, device=x.device)
+            pull_tensors.append(pull_buf)
+            pull_keys.append(push_key + 1 + s)
+
+        push_tensor_buf = torch.empty_like(push_shard)
+        push_tensor_buf.copy_(push_shard)
+
+        h = self.f.push_pull(
+            [push_tensor_buf], [push_key],
+            pull_tensors, pull_keys,
         )
-        self.waits.append(t)
-
-    def attn_recv(self) -> torch.Tensor:
-        t = self.waits.popleft()
-        self.f.wait(t.h)
-        self._get_or_create_free_deque(t.push_tensor.shape).append(t)
-        # C4: clone is still needed here because we reuse the pull_tensor buffer;
-        # a true double-buffer scheme requires tracking which buffer is "safe"
-        return t.pull_tensor.clone()
-
-    def ffn_send(self, x: torch.Tensor):
-        free = self._get_or_create_free_deque(x.shape)
-        if len(free) < self.MAX_FREE_BUFFERS:
-            t = torch.empty_like(x)
-        else:
-            t = free.popleft()
-        t.copy_(x)
-        c = self.comm_ids.popleft()
-        self.f.respond([t], c, True)
-        free.append(t)
+        # Store handle + pull buffers + original num_tokens for attn_recv
+        self.waits.append((h, pull_tensors, num_tokens))
 
     def ffn_recv(self) -> torch.Tensor:
+        # get_batch returns batches in Worker rank order
         batches = self.f.get_batch()
-        assert len(batches) == 1, "only handle one worker currently"
-        x = batches[0][1][0]
-        key = batches[0][2][0]
-        self.comm_ids.append(batches[0][0])
+        self._worker_count_per_recv.append(len(batches))
 
-        if self.register_buf.get(key) is None:
-            y = torch.empty_like(x)
-            self.f.register_recv_buffer(y, [0], [key])
-            self.register_buf[key] = y
+        if len(batches) == 1 and not self._heterogeneous:
+            # Homogeneous: single Worker, original behavior
+            x = batches[0][1][0]
+            key = batches[0][2][0]
+            self.comm_ids.append(batches[0][0])
+            if self.register_buf.get(key) is None:
+                y = torch.empty_like(x)
+                self.f.register_recv_buffer(y, [0], [key])
+                self.register_buf[key] = y
+            return x.clone()
 
-        return x.clone()
+        # Heterogeneous: collect shards from all Workers (already in rank order)
+        shards = []
+        for batch in batches:
+            self.comm_ids.append(batch[0])
+            shards.append(batch[1][0])
+            # Register recv buffer for each Worker's key
+            key = batch[2][0]
+            if self.register_buf.get(key) is None:
+                y = torch.empty_like(batch[1][0])
+                self.f.register_recv_buffer(y, [0], [key])
+                self.register_buf[key] = y
+
+        return torch.cat(shards, dim=0)
+
+    # --- F->A: FFN responds its shard, Attn concatenates from pull buffers ---
+
+    def ffn_send(self, x: torch.Tensor):
+        n_workers = self._worker_count_per_recv.popleft()
+
+        if n_workers == 1 and not self._heterogeneous:
+            # Homogeneous: single Worker, original behavior
+            free = self._get_or_create_free_deque(x.shape)
+            if len(free) < self.MAX_FREE_BUFFERS:
+                t = torch.empty_like(x)
+            else:
+                t = free.popleft()
+            t.copy_(x)
+            c = self.comm_ids.popleft()
+            self.f.respond([t], c, True)
+            free.append(t)
+            return
+
+        # Heterogeneous: each FFN rank responds its own shard to each Worker.
+        # Each Worker's push_pull registered TP_F pull_keys. This FFN Server
+        # responds with its shard matched by key.
+        num_tokens = x.shape[0]
+        chunk_size = (num_tokens + self.ffn_tp - 1) // self.ffn_tp
+        ffn_rank = self.local_rank
+        start = ffn_rank * chunk_size
+        end_idx = min(start + chunk_size, num_tokens)
+        my_shard = x[start:end_idx].contiguous()
+
+        for _ in range(n_workers):
+            c = self.comm_ids.popleft()
+            free = self._get_or_create_free_deque(my_shard.shape)
+            if len(free) < self.MAX_FREE_BUFFERS:
+                t = torch.empty_like(my_shard)
+            else:
+                t = free.popleft()
+            t.copy_(my_shard)
+            self.f.respond([t], c, True)
+            free.append(t)
+
+    def attn_recv(self) -> torch.Tensor:
+        if not self._heterogeneous:
+            # Homogeneous: original behavior
+            t = self.waits.popleft()
+            self.f.wait(t.h)
+            self._get_or_create_free_deque(t.push_tensor.shape).append(t)
+            return t.pull_tensor.clone()
+
+        # Heterogeneous: pull buffers already have data from TP_F Servers
+        h, pull_tensors, original_num_tokens = self.waits.popleft()
+        self.f.wait(h)
+        full = torch.cat(pull_tensors, dim=0)
+        return full[:original_num_tokens]
+
+    # --- Public interface ---
 
     def recv_tensor(self) -> torch.Tensor:
         if self.perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN:
@@ -553,18 +662,24 @@ def get_tensor_communicator() -> FifoTensorCommunicator:
     perspective = get_afd_perspective()
     if perspective is None:
         raise RuntimeError("AFD perspective is not set.")
-    if os.environ.get("MLC_INTERFACE"):
-        base_comm = StepMeshTensorCommunicator(perspective)
-    else:
-        base_comm = ZMQSimpleTensorCommunicator(perspective)
 
-    # Step 6.2: wrap with heterogeneous TP communicator if needed
+    if os.environ.get("MLC_INTERFACE"):
+        # F1 Step 6: StepMesh natively supports N:M sharded communication,
+        # no need for ShardedParallelCommunicator wrapper
+        return StepMeshTensorCommunicator(perspective)
+
+    # ZMQ path: wrap with ShardedParallelCommunicator for heterogeneous TP
+    base_comm = ZMQSimpleTensorCommunicator(perspective)
     server_args = get_global_server_args()
     local_tp = server_args.tp_size
     attn_tp = getattr(server_args, "afd_attn_tp", None) or local_tp
     ffn_tp = getattr(server_args, "afd_ffn_tp", None) or local_tp
     if attn_tp != ffn_tp:
-        remote_tp = ffn_tp if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN else attn_tp
+        remote_tp = (
+            ffn_tp
+            if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN
+            else attn_tp
+        )
         local_tp_rank = dist.get_rank() % local_tp if dist.is_initialized() else 0
         return ShardedParallelCommunicator(
             inner_comm=base_comm,
