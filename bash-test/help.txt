@@ -1,0 +1,62 @@
+CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
+    --model-path /mnt/nvme1/models/llama3.1-8/ \
+    --disable-overlap-schedule \
+    --disable-cuda-graph \
+    --afd-perspective attn \
+    --afd-mirco-batch 3
+
+CUDA_VISIBLE_DEVICES=1 python -m sglang.launch_server \
+    --model-path /mnt/nvme1/models/llama3.1-8/ \
+    --disable-overlap-schedule \
+    --disable-cuda-graph \
+    --port 30001 \
+    --skip-server-warmup \
+    --watchdog-timeout 3600 \
+    --afd-perspective ffn \
+    --afd-mirco-batch 3
+
+
+nohup hf download huggyllama/llama-30b --local-dir /mnt/nvme1/models/llama-30B > download.log 2>&1 &
+
+curl -s "http://127.0.0.1:30000/generate" -H "Content-Type: application/json" -d '{"text":"你好，介绍一下你自己","sampling_params":{"max_new_tokens":64,"temperature":0.7}}'
+
+CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
+  --model-path /mnt/nvme1/models/llama3.1-8/ \
+  --disable-overlap-schedule \
+  --disable-cuda-graph \
+  --port 30000
+
+
+CUDA_VISIBLE_DEVICES=0  \
+nsys profile \
+  --capture-range=cudaProfilerApi \
+  --trace=cuda,nvtx \
+  --cuda-memory-usage=false \
+  --sample=none \
+  --backtrace=none \
+  --cpuctxsw=none \
+  --trace-fork-before-exec=true \
+  --force-overwrite=true \
+  -o sglang.out \
+  python -m sglang.launch_server \
+    --model-path /mnt/nvme1/models/Qwen3___5-27B/ \
+    --port 30000 \
+    --tensor-parallel-size 1 \
+    --context-length 4096 \
+    --disable-cuda-graph \
+    --disable-overlap-schedule \
+    --chunked-prefill-size -1
+
+
+CUDA_VISIBLE_DEVICES=0 python bash-test/bench_sglang.py \
+  --server-url http://127.0.0.1:30000 \
+  --num_seqs 1 \
+  --input_len 1024 \
+  --output_len 512 \
+  --use-server-profile-range \
+  --profile-activities CUDA_PROFILER
+
+
+python bash-test/nvtx_stats_from_rep.py sglang.out.nsys-rep \
+  --d-bucket-count 255 \
+  --d-pick-positions 32,64,96,128,160,192,224
