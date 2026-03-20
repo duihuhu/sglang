@@ -177,6 +177,10 @@ python -m sglang.launch_server --disaggregation-mode decode --afd-perspective at
 | F2 | 需要 `--disable-cuda-graph --disable-overlap-schedule` | 待实现 |
 | F3 | TBO 与 AFD 互斥，不能同时启用 | 设计决策（可后续扩展） |
 | F4 | 自动 profiling + `afd_attn_ratio` 自适应调参 | 待实现 |
+| F6 | DeepSeek-V2 `load_weights` 添加 AFDWeightFilter（generator 包装过滤） | **已修复** |
+| F7 | `afd_prepare_overlap` 添加 `is_target_verify()` 处理（scheduler.py + scheduler_afd_mixin.py） | **已修复** |
+| F8 | `afd_overlap.py` 移除冗余 `m is None` 检查 | **已修复** |
+| F9 | F→A 跨节点流量 4NH 是 StepMesh push_pull API 固有下限，降到 NH 需分组 StepMesh 实例 | 远期目标 |
 | F5 | Qwen2（不使用 LayerCommunicator 的旧 Dense 模型）不支持 AFD | 需重构 Qwen2DecoderLayer |
 
 ---
@@ -241,3 +245,45 @@ python -m sglang.launch_server --disaggregation-mode decode --afd-perspective at
 可行的折中方案：传 TP_F 个 pull_tensor 但只让需要的 Server respond 真实数据、其余 respond 空占位（避免 hang），然后 Attn 只取需要的 shard + all_gather。这等价于当前实现 + 加 all_gather 但不减少跨节点流量（仍是 4NH），无实际收益。
 
 **结论**：4NH 是 StepMesh push_pull API 的固有下限（每个 Server 必须 respond 每个 Worker 的 pull）。真正降到 NH 需要分组 StepMesh 实例（极高复杂度），建议作为远期目标。实际部署中 RDMA 200Gbps+ 下 4NH 的绝对延迟仍在 SLA 范围内。
+
+---
+
+## 八、最终 Review（当前轮）
+
+### 发现的问题
+
+| 编号 | 严重度 | 文件 | 问题 |
+|------|--------|------|------|
+| F6 | **严重** | `deepseek_v2.py` | `load_weights` 缺少 `AFDWeightFilter`，Attn/FFN 节点都加载全部权重，浪费显存 |
+| F7 | **中等** | `scheduler.py` + `scheduler_afd_mixin.py` | `afd_prepare_overlap` 未处理 `TARGET_VERIFY` 模式，speculative decoding 下 AFD microbatch 切分不工作 |
+| F8 | **低** | `afd_overlap.py` | `m is None` 检查冗余（`_get_afd_micro_batch()` 总返回 int） |
+
+### 已验证为正确的部分
+
+| 检查项 | 状态 |
+|--------|------|
+| `afd_split_seq_index` 字段流转（ScheduleBatch → ModelWorkerBatch → ForwardBatch） | OK |
+| StepMesh `attn_send` key 分配（`self.key += 1 + self.ffn_tp`） | OK |
+| StepMesh `ffn_send` respond n_workers 次 | OK |
+| StepMesh 异构路径（分片广播 + 多 pull_tensor）| OK |
+| `model_forward_afd` 流水线 overlap（`postprocess_layer_start_recv`） | OK |
+| Qwen3Model.forward AFD 分支 | OK |
+| Qwen2.py 不含 AFD（Qwen2DecoderLayer 无 LayerCommunicator，正确排除） | OK |
+| AFDReqInput 继承 BaseReq | OK |
+| server_args `afd_micro_batch` 拼写 | OK |
+| `event_loop_afd_disagg_prefill/decode` 调用 Mixin 方法顺序 | OK |
+| `_compute_token_indices_m_way` 自主计算 | OK |
+
+### 后续任务优先级
+
+| 优先级 | 任务 | 描述 | 状态 |
+|--------|------|------|------|
+| ~~P0~~ | ~~F6~~ | ~~DeepSeek-V2 添加 AFDWeightFilter~~ | **已修复** |
+| ~~P0~~ | ~~F7~~ | ~~`afd_prepare_overlap` 添加 `is_target_verify()` 处理~~ | **已修复** |
+| ~~P1~~ | ~~F8~~ | ~~移除冗余 `m is None` 检查~~ | **已修复** |
+| P2 | F2 | CUDA Graph 支持 | 待实现 |
+| P2 | F3 | TBO + AFD 共存 | 待实现 |
+| P3 | F4 | 自动 profiling | 待实现 |
+| P3 | F9 | 分组 StepMesh 实现 F→A 流量 NH | 待实现 |
+| ~~P3~~ | ~~G3~~ | ~~RDMA 末尾 shard 短于 pull_buf~~ — `ffn_send` 中对末尾 shard padding 到 `chunk_size`，`attn_recv` 中 `full[:original_num_tokens]` 截断 | **已修复** |
+| P3 | G6 | 异构路径 buffer 复用 | 待优化 |

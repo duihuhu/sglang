@@ -459,6 +459,14 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
         end_idx = min(start + chunk_size, num_tokens)
         my_shard = x[start:end_idx].contiguous()
 
+        # G3 fix: pad last shard to chunk_size so respond size == pull_buf size
+        if my_shard.shape[0] < chunk_size:
+            pad = torch.zeros(
+                chunk_size - my_shard.shape[0], x.shape[1],
+                dtype=x.dtype, device=x.device,
+            )
+            my_shard = torch.cat([my_shard, pad], dim=0)
+
         for _ in range(n_workers):
             c = self.comm_ids.popleft()
             free = self._get_or_create_free_deque(my_shard.shape)

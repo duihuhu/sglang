@@ -2270,6 +2270,16 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
         return self.model.end_layer
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], is_nextn=False):
+        from sglang.srt.layers.afd import get_afd_perspective
+        from sglang.srt.layers.afd_mixin import AFDWeightFilter
+
+        afd_perspective = get_afd_perspective()
+        if afd_perspective is not None:
+            weights = (
+                (name, tensor)
+                for name, tensor in weights
+                if AFDWeightFilter.should_load(name, afd_perspective)
+            )
         self.do_load_weights(weights, is_nextn)
 
     def get_embed_and_head(self):

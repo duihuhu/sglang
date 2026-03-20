@@ -114,11 +114,7 @@ class AfdForwardBatchPreparer:
     @classmethod
     def prepare(cls, batch: ForwardBatch):
         m = _get_afd_micro_batch()
-        if (
-            batch.afd_split_seq_index is None
-            or m is None
-            or m <= 1
-        ):
+        if batch.afd_split_seq_index is None or m <= 1:
             return
 
         from sglang.srt.layers.attention.tbo_backend import AfdAttnBackend

@@ -103,7 +103,7 @@ class SchedulerAFDMixin:
         if forward_mode == ForwardMode.EXTEND:
             extend_lens = batch.extend_lens
             split_indices = _split_seq_indices_m_way(len(extend_lens), m, extend_lens)
-        elif forward_mode.is_decode():
+        elif forward_mode.is_decode() or forward_mode.is_target_verify():
             split_indices = _split_seq_indices_m_way(batch.batch_size(), m, None)
         else:
             return
