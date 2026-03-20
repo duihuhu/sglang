@@ -1036,6 +1036,41 @@ class SchedulerDisaggregationDecodeMixin:
             self.last_batch = batch
 
     @torch.no_grad()
+    def event_loop_afd_disagg_decode(self: Scheduler):
+        """Disagg decode event loop with AFD (Attention-FFN Disaggregation)."""
+        from sglang.srt.layers.afd import get_afd_perspective
+        from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
+
+        logger.info(
+            "event_loop_afd_disagg_decode: role=%s", get_afd_perspective()
+        )
+        SchedulerAFDMixin.afd_init_state(self)
+
+        while True:
+            recv_reqs = self.recv_requests()
+            SchedulerAFDMixin.afd_recv_messages(self)
+            SchedulerAFDMixin.afd_forward_work_requests(self, recv_reqs)
+            self.process_input_requests(recv_reqs)
+            self.process_decode_queue()
+
+            if SchedulerAFDMixin.afd_ffn_should_wait(self):
+                continue
+
+            batch = self.get_next_disagg_decode_batch_to_run()
+            self.cur_batch = batch
+
+            if batch:
+                SchedulerAFDMixin.afd_send_batch_info(self, batch)
+                SchedulerAFDMixin.afd_prepare_overlap(self, batch)
+                result = self.run_batch(batch)
+                self.process_batch_result(batch, result)
+                SchedulerAFDMixin.afd_reset_state(self)
+            else:
+                self.self_check_during_idle()
+
+            self.last_batch = batch
+
+    @torch.no_grad()
     def event_loop_overlap_disagg_decode(self: Scheduler):
         self.result_queue = deque()
         self.last_batch: Optional[ScheduleBatch] = None

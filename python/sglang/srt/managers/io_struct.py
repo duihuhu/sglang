@@ -942,6 +942,17 @@ class BatchTokenizedEmbeddingReqInput(BaseBatchReq):
 
 
 @dataclass
+class AFDReqInput(BaseReq):
+    """Scheduler-to-scheduler message for AF disaggregation synchronization."""
+
+    batch_size: int = 0
+    forward_mode: Any = None  # ForwardMode enum
+    req_ids: Optional[List[str]] = None
+    seq_lens: Optional[List[int]] = None
+    extend_lens: Optional[List[int]] = None
+
+
+@dataclass
 class BatchTokenIDOutput(BaseBatchReq, SpeculativeDecodingMetricsMixin):
     # The finish reason
     finished_reasons: List[BaseFinishReason]

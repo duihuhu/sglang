@@ -493,6 +493,24 @@ class Scheduler(
                 context, zmq.PUSH, port_args.metrics_ipc_name, False
             )
 
+        # AFD inter-scheduler channels (C5: configurable ports)
+        self.afd_send_to_ffn = None
+        self.afd_recv_from_attn = None
+        from sglang.srt.layers.afd import afd_is_attn, afd_is_ffn
+
+        if self.pp_rank == 0 and self.attn_tp_rank == 0:
+            host = os.getenv("AFD_SCHED_HOST", "127.0.0.1")
+            port = int(os.getenv("AFD_SCHED_PORT", "65300"))
+            afd_ipc = f"tcp://{host}:{port}"
+            if afd_is_attn():
+                self.afd_send_to_ffn = get_zmq_socket(
+                    context, zmq.PUSH, afd_ipc, False
+                )
+            elif afd_is_ffn():
+                self.afd_recv_from_attn = get_zmq_socket(
+                    context, zmq.PULL, afd_ipc, True
+                )
+
     def init_tokenizer(self):
         server_args = self.server_args
         self.is_generation = self.model_config.is_generation
@@ -1271,6 +1289,144 @@ class Scheduler(
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+
+    @DynamicGradMode()
+    def event_loop_afd(self):
+        """AFD scheduler loop with zmq.Poller (optimization S2)."""
+        from sglang.srt.layers.afd import (
+            afd_is_attn,
+            afd_is_ffn,
+            get_afd_micro_batch,
+            get_afd_perspective,
+        )
+        from sglang.srt.managers.io_struct import AFDReqInput
+        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+
+        logger.info(
+            "event_loop_afd: role=%s m=%s",
+            get_afd_perspective(),
+            get_afd_micro_batch(),
+        )
+
+        self._afd_batchsize_attn = None
+        self._afd_forward_mode = None
+        self._afd_req_ids = None
+
+        # S2: use Poller instead of busy-wait
+        afd_poller = None
+        if afd_is_ffn() and self.afd_recv_from_attn is not None:
+            afd_poller = zmq.Poller()
+            afd_poller.register(self.afd_recv_from_attn, zmq.POLLIN)
+
+        def _recv_afd_messages():
+            """Poll for AFDReqInput messages from Attn scheduler."""
+            if self.afd_recv_from_attn is None:
+                return
+            while True:
+                try:
+                    msg = self.afd_recv_from_attn.recv_pyobj(zmq.NOBLOCK)
+                    if isinstance(msg, AFDReqInput):
+                        self._afd_batchsize_attn = msg.batch_size
+                        self._afd_forward_mode = msg.forward_mode
+                        self._afd_req_ids = msg.req_ids
+                        return
+                except zmq.ZMQError:
+                    break
+
+        def _prepare_afd_overlap(batch):
+            """Compute microbatch split points for AFD."""
+            m = get_afd_micro_batch()
+            if batch.batch_size() < m:
+                return
+
+            from sglang.srt.batch_overlap.afd_overlap import (
+                _split_seq_indices_m_way,
+            )
+
+            forward_mode = batch.forward_mode
+            if forward_mode == ForwardMode.EXTEND:
+                extend_lens = batch.extend_lens
+                split_indices = _split_seq_indices_m_way(
+                    len(extend_lens), m, extend_lens
+                )
+            elif forward_mode.is_decode():
+                split_indices = _split_seq_indices_m_way(
+                    batch.batch_size(), m, None
+                )
+            else:
+                return
+
+            batch.afd_split_seq_index = split_indices
+
+        while True:
+            recv_reqs = self.recv_requests()
+
+            # Step 3.6: FFN also receives AFD messages
+            if afd_is_ffn():
+                _recv_afd_messages()
+
+            self._afd_process_input_requests(recv_reqs)
+
+            # FFN waits until Attn sends batch info
+            if afd_is_ffn() and self._afd_batchsize_attn is None:
+                if afd_poller is not None:
+                    afd_poller.poll(timeout=10)
+                continue
+
+            batch = self.get_next_batch_to_run()
+            self.cur_batch = batch
+
+            if batch:
+                # Attn side: notify FFN about current batch
+                if afd_is_attn() and self.afd_send_to_ffn is not None:
+                    afd_req = AFDReqInput(
+                        batch_size=batch.batch_size(),
+                        forward_mode=batch.forward_mode,
+                        req_ids=[r.rid for r in batch.reqs],
+                        seq_lens=[r.extend_input_len + r.seq_len for r in batch.reqs],
+                        extend_lens=batch.extend_lens
+                        if hasattr(batch, "extend_lens")
+                        else None,
+                    )
+                    self.afd_send_to_ffn.send_pyobj(afd_req)
+
+                _prepare_afd_overlap(batch)
+                result = self.run_batch(batch)
+                self.process_batch_result(batch, result)
+
+                # Reset AFD state for next iteration
+                self._afd_batchsize_attn = None
+                self._afd_req_ids = None
+            else:
+                self.self_check_during_idle()
+
+            self.last_batch = batch
+
+    def _afd_process_input_requests(self, recv_reqs):
+        """Process input requests with AFD awareness (S1, S4)."""
+        from sglang.srt.layers.afd import afd_is_attn
+        from sglang.srt.managers.io_struct import AFDReqInput
+
+        for recv_req in recv_reqs:
+            if isinstance(recv_req, AFDReqInput):
+                self._afd_batchsize_attn = recv_req.batch_size
+                self._afd_forward_mode = recv_req.forward_mode
+                self._afd_req_ids = recv_req.req_ids
+                continue
+
+            # Attn side: forward work requests to FFN
+            if afd_is_attn() and self.afd_send_to_ffn is not None:
+                from sglang.srt.managers.io_struct import (
+                    TokenizedEmbeddingReqInput,
+                    TokenizedGenerateReqInput,
+                )
+
+                if isinstance(
+                    recv_req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)
+                ):
+                    self.afd_send_to_ffn.send_pyobj(recv_req)
+
+        self.process_input_requests(recv_reqs)
 
     @DynamicGradMode()
     def event_loop_overlap(self):
@@ -3267,10 +3423,14 @@ class SenderWrapper:
 
 def dispatch_event_loop(scheduler: Scheduler):
     # Dispatch to the appropriate event loop based on the disaggregation mode
+    from sglang.srt.layers.afd import afd_is_attn, afd_is_ffn
+
     server_args = scheduler.server_args
     disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
     if disaggregation_mode == DisaggregationMode.NULL:
-        if scheduler.enable_pdmux:
+        if afd_is_attn() or afd_is_ffn():
+            scheduler.event_loop_afd()
+        elif scheduler.enable_pdmux:
             scheduler.event_loop_pdmux()
         elif server_args.pp_size > 1:
             scheduler.event_loop_pp()
@@ -3279,14 +3439,18 @@ def dispatch_event_loop(scheduler: Scheduler):
         else:
             scheduler.event_loop_normal()
     elif disaggregation_mode == DisaggregationMode.PREFILL:
-        if server_args.pp_size > 1:
+        if afd_is_attn() or afd_is_ffn():
+            scheduler.event_loop_afd_disagg_prefill()
+        elif server_args.pp_size > 1:
             scheduler.event_loop_pp_disagg_prefill()
         elif scheduler.enable_overlap:
             scheduler.event_loop_overlap_disagg_prefill()
         else:
             scheduler.event_loop_normal_disagg_prefill()
     elif disaggregation_mode == DisaggregationMode.DECODE:
-        if server_args.pp_size > 1:
+        if afd_is_attn() or afd_is_ffn():
+            scheduler.event_loop_afd_disagg_decode()
+        elif server_args.pp_size > 1:
             scheduler.event_loop_pp_disagg_decode()
         elif scheduler.enable_overlap:
             scheduler.event_loop_overlap_disagg_decode()

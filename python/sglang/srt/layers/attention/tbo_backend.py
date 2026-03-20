@@ -189,6 +189,52 @@ class TboAttnBackend(AttentionBackend):
         return self.primary.get_indexer_metadata(layer_id, forward_batch)
 
 
+class AfdAttnBackend(AttentionBackend):
+    """Attention backend wrapper for AFD with m micro-batch children."""
+
+    def __init__(self, primary: AttentionBackend, children: List[AttentionBackend]):
+        super().__init__()
+        self.primary = primary
+        self.children = children
+
+    @classmethod
+    def init_new(cls, creator: Callable[[], AttentionBackend], m: int = 2):
+        return cls(
+            primary=creator(),
+            children=[creator() for _ in range(m)],
+        )
+
+    def init_forward_metadata(self, forward_batch: "ForwardBatch"):
+        self.primary.init_forward_metadata(forward_batch=forward_batch)
+        if forward_batch.afd_children is not None:
+            for child_backend, child_batch in zip(
+                self.children, forward_batch.afd_children, strict=True
+            ):
+                if child_batch.batch_size > 0:
+                    child_backend.init_forward_metadata(forward_batch=child_batch)
+
+    def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
+        self.primary.init_cuda_graph_state(max_bs=max_bs, max_num_tokens=max_num_tokens)
+
+    def init_forward_metadata_capture_cuda_graph(self, *args, **kwargs):
+        self.primary.init_forward_metadata_capture_cuda_graph(*args, **kwargs)
+
+    def init_forward_metadata_replay_cuda_graph(self, *args, **kwargs):
+        self.primary.init_forward_metadata_replay_cuda_graph(*args, **kwargs)
+
+    def get_cuda_graph_seq_len_fill_value(self):
+        return self.primary.get_cuda_graph_seq_len_fill_value()
+
+    def forward_extend(self, *args, **kwargs):
+        return self.primary.forward_extend(*args, **kwargs)
+
+    def forward_decode(self, *args, **kwargs):
+        return self.primary.forward_decode(*args, **kwargs)
+
+    def get_indexer_metadata(self, layer_id: int, forward_batch: "ForwardBatch"):
+        return self.primary.get_indexer_metadata(layer_id, forward_batch)
+
+
 def _init_forward_metadata_cuda_graph_split(
     fn_name: str,
     seq_slice: slice,

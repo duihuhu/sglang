@@ -1617,6 +1617,36 @@ class DeepseekV2DecoderLayer(nn.Module):
                 qkv_latent_func=self.self_attn.prepare_qkv_latent,
             )
 
+        # AFD: inject communicator wrapper and proxy modules
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        AFDDecoderLayerMixin._afd_init(self)
+
+    def forward_afd_A(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_A(
+            self, positions, hidden_states, forward_batch, residual
+        )
+
+    def forward_afd_F(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_F(
+            self, hidden_states, forward_batch, residual
+        )
+
     def _is_layer_sparse(self, layer_id: int, is_nextn: bool) -> bool:
         return is_nextn or (
             self.config.n_routed_experts is not None
@@ -1976,6 +2006,29 @@ class DeepseekV2Model(nn.Module):
                 scaling_beta=self.llama_4_scaling_config["beta"],
                 positions=positions,
             )
+
+        if getattr(forward_batch, "can_run_afd_overlap", False):
+            from sglang.srt.layers.afd import model_forward_afd
+            from sglang.srt.layers.communicator import ScatterMode
+
+            hidden_states, residual = model_forward_afd(
+                layers=self.layers,
+                positions=positions,
+                forward_batch=forward_batch,
+                hidden_states=hidden_states,
+                residual=residual,
+                input_data_scatter_mode=ScatterMode.model_input_output(),
+            )
+            if not self.pp_group.is_last_rank:
+                return PPProxyTensors(
+                    {"hidden_states": hidden_states, "residual": residual}
+                )
+            if hidden_states.shape[0] != 0:
+                if residual is None:
+                    hidden_states = self.norm(hidden_states)
+                else:
+                    hidden_states, _ = self.norm(hidden_states, residual)
+            return hidden_states
 
         normal_start_layer = self.start_layer
         normal_end_layer = self.end_layer

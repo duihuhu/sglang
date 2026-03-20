@@ -406,6 +406,12 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     tbo_padded_len: Optional[int] = None
     tbo_children: Optional[List[ForwardBatch]] = None
 
+    # For AFD (Attention-FFN Disaggregation) overlap
+    afd_split_seq_index: Optional[List[int]] = None
+    afd_parent_token_range: Optional[Tuple[int, int]] = None
+    afd_children: Optional[List[ForwardBatch]] = None
+    can_run_afd_overlap: bool = False
+
     # For matryoshka embeddings
     dimensions: Optional[list[int]] = None
 
@@ -464,6 +470,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             input_embeds=batch.input_embeds,
             token_type_ids=batch.token_type_ids,
             tbo_split_seq_index=batch.tbo_split_seq_index,
+            afd_split_seq_index=batch.afd_split_seq_index,
             dimensions=batch.dimensions,
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
             rids=[req.rid for req in batch.reqs],
@@ -584,6 +591,14 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 model_runner.lora_manager.fetch_new_loras(set(ret.lora_ids))
 
             model_runner.lora_manager.prepare_lora_batch(ret)
+
+        # AFD overlap preparation (uses dedicated afd_split_seq_index field)
+        from sglang.srt.layers.afd import get_afd_perspective
+
+        if get_afd_perspective() is not None:
+            from sglang.srt.batch_overlap.afd_overlap import AfdForwardBatchPreparer
+
+            AfdForwardBatchPreparer.prepare(ret)
 
         return ret
 

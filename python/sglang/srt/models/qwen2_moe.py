@@ -524,6 +524,36 @@ class Qwen2MoeDecoderLayer(nn.Module):
             allow_reduce_scatter=True,
         )
 
+        # AFD: inject communicator wrapper and proxy modules
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        AFDDecoderLayerMixin._afd_init(self)
+
+    def forward_afd_A(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_A(
+            self, positions, hidden_states, forward_batch, residual
+        )
+
+    def forward_afd_F(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_F(
+            self, hidden_states, forward_batch, residual
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -641,7 +671,18 @@ class Qwen2MoeModel(nn.Module):
             residual = pp_proxy_tensors["residual"]
 
         aux_hidden_states = []
-        if forward_batch.can_run_tbo:
+        if getattr(forward_batch, "can_run_afd_overlap", False):
+            from sglang.srt.layers.afd import model_forward_afd
+
+            hidden_states, residual = model_forward_afd(
+                layers=self.layers,
+                positions=positions,
+                forward_batch=forward_batch,
+                hidden_states=hidden_states,
+                residual=residual,
+                input_data_scatter_mode=ScatterMode.model_input_output(),
+            )
+        elif forward_batch.can_run_tbo:
             hidden_states, residual = model_forward_maybe_tbo(
                 layers=self.layers,
                 enable_tbo=True,
@@ -800,6 +841,11 @@ class Qwen2MoeForCausalLM(nn.Module):
         return self.model.end_layer
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        from sglang.srt.layers.afd import get_afd_perspective
+        from sglang.srt.layers.afd_mixin import AFDWeightFilter
+
+        afd_perspective = get_afd_perspective()
+
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -818,6 +864,10 @@ class Qwen2MoeForCausalLM(nn.Module):
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
+            if afd_perspective is not None and not AFDWeightFilter.should_load(
+                name, afd_perspective
+            ):
+                continue
             layer_id = get_layer_id(name)
             if (
                 layer_id is not None

@@ -273,6 +273,37 @@ class Qwen3DecoderLayer(nn.Module):
             post_attention_layernorm=self.post_attention_layernorm,
         )
 
+        # AFD: inject communicator wrapper and proxy modules
+        self.layer_id = layer_id
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        AFDDecoderLayerMixin._afd_init(self)
+
+    def forward_afd_A(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_A(
+            self, positions, hidden_states, forward_batch, residual
+        )
+
+    def forward_afd_F(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_F(
+            self, hidden_states, forward_batch, residual
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -335,6 +366,70 @@ class Qwen3Model(Qwen2Model):
             decoder_layer_type=Qwen3DecoderLayer,
             alt_stream=alt_stream,
         )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        input_embeds: torch.Tensor = None,
+        pp_proxy_tensors=None,
+    ):
+        if self.pp_group.is_first_rank:
+            if input_embeds is None:
+                hidden_states = self.embed_tokens(input_ids)
+            else:
+                hidden_states = input_embeds
+            residual = None
+        else:
+            assert pp_proxy_tensors is not None
+            hidden_states = pp_proxy_tensors["hidden_states"]
+            residual = pp_proxy_tensors["residual"]
+
+        aux_hidden_states = []
+        if getattr(forward_batch, "can_run_afd_overlap", False):
+            from sglang.srt.layers.afd import model_forward_afd
+            from sglang.srt.layers.communicator import ScatterMode
+
+            hidden_states, residual = model_forward_afd(
+                layers=self.layers,
+                positions=positions,
+                forward_batch=forward_batch,
+                hidden_states=hidden_states,
+                residual=residual,
+                input_data_scatter_mode=ScatterMode.model_input_output(),
+            )
+        else:
+            for i in range(self.start_layer, self.end_layer):
+                if i in self.layers_to_capture:
+                    aux_hidden_states.append(
+                        hidden_states + residual
+                        if residual is not None
+                        else hidden_states
+                    )
+                layer = self.layers[i]
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    forward_batch,
+                    residual,
+                )
+        if not self.pp_group.is_last_rank:
+            from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
+
+            return PPProxyTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+        else:
+            if hidden_states.shape[0] != 0:
+                if residual is None:
+                    hidden_states = self.norm(hidden_states)
+                else:
+                    hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) == 0:
+            return hidden_states
+        return hidden_states, aux_hidden_states
 
 
 class Qwen3ForCausalLM(nn.Module):

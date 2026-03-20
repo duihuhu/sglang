@@ -1849,6 +1849,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             self.decode_attn_backend = self.decode_attn_backend_group[0]
         elif self.server_args.enable_two_batch_overlap and not self.is_draft_worker:
             self.attn_backend = TboAttnBackend.init_new(self._get_attention_backend)
+        elif self.server_args.afd_perspective is not None:
+            from sglang.srt.layers.afd import get_afd_micro_batch
+            from sglang.srt.layers.attention.tbo_backend import AfdAttnBackend
+
+            m = get_afd_micro_batch()
+            self.attn_backend = AfdAttnBackend.init_new(
+                self._get_attention_backend, m=m
+            )
         else:
             self.attn_backend = self._get_attention_backend()
 

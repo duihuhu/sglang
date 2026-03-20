@@ -688,6 +688,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -764,6 +766,30 @@ class Qwen3MoeDecoderLayer(nn.Module):
             post_attention_layernorm=self.post_attention_layernorm,
             allow_reduce_scatter=True,
             is_last_layer=(self.layer_id == self.config.num_hidden_layers - 1),
+        )
+
+        # AFD: inject communicator wrapper and proxy modules
+        AFDDecoderLayerMixin._afd_init(self)
+
+    def forward_afd_A(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return AFDDecoderLayerMixin.forward_afd_A(
+            self, positions, hidden_states, forward_batch, residual
+        )
+
+    def forward_afd_F(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return AFDDecoderLayerMixin.forward_afd_F(
+            self, hidden_states, forward_batch, residual
         )
 
     def forward(
@@ -1034,6 +1060,11 @@ class Qwen3MoeForCausalLM(nn.Module):
             self.model.set_eagle3_layers_to_capture([val + 1 for val in layer_ids])
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        from sglang.srt.layers.afd import get_afd_perspective
+        from sglang.srt.layers.afd_mixin import AFDWeightFilter
+
+        afd_perspective = get_afd_perspective()
+
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -1054,6 +1085,12 @@ class Qwen3MoeForCausalLM(nn.Module):
         params_dict = dict(self.named_parameters())
 
         for name, loaded_weight in weights:
+            # AFD: skip weights not needed by this perspective
+            if afd_perspective is not None and not AFDWeightFilter.should_load(
+                name, afd_perspective
+            ):
+                continue
+
             layer_id = get_layer_id(name)
             if (
                 layer_id is not None

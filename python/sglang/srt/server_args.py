@@ -627,6 +627,14 @@ class ServerArgs:
     enable_two_batch_overlap: bool = False
     enable_single_batch_overlap: bool = False
     tbo_token_distribution_threshold: float = 0.48
+
+    # For AF disaggregation (AFD)
+    afd_perspective: Optional[str] = None
+    afd_micro_batch: int = 3
+    afd_attn_ratio: float = 0.5
+    afd_attn_tp: Optional[int] = None
+    afd_ffn_tp: Optional[int] = None
+
     enable_torch_compile: bool = False
     disable_piecewise_cuda_graph: bool = False
     enforce_piecewise_cuda_graph: bool = False
@@ -814,6 +822,9 @@ class ServerArgs:
 
         # Handle Encoder disaggregation.
         self._handle_encoder_disaggregation()
+
+        # Handle AF disaggregation.
+        self._handle_afd()
 
         # Validate tokenizer settings.
         self._handle_tokenizer_batching()
@@ -3133,6 +3144,21 @@ class ServerArgs:
                 f"Model type {model_arch} is not supported for encoder disaggregation, only Qwen models are supported for now."
             )
 
+    def _handle_afd(self):
+        from sglang.srt.layers.afd_type import AFDPerspective
+
+        if self.afd_perspective is not None:
+            if self.afd_perspective == "attn":
+                self.afd_perspective = AFDPerspective.AFD_PERSPECTIVE_ATTN
+            elif self.afd_perspective == "ffn":
+                self.afd_perspective = AFDPerspective.AFD_PERSPECTIVE_FFN
+            else:
+                raise ValueError(
+                    f"Invalid --afd-perspective: {self.afd_perspective}. Must be 'attn' or 'ffn'."
+                )
+            if self.afd_micro_batch < 1:
+                raise ValueError("--afd-micro-batch must be >= 1.")
+
     def _validate_ib_devices(self, device_str: str) -> Optional[str]:
         """
         Validate IB devices before passing to mooncake.
@@ -5272,6 +5298,40 @@ class ServerArgs:
             default=ServerArgs.tbo_token_distribution_threshold,
             help="The threshold of token distribution between two batches in micro-batch-overlap, determines whether to two-batch-overlap or two-chunk-overlap. Set to 0 denote disable two-chunk-overlap.",
         )
+        # AF disaggregation args
+        parser.add_argument(
+            "--afd-perspective",
+            type=str,
+            choices=["attn", "ffn"],
+            default=ServerArgs.afd_perspective,
+            help="Set the AF disaggregation perspective (attn or ffn). Default: disabled.",
+        )
+        parser.add_argument(
+            "--afd-micro-batch",
+            type=int,
+            default=ServerArgs.afd_micro_batch,
+            help="Number of micro-batches for AFD overlap pipeline. Must be >= 1.",
+        )
+        parser.add_argument(
+            "--afd-attn-ratio",
+            type=float,
+            default=ServerArgs.afd_attn_ratio,
+            help="Ratio of tokens allocated to Attn vs FFN microbatch (G4 optimization). "
+            "0.5 = symmetric split. Lower values give more tokens to FFN.",
+        )
+        parser.add_argument(
+            "--afd-attn-tp",
+            type=int,
+            default=ServerArgs.afd_attn_tp,
+            help="TP size for the Attn side (heterogeneous TP). Defaults to --tp.",
+        )
+        parser.add_argument(
+            "--afd-ffn-tp",
+            type=int,
+            default=ServerArgs.afd_ffn_tp,
+            help="TP size for the FFN side (heterogeneous TP). Defaults to --tp.",
+        )
+
         parser.add_argument(
             "--enable-torch-compile",
             action="store_true",
