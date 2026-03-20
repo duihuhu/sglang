@@ -18,8 +18,10 @@ from sglang.srt.layers.afd import (
 )
 from sglang.srt.layers.afd_type import AFDPerspective
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.utils import is_npu
 
 logger = logging.getLogger(__name__)
+_is_npu = is_npu()
 
 
 class AFDDecoderLayerMixin:
@@ -56,6 +58,21 @@ class AFDDecoderLayerMixin:
             perspective=perspective,
             layer_id=getattr(self, "layer_id", -1),
         )
+
+        from sglang.srt.server_args import get_global_server_args
+
+        server_args = get_global_server_args()
+        if getattr(server_args, "enable_torch_compile", False):
+            self._run_attn = torch.compile(
+                self._run_attn, dynamic=True, disable=_is_npu
+            )
+            self._run_mlp = torch.compile(
+                self._run_mlp, dynamic=True, disable=_is_npu
+            )
+            logger.info(
+                "AFD layer %d: torch.compile enabled for _run_attn and _run_mlp",
+                getattr(self, "layer_id", -1),
+            )
 
     # --- Overridable hooks for model-specific Attention / MLP interfaces ---
 

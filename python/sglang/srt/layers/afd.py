@@ -720,6 +720,7 @@ class AsyncTensorCommunicator:
         self._pending_recv: Optional[torch.Tensor] = None
         self._recv_event: Optional[torch.cuda.Event] = None
 
+    @torch.compiler.disable()
     def send_async(self, x: torch.Tensor):
         if self.comm_stream is not None:
             with torch.cuda.stream(self.comm_stream):
@@ -727,6 +728,7 @@ class AsyncTensorCommunicator:
         else:
             self.inner.send_tensor(x)
 
+    @torch.compiler.disable()
     def recv_start(self):
         if self.comm_stream is not None:
             with torch.cuda.stream(self.comm_stream):
@@ -736,6 +738,7 @@ class AsyncTensorCommunicator:
             self._pending_recv = self.inner.recv_tensor()
             self._recv_event = None
 
+    @torch.compiler.disable()
     def recv_wait(self) -> torch.Tensor:
         if self._recv_event is not None:
             self._recv_event.synchronize()
@@ -744,9 +747,11 @@ class AsyncTensorCommunicator:
         self._recv_event = None
         return result
 
+    @torch.compiler.disable()
     def send_sync(self, x: torch.Tensor):
         self.inner.send_tensor(x)
 
+    @torch.compiler.disable()
     def recv_sync(self) -> torch.Tensor:
         return self.inner.recv_tensor()
 
@@ -1053,6 +1058,7 @@ class AFDCommunicator:
             hidden_states, residual, forward_batch, **kwargs
         )
 
+    @torch.compiler.disable()
     def prepare_mlp(
         self,
         hidden_states: torch.Tensor,
@@ -1074,6 +1080,7 @@ class AFDCommunicator:
         comm.send_async(hidden_states)
         return hidden_states, residual
 
+    @torch.compiler.disable()
     def postprocess_layer(
         self,
         hidden_states: torch.Tensor,
@@ -1098,6 +1105,7 @@ class AFDCommunicator:
         )
         return hidden_states, residual
 
+    @torch.compiler.disable()
     def postprocess_layer_start_recv(self):
         """R4: Issue non-blocking recv_start for the F→A result.
 

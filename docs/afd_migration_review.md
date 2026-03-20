@@ -95,6 +95,7 @@ AFD 将 Transformer 每一层拆分为 Attention（A）和 FFN（F）两部分�
 |------|------|------|
 | Phase 6 | `--afd-attn-tp`/`--afd-ffn-tp` + `ShardedParallelCommunicator`（分片并行 + metadata 传递 + padding 截断） | `server_args.py` + `afd.py` |
 | F9 | `--afd-grouped-stepmesh` + GCD-based 分组 StepMesh（per-group DMLC + NVLink all_gather + stride 去重） | `server_args.py` + `afd.py` |
+| F2-A | `torch.compile(dynamic=True)` 编译 `_run_attn` / `_run_mlp` + AFD 通信方法 `@torch.compiler.disable()` | `afd_mixin.py` + `afd.py` |
 
 ### PD+AFD 独立控制
 
@@ -437,7 +438,7 @@ python -m sglang.launch_server \
 | 编号 | 描述 | 状态 |
 |------|------|------|
 | F1 | StepMesh N:M 双向分片通信（详见下方） | **已实现** |
-| F2 | 需要 `--disable-cuda-graph --disable-overlap-schedule` | 待实现 |
+| F2 | 需要 `--disable-cuda-graph --disable-overlap-schedule`；Phase A（`torch.compile` 逐 stage 编译）已实现，Phase B（`reduce-overhead` CUDA Graph）待实现 | **Phase A 已实现** |
 | F3 | TBO 与 AFD 互斥，不能同时启用 | 设计决策（可后续扩展） |
 | F4 | 自动 profiling + `afd_attn_ratio` 自适应调参 | 待实现 |
 | F6 | DeepSeek-V2 `load_weights` 添加 AFDWeightFilter（generator 包装过滤） | **已修复** |
@@ -657,12 +658,62 @@ F→A = NH × (TP_A / gcd)
 
 ---
 
-## 十、总结：未完成任务与影响评估
+## 十、总结：代码 Review 结果与未完成任务
+
+### 本轮代码 Review（全部改动文件）
+
+#### 审查范围
+
+| 文件 | 改动内容 |
+|------|---------|
+| `server_args.py` | `afd_grouped_stepmesh` 字段 + CLI + `_handle_afd` 验证 |
+| `afd.py` — `StepMeshTensorCommunicator` | `__init__` GCD 分组 + `_start_stepmesh_scheduler` per-group + `attn_send`/`ffn_recv`/`attn_recv` 分组路径 |
+| `afd.py` — `AsyncTensorCommunicator` | 5 个方法加 `@torch.compiler.disable()` |
+| `afd.py` — `AFDCommunicator` | 3 个方法加 `@torch.compiler.disable()` |
+| `afd_mixin.py` | `_afd_init` 中 `torch.compile` `_run_attn`/`_run_mlp` |
+
+#### 发现的问题
+
+| 编号 | 严重度 | 文件 | 问题 | 影响 |
+|------|--------|------|------|------|
+| R1 | **低** | `afd_mixin.py` | `torch.compile` 在 Proxy 侧（FFN 编译 `_run_attn` = `AFDProxyAttention` no-op，Attn 编译 `_run_mlp` = `AFDProxyMLP` no-op）浪费少量编译时间 | 首次 warmup 多 ~100ms，运行时无影响 |
+| R2 | **低** | `afd.py` | `AFDCommunicator.prepare_attn` 和 `prepare_attn_and_capture_last_layer_outputs` 未加 `@torch.compiler.disable()`，与 `prepare_mlp`/`postprocess_layer` 不一致 | Phase A 不受影响（不在 compile 范围内）；Phase B 时需补充 |
+| F9-1 | **低** | `afd.py` `ffn_recv` | FFN 处理 padded tensor（最多 TP_A-1 个零 token 经过 MLP） | batch>100 时 <1% 开销 |
+| F9-2 | **低** | `afd.py` `_start_stepmesh_scheduler` | per-group scheduler flag 技术上冗余 | 防御性编程，不影响正确性 |
+| F9-3 | **低** | `afd.py` `_start_stepmesh_scheduler` | 分组路径 force-set `DMLC_PS_ROOT_PORT` 与非分组 `_env_def` 语义不同 | 行为正确，仅风格差异 |
+
+#### 已验证正确的部分
+
+| 检查项 | 状态 |
+|--------|------|
+| **F9 分组 StepMesh** | |
+| GCD 分组：4A:8F / 8A:4F / 6A:4F / 3A:2F / 4A:4F | OK |
+| `attn_send` push shard padding 仅 `_grouped` 模式 | OK |
+| `attn_send` pull buffer 基于 `effective_tokens` 匹配 `ffn_send` shard 大小 | OK |
+| `attn_send` key 增量 `1 + servers_per_group` / `1 + ffn_tp` | OK |
+| `ffn_recv` all_gather size == `tp_group.size()` | OK |
+| `ffn_recv` stride-select 去重正确 | OK |
+| `ffn_send` 无需改动：`n_workers` 自动正确 | OK |
+| `attn_recv` all_gather + stride-select + `[:original_num_tokens]` | OK |
+| per-group DMLC config + scheduler 启动 | OK |
+| `server_args.py` 验证逻辑 | OK |
+| 后向兼容：`_grouped=False` 代码路径不变 | OK |
+| `num_tokens=1` 极端 case | OK |
+| **F2-A torch.compile** | |
+| `_run_attn` / `_run_mlp` 编译只在 `enable_torch_compile=True` + AFD 模式下生效 | OK |
+| `@torch.compiler.disable()` 覆盖全部 AFD 通信方法（8 个） | OK |
+| `dynamic=True` 处理可变 batch size | OK |
+| `_is_npu` 检查与现有代码模式一致 | OK |
+| dynamo cache config 由已有 `set_torch_compile_config()` 处理 | OK |
+| Mixin `_run_attn` / `_run_mlp` 可被子类覆盖后正确编译 | OK |
+| Proxy 侧编译无害（no-op 编译后仍为 no-op） | OK |
+
+---
 
 ### 已完成任务一览
 
-| 编号 | 描述 | 完成轮次 |
-|------|------|---------|
+| 编号 | 描述 | 轮次 |
+|------|------|------|
 | F1 | StepMesh N:M 双向分片通信（任意 TP_A:TP_F） | 第一轮 |
 | F6 | DeepSeek-V2 `load_weights` 添加 `AFDWeightFilter` | 第一轮 |
 | F7 | `afd_prepare_overlap` 添加 `is_target_verify()` 处理 | 第一轮 |
@@ -670,56 +721,65 @@ F→A = NH × (TP_A / gcd)
 | G3 | RDMA 末尾 shard padding + 截断 | 第一轮 |
 | H1-H3 | StepMesh key 碰撞 / docstring / recv buffer 注册 | 第一轮 |
 | F9 | GCD-based 分组 StepMesh（`--afd-grouped-stepmesh`） | 本轮 |
+| F2-A | `torch.compile` 逐 stage 编译 + AFD 通信 `compiler.disable()` | 本轮 |
 | Phase 6 | 异构 TP（`ShardedParallelCommunicator` + StepMesh N:M） | 早期 |
 | Task 6 | PD + AFD 独立控制 | 早期 |
 | C1-C5, S1-S3, G3-G6, E1-E5 | 通信/调度/计算/工程化优化 | 早期 |
 
+---
+
 ### 未完成任务总表
 
-| 优先级 | 编号 | 描述 | 影响评估 | 复杂度 |
-|--------|------|------|---------|--------|
-| **P1** | **F2** | **CUDA Graph + overlap schedule 支持** | **严重**：当前必须 `--disable-cuda-graph --disable-overlap-schedule`，kernel launch overhead 导致 **20-40% 性能损失**，是 AFD 上生产的最大阻碍 | 高 |
-| **P2** | **F3** | **TBO + AFD 共存** | **中等**：TBO（Two-Batch Overlap）通过批次间 overlap 提升吞吐。AFD 与 TBO 互斥，导致无法利用 TBO 的 **10-20% 吞吐提升** | 高 |
-| P2 | F5 | Qwen2（Dense）AFD 支持 | **低**：Qwen2 DecoderLayer 不使用 `LayerCommunicator`，需要重构。Qwen2 为旧模型，生产中多用 Qwen3/MoE，影响面小 | 中 |
-| P3 | F4 | 自动 profiling + `afd_attn_ratio` 自适应 | **低**：手动设置 `--afd-attn-ratio` 可满足需求，自动调参为便利性优化，不影响正确性和峰值性能 | 中 |
-| P3 | G6 | 异构路径 buffer 复用 | **极低**：PyTorch caching allocator 已处理重复分配，性能影响 <1%。主要改善长期运行的内存碎片化 | 低 |
-| P4 | F9-opt-1 | 分组 StepMesh: custom process sub-groups | **低**：消除 stride>1 时冗余 NVLink 传输，性能影响 1-5%。仅混合组（如 6A:4F）时有意义 | 中 |
-| P4 | F9-opt-2 | 分组 StepMesh: grouped buffer pool | **极低**：性能影响 <1%，改善内存友好度 | 低 |
-| P4 | F9-opt-3 | 分组 StepMesh: 避免 padding tokens 经过 MLP | **极低**：典型 batch（>100 tokens）下影响 <1%，仅极小 batch（<20）时有意义 | 低 |
+| 优先级 | 编号 | 描述 | 影响 | 复杂度 | 前置依赖 |
+|--------|------|------|------|--------|---------|
+| **P1** | **F2-B** | **CUDA Graph（reduce-overhead 模式）** | ~2-4% 额外提升 | 中（1-2 周） | F2-A ✓，需 microbatch padding + stream 同步 |
+| **P2** | **F3** | **TBO + AFD 共存** | 10-20% 吞吐提升 | 高（3-4 周） | 无 |
+| P2 | F5 | Qwen2（Dense）AFD 支持 | Qwen2 模型可用 | 中（1 周） | 需重构 Qwen2DecoderLayer |
+| P3 | F4 | 自动 profiling + `afd_attn_ratio` 自适应 | 便利性 | 中（1 周） | 无 |
+| P3 | G6 | 异构路径 buffer 复用 | <1% | 低（2 天） | 无 |
+| P4 | F9-opt-1 | 分组 StepMesh: custom sub-groups | 1-5%（仅 stride>1） | 中（3-5 天） | F9 ✓ |
+| P4 | F9-opt-2 | 分组 StepMesh: grouped buffer pool | <1% | 低（2 天） | F9 ✓ |
+| P4 | F9-opt-3 | 分组 StepMesh: 避免 padding tokens 经过 MLP | <1%（典型负载） | 低（3 天） | F9 ✓ |
+| P4 | R1 | 跳过 Proxy 侧的 torch.compile | 减少 ~100ms warmup | 低（0.5 天） | F2-A ✓ |
+| P4 | R2 | `prepare_attn` 补充 `@torch.compiler.disable()` | Phase B 前置 | 低（0.5 天） | F2-B 前需完成 |
 
-### 影响分级说明
+---
+
+### 影响分级
 
 ```
-严重（>20% 性能）: F2
-中等（10-20%）:     F3
+中等（5-20%）:      F3（10-20%），F2-B（2-4%）
 低（1-5%）:         F5, F4, F9-opt-1
-极低（<1%）:        G6, F9-opt-2, F9-opt-3
+极低（<1%）:        G6, F9-opt-2, F9-opt-3, R1, R2
 ```
 
 ### 建议执行路径
 
 ```
-阶段 1（上生产必须）:
-  F2 — CUDA Graph 支持 → 消除 20-40% kernel launch overhead
+阶段 1（已完成 ✓）:
+  F9    — 分组 StepMesh → 跨节点流量 12NH→3NH
+  F2-A  — torch.compile 逐 stage → kernel fusion ~5-8%
 
-阶段 2（提升吞吐）:
-  F3 — TBO + AFD 共存 → 解锁 batch overlap 的 10-20% 吞吐提升
+阶段 2（提升吞吐，下一优先级）:
+  F3    — TBO + AFD 共存 → 10-20% 吞吐提升（最大未解锁收益）
+  F2-B  — reduce-overhead CUDA Graph → 额外 ~2-4%（含 R2 前置）
 
-阶段 3（扩展模型 & 便利性）:
-  F5 — Qwen2 Dense AFD（按需求优先级）
-  F4 — 自动 profiling（便利性）
+阶段 3（扩展 & 便利性）:
+  F5    — Qwen2 Dense AFD
+  F4    — 自动 profiling
 
-阶段 4（锦上添花，可长期推进）:
-  G6, F9-opt-1/2/3 — 性能 <5%，非关键路径
+阶段 4（锦上添花）:
+  G6, F9-opt-1/2/3, R1 — 合计 <5%
 ```
 
 ### 当前 AFD 功能完整性
 
 | 维度 | 状态 | 说明 |
 |------|------|------|
-| 通信层 | **完整** | ZMQ（同构+异构）+ StepMesh（同构+异构+分组），支持任意 N:M |
+| 通信层 | **完整** | ZMQ（同构+异构）+ StepMesh（同构+异构+分组），任意 N:M |
 | 调度层 | **完整** | microbatch 切分、batch 对齐、PD 独立控制 |
 | 计算层 | **完整** | 流水线 overlap、非对称切分、预分配 output |
+| 编译优化 | **Phase A 完成** | `torch.compile` kernel fusion；Phase B（CUDA Graph）待实现 |
 | 模型支持 | **基本完整** | Qwen3-MoE/Qwen2-MoE/DeepSeek-V2/V3/Qwen3(Dense)，缺 Qwen2(Dense) |
 | 工程化 | **完整** | Mixin 抽象、权重过滤、独立文件、超时处理 |
-| **性能** | **受限** | 核心功能正确，但 F2（CUDA Graph）未解决前性能损失 20-40% |
+| **最大未解锁收益** | **F3** | TBO + AFD 共存（10-20%），是当前最有价值的待办 |
