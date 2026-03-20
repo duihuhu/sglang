@@ -63,15 +63,18 @@ class AFDDecoderLayerMixin:
 
         server_args = get_global_server_args()
         if getattr(server_args, "enable_torch_compile", False):
-            self._run_attn = torch.compile(
-                self._run_attn, dynamic=True, disable=_is_npu
-            )
-            self._run_mlp = torch.compile(
-                self._run_mlp, dynamic=True, disable=_is_npu
-            )
+            if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN:
+                self._run_attn = torch.compile(
+                    self._run_attn, dynamic=True, disable=_is_npu
+                )
+            elif perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
+                self._run_mlp = torch.compile(
+                    self._run_mlp, dynamic=True, disable=_is_npu
+                )
             logger.info(
-                "AFD layer %d: torch.compile enabled for _run_attn and _run_mlp",
+                "AFD layer %d: torch.compile enabled for %s",
                 getattr(self, "layer_id", -1),
+                "_run_attn" if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN else "_run_mlp",
             )
 
     # --- Overridable hooks for model-specific Attention / MLP interfaces ---

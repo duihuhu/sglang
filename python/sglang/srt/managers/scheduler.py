@@ -323,6 +323,11 @@ class Scheduler(
         self.enable_lora_overlap_loading = server_args.enable_lora_overlap_loading
         self.max_loras_per_batch = server_args.max_loras_per_batch
         self.enable_overlap = not server_args.disable_overlap_schedule
+        self.afd_overlap_enabled = getattr(
+            server_args, "afd_enable_overlap_schedule", False
+        )
+        if self.afd_overlap_enabled:
+            self.enable_overlap = True
         self.enable_pdmux = server_args.enable_pdmux
         self.skip_tokenizer_init = server_args.skip_tokenizer_init
         self.stream_interval = server_args.stream_interval
@@ -1358,6 +1363,15 @@ class Scheduler(
 
             batch.afd_split_seq_index = split_indices
 
+        # F3: CPU/GPU overlap scheduling support
+        afd_overlap = self.afd_overlap_enabled
+        if afd_overlap:
+            self.result_queue: Deque = deque()
+
+        def _pop_and_process():
+            tmp_batch, tmp_result = self.result_queue.popleft()
+            self.process_batch_result(tmp_batch, tmp_result)
+
         while True:
             recv_reqs = self.recv_requests()
 
@@ -1375,6 +1389,13 @@ class Scheduler(
 
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
+            disable_overlap_for_batch = False
+
+            # F3: overlap — process last batch immediately if overlap disabled for this batch
+            if afd_overlap:
+                disable_overlap_for_batch = self.is_disable_overlap_for_batch(batch)
+                if disable_overlap_for_batch:
+                    _pop_and_process()
 
             if batch:
                 # Attn side: notify FFN about current batch
@@ -1391,14 +1412,32 @@ class Scheduler(
                     self.afd_send_to_ffn.send_pyobj(afd_req)
 
                 _prepare_afd_overlap(batch)
-                result = self.run_batch(batch)
-                self.process_batch_result(batch, result)
+                batch_result = self.run_batch(batch)
+
+                if afd_overlap:
+                    self.result_queue.append((batch.copy(), batch_result))
+                else:
+                    self.process_batch_result(batch, batch_result)
 
                 # Reset AFD state for next iteration
                 self._afd_batchsize_attn = None
                 self._afd_req_ids = None
             else:
-                self.self_check_during_idle()
+                batch_result = None
+                if afd_overlap:
+                    self.cancel_bubble_timer()
+                else:
+                    self.self_check_during_idle()
+
+            # F3: overlap — process last batch (while GPU runs current batch)
+            if afd_overlap:
+                if self.last_batch:
+                    if not disable_overlap_for_batch:
+                        _pop_and_process()
+                elif batch is None:
+                    self.self_check_during_idle()
+                if self.is_generation:
+                    self.launch_batch_sample_if_needed(batch_result)
 
             self.last_batch = batch
 

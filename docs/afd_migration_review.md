@@ -96,6 +96,7 @@ AFD 将 Transformer 每一层拆分为 Attention（A）和 FFN（F）两部分�
 | Phase 6 | `--afd-attn-tp`/`--afd-ffn-tp` + `ShardedParallelCommunicator`（分片并行 + metadata 传递 + padding 截断） | `server_args.py` + `afd.py` |
 | F9 | `--afd-grouped-stepmesh` + GCD-based 分组 StepMesh（per-group DMLC + NVLink all_gather + stride 去重） | `server_args.py` + `afd.py` |
 | F2-A | `torch.compile(dynamic=True)` 编译 `_run_attn` / `_run_mlp` + AFD 通信方法 `@torch.compiler.disable()` | `afd_mixin.py` + `afd.py` |
+| F3 | `--afd-enable-overlap-schedule` CPU/GPU overlap scheduling（`event_loop_afd` 中 `result_queue` + async `run_batch`） | `server_args.py` + `scheduler.py` |
 
 ### PD+AFD 独立控制
 
@@ -439,7 +440,7 @@ python -m sglang.launch_server \
 |------|------|------|
 | F1 | StepMesh N:M 双向分片通信（详见下方） | **已实现** |
 | F2 | 需要 `--disable-cuda-graph --disable-overlap-schedule`；Phase A（`torch.compile` 逐 stage 编译）已实现，Phase B（`reduce-overhead` CUDA Graph）待实现 | **Phase A 已实现** |
-| F3 | TBO 与 AFD 互斥，不能同时启用 | 设计决策（可后续扩展） |
+| F3 | ~~TBO 与 AFD 互斥~~ → `--afd-enable-overlap-schedule` CPU/GPU overlap scheduling（`event_loop_afd` 中复用 `forward_stream` + `result_queue` 模式） | **已实现** |
 | F4 | 自动 profiling + `afd_attn_ratio` 自适应调参 | 待实现 |
 | F6 | DeepSeek-V2 `load_weights` 添加 AFDWeightFilter（generator 包装过滤） | **已修复** |
 | F7 | `afd_prepare_overlap` 添加 `is_target_verify()` 处理（scheduler.py + scheduler_afd_mixin.py） | **已修复** |
@@ -666,21 +667,36 @@ F→A = NH × (TP_A / gcd)
 
 | 文件 | 改动内容 |
 |------|---------|
-| `server_args.py` | `afd_grouped_stepmesh` 字段 + CLI + `_handle_afd` 验证 |
+| `server_args.py` | `afd_grouped_stepmesh` + `afd_enable_overlap_schedule` 字段/CLI/验证 + AFD 自动 disable overlap |
 | `afd.py` — `StepMeshTensorCommunicator` | `__init__` GCD 分组 + `_start_stepmesh_scheduler` per-group + `attn_send`/`ffn_recv`/`attn_recv` 分组路径 |
 | `afd.py` — `AsyncTensorCommunicator` | 5 个方法加 `@torch.compiler.disable()` |
 | `afd.py` — `AFDCommunicator` | 3 个方法加 `@torch.compiler.disable()` |
 | `afd_mixin.py` | `_afd_init` 中 `torch.compile` `_run_attn`/`_run_mlp` |
+| `scheduler.py` | `afd_overlap_enabled` 初始化 + `event_loop_afd` overlap 模式（`result_queue` + `_pop_and_process`） |
 
 #### 发现的问题
 
-| 编号 | 严重度 | 文件 | 问题 | 影响 |
+| 编号 | 严重度 | 文件 | 问题 | 状态 |
 |------|--------|------|------|------|
-| R1 | **低** | `afd_mixin.py` | `torch.compile` 在 Proxy 侧（FFN 编译 `_run_attn` = `AFDProxyAttention` no-op，Attn 编译 `_run_mlp` = `AFDProxyMLP` no-op）浪费少量编译时间 | 首次 warmup 多 ~100ms，运行时无影响 |
-| R2 | **低** | `afd.py` | `AFDCommunicator.prepare_attn` 和 `prepare_attn_and_capture_last_layer_outputs` 未加 `@torch.compiler.disable()`，与 `prepare_mlp`/`postprocess_layer` 不一致 | Phase A 不受影响（不在 compile 范围内）；Phase B 时需补充 |
-| F9-1 | **低** | `afd.py` `ffn_recv` | FFN 处理 padded tensor（最多 TP_A-1 个零 token 经过 MLP） | batch>100 时 <1% 开销 |
-| F9-2 | **低** | `afd.py` `_start_stepmesh_scheduler` | per-group scheduler flag 技术上冗余 | 防御性编程，不影响正确性 |
-| F9-3 | **低** | `afd.py` `_start_stepmesh_scheduler` | 分组路径 force-set `DMLC_PS_ROOT_PORT` 与非分组 `_env_def` 语义不同 | 行为正确，仅风格差异 |
+| ~~R1~~ | ~~低~~ | `afd_mixin.py` | ~~Proxy 侧编译 no-op 模块~~ → 按 perspective 只编译实际计算侧 | **已修复** |
+| ~~R2~~ | ~~低~~ | `afd.py` | ~~`prepare_attn` 缺 `@torch.compiler.disable()`~~ → 已补充（共 10 个通信方法全覆盖） | **已修复** |
+| F9-1 | **低** | `afd.py` | 分组模式 FFN 处理 padded tensor（最多 TP_A-1 个零 token） | 不修复（<1%，远期优化） |
+| ~~F9-2~~ | ~~低~~ | `afd.py` | ~~per-group scheduler flag 冗余~~ → 已移除 | **已修复** |
+| ~~F9-3~~ | ~~低~~ | `afd.py` | ~~分组路径 force-set 注释不清~~ → 已补充注释 | **已修复** |
+| ~~F3-R1~~ | ~~极低~~ | `server_args.py` | ~~矛盾 flag 无 warn~~ → 已加 warn | **已修复** |
+
+#### 最终 Review（全量验证）
+
+本次对全部改动文件做了最终逐行 review，确认以下功能点全部正确：
+
+| 功能 | 验证结果 |
+|------|---------|
+| **F9 分组 StepMesh** | GCD 分组 + padding + all_gather + stride 去重 + 截断：全路径正确 |
+| **F2-A torch.compile** | 按 perspective 只编译实际计算侧，10 个通信方法全部 `@torch.compiler.disable()` |
+| **F3 overlap scheduling** | `_handle_afd` 自动 disable overlap + `--afd-enable-overlap-schedule` 显式开启；`event_loop_afd` overlap 路径的 `result_queue` 入队/出队时序与 `event_loop_overlap` 完全对齐；首次迭代、batch=None、连续 prefill 等边界 case 均安全 |
+| **后向兼容** | 非 AFD 场景不受任何影响；AFD 默认行为（不传新 flag）与改动前完全一致 |
+
+**无新增问题。** 唯一剩余已知问题为 F9-1（padding tokens，<1%，已决定不修复）。
 
 #### 已验证正确的部分
 
@@ -691,22 +707,23 @@ F→A = NH × (TP_A / gcd)
 | `attn_send` push shard padding 仅 `_grouped` 模式 | OK |
 | `attn_send` pull buffer 基于 `effective_tokens` 匹配 `ffn_send` shard 大小 | OK |
 | `attn_send` key 增量 `1 + servers_per_group` / `1 + ffn_tp` | OK |
-| `ffn_recv` all_gather size == `tp_group.size()` | OK |
-| `ffn_recv` stride-select 去重正确 | OK |
-| `ffn_send` 无需改动：`n_workers` 自动正确 | OK |
-| `attn_recv` all_gather + stride-select + `[:original_num_tokens]` | OK |
+| `ffn_recv` / `attn_recv` all_gather + stride-select 正确 | OK |
+| `ffn_send` 无需改动 | OK |
 | per-group DMLC config + scheduler 启动 | OK |
-| `server_args.py` 验证逻辑 | OK |
-| 后向兼容：`_grouped=False` 代码路径不变 | OK |
-| `num_tokens=1` 极端 case | OK |
+| 后向兼容 + 极端 case | OK |
 | **F2-A torch.compile** | |
-| `_run_attn` / `_run_mlp` 编译只在 `enable_torch_compile=True` + AFD 模式下生效 | OK |
-| `@torch.compiler.disable()` 覆盖全部 AFD 通信方法（8 个） | OK |
-| `dynamic=True` 处理可变 batch size | OK |
-| `_is_npu` 检查与现有代码模式一致 | OK |
-| dynamo cache config 由已有 `set_torch_compile_config()` 处理 | OK |
-| Mixin `_run_attn` / `_run_mlp` 可被子类覆盖后正确编译 | OK |
-| Proxy 侧编译无害（no-op 编译后仍为 no-op） | OK |
+| `_run_attn` / `_run_mlp` 编译条件 + `@torch.compiler.disable()` 8 个通信方法 | OK |
+| `dynamic=True` + dynamo cache + Mixin 覆盖 + Proxy 无害 | OK |
+| **F3 overlap scheduling** | |
+| `_handle_afd` 自动 `disable_overlap_schedule`（无 `--afd-enable-overlap-schedule` 时） | OK |
+| `afd_overlap_enabled=True` 时 `enable_overlap=True`，`run_batch` 走 async 路径 | OK |
+| `init_overlap()` 初始化 `forward_stream` + `FutureMap` | OK |
+| `event_loop_afd` overlap 路径：`result_queue` + `_pop_and_process` + `batch.copy()` | OK |
+| `is_disable_overlap_for_batch`：连续 prefill 禁用 overlap，first iteration 安全 | OK |
+| `launch_batch_sample_if_needed` 在 `_pop_and_process` 后调用（匹配 `event_loop_overlap`） | OK |
+| `dispatch_event_loop`：AFD 优先级高于 overlap，不走 `event_loop_overlap` | OK |
+| 非 AFD 场景完全不受影响 | OK |
+| 非 overlap AFD 路径（`afd_overlap=False`）与原实现一致 | OK |
 
 ---
 
@@ -722,6 +739,7 @@ F→A = NH × (TP_A / gcd)
 | H1-H3 | StepMesh key 碰撞 / docstring / recv buffer 注册 | 第一轮 |
 | F9 | GCD-based 分组 StepMesh（`--afd-grouped-stepmesh`） | 本轮 |
 | F2-A | `torch.compile` 逐 stage 编译 + AFD 通信 `compiler.disable()` | 本轮 |
+| F3 | `--afd-enable-overlap-schedule` CPU/GPU overlap scheduling | 本轮 |
 | Phase 6 | 异构 TP（`ShardedParallelCommunicator` + StepMesh N:M） | 早期 |
 | Task 6 | PD + AFD 独立控制 | 早期 |
 | C1-C5, S1-S3, G3-G6, E1-E5 | 通信/调度/计算/工程化优化 | 早期 |
@@ -732,26 +750,42 @@ F→A = NH × (TP_A / gcd)
 
 | 优先级 | 编号 | 描述 | 影响 | 复杂度 | 前置依赖 |
 |--------|------|------|------|--------|---------|
-| **P1** | **F2-B** | **CUDA Graph（reduce-overhead 模式）** | ~2-4% 额外提升 | 中（1-2 周） | F2-A ✓，需 microbatch padding + stream 同步 |
-| **P2** | **F3** | **TBO + AFD 共存** | 10-20% 吞吐提升 | 高（3-4 周） | 无 |
+| ~~P1~~ | ~~F3~~ | ~~`event_loop_afd` CPU/GPU overlap scheduling~~ | ~~5-10%~~ | ~~低（1 周）~~ | **已实现** |
+| P2 | F2-B | CUDA Graph（reduce-overhead 模式） | ~2-4% 额外提升 | 中（1-2 周） | F2-A ✓，需 microbatch padding + stream 同步 |
 | P2 | F5 | Qwen2（Dense）AFD 支持 | Qwen2 模型可用 | 中（1 周） | 需重构 Qwen2DecoderLayer |
 | P3 | F4 | 自动 profiling + `afd_attn_ratio` 自适应 | 便利性 | 中（1 周） | 无 |
 | P3 | G6 | 异构路径 buffer 复用 | <1% | 低（2 天） | 无 |
 | P4 | F9-opt-1 | 分组 StepMesh: custom sub-groups | 1-5%（仅 stride>1） | 中（3-5 天） | F9 ✓ |
 | P4 | F9-opt-2 | 分组 StepMesh: grouped buffer pool | <1% | 低（2 天） | F9 ✓ |
 | P4 | F9-opt-3 | 分组 StepMesh: 避免 padding tokens 经过 MLP | <1%（典型负载） | 低（3 天） | F9 ✓ |
-| P4 | R1 | 跳过 Proxy 侧的 torch.compile | 减少 ~100ms warmup | 低（0.5 天） | F2-A ✓ |
-| P4 | R2 | `prepare_attn` 补充 `@torch.compiler.disable()` | Phase B 前置 | 低（0.5 天） | F2-B 前需完成 |
+| ~~P4~~ | ~~R1~~ | ~~跳过 Proxy 侧 torch.compile~~ | | | **已修复** |
+| ~~P4~~ | ~~R2~~ | ~~prepare_attn 补充 compiler.disable~~ | | | **已修复** |
+| ~~P4~~ | ~~F9-2~~ | ~~per-group scheduler flag 冗余~~ | | | **已修复** |
+| ~~P4~~ | ~~F9-3~~ | ~~分组路径 force-set 注释~~ | | | **已修复** |
+| ~~P4~~ | ~~F3-R1~~ | ~~矛盾 flag 组合加 warn~~ | | | **已修复** |
 
 ---
 
 ### 影响分级
 
 ```
-中等（5-20%）:      F3（10-20%），F2-B（2-4%）
+中等（2-4%）:       F2-B
 低（1-5%）:         F5, F4, F9-opt-1
-极低（<1%）:        G6, F9-opt-2, F9-opt-3, R1, R2
+极低（<1%）:        G6, F9-opt-2, F9-opt-3
 ```
+
+### F3 重新评估：TBO + AFD 共存分析
+
+经过代码分析，原 F3（"TBO + AFD 共存"）需要重新定义：
+
+| 方案 | 描述 | 收益 | 复杂度 | 结论 |
+|------|------|------|--------|------|
+| ~~全量共存~~ | TBO batch splitting + AFD microbatch pipeline 嵌套 | <5%（batch 碎片化：原 batch 切成 2×m=6 份，每份太小 overlap 失效） | 极高（6-8 周） | **不推荐** |
+| **CPU/GPU overlap** | `event_loop_afd` 引入 overlap scheduling（CPU 调度与 GPU 执行并行） | **5-10%** | **低（1 周）** | **推荐** |
+
+**原因**：TBO 的价值分两层——(1) batch splitting + stage overlap（与 AFD 冲突且收益低）；(2) CPU/GPU scheduling overlap（与 AFD 完全正交）。只取 (2) 即可获得大部分收益。
+
+**具体改动**：仅修改 `scheduler.py` 的 `event_loop_afd`，让 CPU 在 GPU 执行当前 batch 时提前调度下一个 batch（recv_requests + get_next_batch + afd_send_to_ffn），不涉及 attention backend、forward path、batch preparer。
 
 ### 建议执行路径
 
@@ -759,10 +793,10 @@ F→A = NH × (TP_A / gcd)
 阶段 1（已完成 ✓）:
   F9    — 分组 StepMesh → 跨节点流量 12NH→3NH
   F2-A  — torch.compile 逐 stage → kernel fusion ~5-8%
+  F3    — CPU/GPU overlap scheduling → 5-10%
 
-阶段 2（提升吞吐，下一优先级）:
-  F3    — TBO + AFD 共存 → 10-20% 吞吐提升（最大未解锁收益）
-  F2-B  — reduce-overhead CUDA Graph → 额外 ~2-4%（含 R2 前置）
+阶段 2（下一优先级）:
+  F2-B  — reduce-overhead CUDA Graph → 额外 ~2-4%（1-2 周，含 R2 前置）
 
 阶段 3（扩展 & 便利性）:
   F5    — Qwen2 Dense AFD
@@ -777,9 +811,9 @@ F→A = NH × (TP_A / gcd)
 | 维度 | 状态 | 说明 |
 |------|------|------|
 | 通信层 | **完整** | ZMQ（同构+异构）+ StepMesh（同构+异构+分组），任意 N:M |
-| 调度层 | **完整** | microbatch 切分、batch 对齐、PD 独立控制 |
+| 调度层 | **完整** | microbatch 切分、batch 对齐、PD 独立控制、CPU/GPU overlap scheduling（`--afd-enable-overlap-schedule`） |
 | 计算层 | **完整** | 流水线 overlap、非对称切分、预分配 output |
 | 编译优化 | **Phase A 完成** | `torch.compile` kernel fusion；Phase B（CUDA Graph）待实现 |
 | 模型支持 | **基本完整** | Qwen3-MoE/Qwen2-MoE/DeepSeek-V2/V3/Qwen3(Dense)，缺 Qwen2(Dense) |
 | 工程化 | **完整** | Mixin 抽象、权重过滤、独立文件、超时处理 |
-| **最大未解锁收益** | **F3** | TBO + AFD 共存（10-20%），是当前最有价值的待办 |
+| **最大未解锁收益** | **F2-B** | reduce-overhead CUDA Graph（~2-4%，1-2 周） |

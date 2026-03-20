@@ -352,7 +352,9 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
         self._env_def("STEPMESH_GPU", gpu)
 
         if self._grouped:
-            # F9: per-group DMLC config — force-set to override any defaults
+            # F9: per-group DMLC config — must force-set (not _env_def) because
+            # each group needs distinct NUM_WORKER/NUM_SERVER/PORT values,
+            # unlike the non-grouped path where all ranks share the same config.
             base_port = int(os.environ.get("DMLC_PS_ROOT_PORT", "8123"))
             os.environ["DMLC_NUM_WORKER"] = str(self.workers_per_group)
             os.environ["DMLC_NUM_SERVER"] = str(self.servers_per_group)
@@ -376,10 +378,6 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
             # F9: each group's first Worker starts a scheduler
             if self.intra_group_rank != 0:
                 return
-            flag = f"STEPMESH_SCHEDULER_STARTED_{self.group_id}"
-            if os.environ.get(flag) == "1":
-                return
-            os.environ[flag] = "1"
         else:
             if os.environ["STEPMESH_GPU"] != "0":
                 return
@@ -1032,6 +1030,7 @@ class AFDCommunicator:
     def layer_scatter_modes(self):
         return self.layer_communicator.layer_scatter_modes
 
+    @torch.compiler.disable()
     def prepare_attn(
         self,
         hidden_states: torch.Tensor,
@@ -1045,6 +1044,7 @@ class AFDCommunicator:
             hidden_states, residual, forward_batch, **kwargs
         )
 
+    @torch.compiler.disable()
     def prepare_attn_and_capture_last_layer_outputs(
         self,
         hidden_states: torch.Tensor,

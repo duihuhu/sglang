@@ -635,6 +635,7 @@ class ServerArgs:
     afd_attn_tp: Optional[int] = None
     afd_ffn_tp: Optional[int] = None
     afd_grouped_stepmesh: bool = False
+    afd_enable_overlap_schedule: bool = False
 
     enable_torch_compile: bool = False
     disable_piecewise_cuda_graph: bool = False
@@ -3190,6 +3191,30 @@ class ServerArgs:
                             spg,
                         )
 
+            if self.afd_enable_overlap_schedule:
+                if self.disable_overlap_schedule:
+                    logger.warning(
+                        "--afd-enable-overlap-schedule and --disable-overlap-schedule "
+                        "are both set. AFD overlap will take precedence."
+                    )
+                logger.info(
+                    "AFD overlap scheduling enabled: CPU scheduling will "
+                    "run in parallel with GPU batch execution."
+                )
+            elif not self.disable_overlap_schedule:
+                self.disable_overlap_schedule = True
+                logger.info(
+                    "AFD: auto-disabling overlap schedule (run_batch async mode "
+                    "is incompatible with serial event_loop_afd). "
+                    "Use --afd-enable-overlap-schedule to enable AFD-aware overlap."
+                )
+        else:
+            if self.afd_enable_overlap_schedule:
+                logger.warning(
+                    "--afd-enable-overlap-schedule requires --afd-perspective, ignoring."
+                )
+                self.afd_enable_overlap_schedule = False
+
     def _validate_ib_devices(self, device_str: str) -> Optional[str]:
         """
         Validate IB devices before passing to mooncake.
@@ -5369,6 +5394,14 @@ class ServerArgs:
             help="Enable grouped StepMesh for reduced cross-node traffic. "
             "Splits the global N:M StepMesh into gcd(TP_A, TP_F) independent groups, "
             "each with its own scheduler. Requires heterogeneous TP and MLC_INTERFACE.",
+        )
+        parser.add_argument(
+            "--afd-enable-overlap-schedule",
+            action="store_true",
+            default=ServerArgs.afd_enable_overlap_schedule,
+            help="Enable CPU/GPU overlap scheduling in AFD event loop. "
+            "CPU scheduling runs in parallel with GPU batch execution for ~5-10%% throughput improvement. "
+            "Requires --afd-perspective.",
         )
 
         parser.add_argument(
