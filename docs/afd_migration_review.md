@@ -94,6 +94,7 @@ AFD 将 Transformer 每一层拆分为 Attention（A）和 FFN（F）两部分�
 | 编号 | 内容 | 位置 |
 |------|------|------|
 | Phase 6 | `--afd-attn-tp`/`--afd-ffn-tp` + `ShardedParallelCommunicator`（分片并行 + metadata 传递 + padding 截断） | `server_args.py` + `afd.py` |
+| F9 | `--afd-grouped-stepmesh` + GCD-based 分组 StepMesh（per-group DMLC + NVLink all_gather + stride 去重） | `server_args.py` + `afd.py` |
 
 ### PD+AFD 独立控制
 
@@ -118,54 +119,316 @@ AFD 将 Transformer 每一层拆分为 Attention（A）和 FFN（F）两部分�
 
 ## 五、运行方式
 
-### ZMQ 通信（快速测试）
+> 以下示例使用 `<模型>` 指代模型路径，`<attn_ip>` / `<ffn_ip>` 指代节点 IP，`<RDMA网卡>` 指代 RDMA 网卡名（如 `mlx5_0`）。
+> 所有 AFD 场景都需要 `--disable-overlap-schedule --disable-cuda-graph`（F2 待解决）。
+
+### 1. ZMQ 同构 TP（快速测试，无 RDMA）
 
 ```bash
-# Attn 节点
+# ═══ Attn 节点（TP=4）═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export AFD_SCHED_HOST=<ffn_ip>
 
 python -m sglang.launch_server \
-    --model-path <模型> \
+    --model-path <模型> --tp 4 \
     --disable-overlap-schedule --disable-cuda-graph \
     --afd-perspective attn --afd-micro-batch 3
 
-# FFN 节点
+# ═══ FFN 节点（TP=4）═══
 export CUDA_VISIBLE_DEVICES=4,5,6,7
 export AFD_SCHED_HOST=<ffn_ip>
 
 python -m sglang.launch_server \
-    --model-path <模型> \
+    --model-path <模型> --tp 4 \
     --disable-overlap-schedule --disable-cuda-graph \
-    --port <端口> --skip-server-warmup --watchdog-timeout 3600 \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3
 ```
 
-### StepMesh 通信（高性能 RDMA）
+### 2. ZMQ 异构 TP（快速测试，无 RDMA，4A:8F，跨节点 2NH）
+
+> ZMQ 路径通过 `ShardedParallelCommunicator` 包裹实现异构 TP：每个 local rank 只发送 1/TP_local 的 shard（1:1 点对点），接收侧 NVLink all_gather 重建完整 tensor。跨节点流量固定为 **2NH**（与 TP 配比无关），但受限于 TCP 延迟。
 
 ```bash
-# 额外设置：
-export MLC_INTERFACE=<RDMA 网卡名>
-export DMLC_PS_ROOT_URI=<root_ip>
-export DMLC_NUM_SERVER=1 && export DMLC_NUM_WORKER=1 && export DMLC_GROUP_SIZE=1
+# ═══ Attn 节点（TP=4）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export AFD_SCHED_HOST=<ffn_ip>
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --afd-perspective attn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8
+
+# ═══ FFN 节点（TP=8）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export AFD_SCHED_HOST=<ffn_ip>
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 8 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
+    --afd-perspective ffn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8
 ```
 
-### 异构 TP
+### 3. ZMQ 异构 TP（快速测试，无 RDMA，8A:4F，跨节点 2NH）
 
 ```bash
-# Attn (TP=2): --afd-ffn-tp 8
-# FFN  (TP=8): --afd-attn-tp 2
+# ═══ Attn 节点（TP=8）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export AFD_SCHED_HOST=<ffn_ip>
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 8 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --afd-perspective attn --afd-micro-batch 3 \
+    --afd-attn-tp 8 --afd-ffn-tp 4
+
+# ═══ FFN 节点（TP=4）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export AFD_SCHED_HOST=<ffn_ip>
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
+    --afd-perspective ffn --afd-micro-batch 3 \
+    --afd-attn-tp 8 --afd-ffn-tp 4
 ```
 
-### PD + AFD
+### 4. StepMesh 同构 TP（高性能 RDMA，TP_A == TP_F）
 
 ```bash
-# Prefill 服务器 + AFD
-python -m sglang.launch_server --disaggregation-mode prefill --afd-perspective attn ...
+# ═══ 公共环境变量（两节点都设置）═══
+export MLC_INTERFACE=<RDMA网卡>
+export DMLC_PS_ROOT_URI=<attn_ip>
 
-# Decode 服务器 + AFD
-python -m sglang.launch_server --disaggregation-mode decode --afd-perspective attn ...
+# ═══ Attn 节点（TP=4）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --afd-perspective attn --afd-micro-batch 3
+
+# ═══ FFN 节点（TP=4）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
+    --afd-perspective ffn --afd-micro-batch 3
 ```
+
+### 5. StepMesh 异构 TP — 不分组（4A:8F，跨节点 12NH）
+
+```bash
+# ═══ 公共环境变量 ═══
+export MLC_INTERFACE=<RDMA网卡>
+export DMLC_PS_ROOT_URI=<attn_ip>
+
+# ═══ Attn 节点（TP=4，告知对端 FFN TP=8）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --afd-perspective attn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8
+
+# ═══ FFN 节点（TP=8，告知对端 Attn TP=4）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 8 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
+    --afd-perspective ffn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8
+```
+
+### 6. StepMesh 异构 TP — 不分组（8A:4F，跨节点 12NH）
+
+```bash
+# ═══ 公共环境变量 ═══
+export MLC_INTERFACE=<RDMA网卡>
+export DMLC_PS_ROOT_URI=<attn_ip>
+
+# ═══ Attn 节点（TP=8）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 8 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --afd-perspective attn --afd-micro-batch 3 \
+    --afd-attn-tp 8 --afd-ffn-tp 4
+
+# ═══ FFN 节点（TP=4）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
+    --afd-perspective ffn --afd-micro-batch 3 \
+    --afd-attn-tp 8 --afd-ffn-tp 4
+```
+
+### 7. StepMesh 异构 TP — 分组（4A:8F，跨节点 3NH，4 组 1W:2S）
+
+```bash
+# ═══ 公共环境变量 ═══
+export MLC_INTERFACE=<RDMA网卡>
+export DMLC_PS_ROOT_URI=<attn_ip>
+
+# ═══ Attn 节点（TP=4）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --afd-perspective attn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8 \
+    --afd-grouped-stepmesh
+
+# ═══ FFN 节点（TP=8）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 8 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
+    --afd-perspective ffn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8 \
+    --afd-grouped-stepmesh
+```
+
+### 8. StepMesh 异构 TP — 分组（8A:4F，跨节点 3NH，4 组 2W:1S）
+
+```bash
+# ═══ 公共环境变量 ═══
+export MLC_INTERFACE=<RDMA网卡>
+export DMLC_PS_ROOT_URI=<attn_ip>
+
+# ═══ Attn 节点（TP=8）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 8 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --afd-perspective attn --afd-micro-batch 3 \
+    --afd-attn-tp 8 --afd-ffn-tp 4 \
+    --afd-grouped-stepmesh
+
+# ═══ FFN 节点（TP=4）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
+    --afd-perspective ffn --afd-micro-batch 3 \
+    --afd-attn-tp 8 --afd-ffn-tp 4 \
+    --afd-grouped-stepmesh
+```
+
+### 9. StepMesh 异构 TP — 分组 + 非对称切分（6A:4F，跨节点 5NH，2 组 3W:2S）
+
+```bash
+# ═══ 公共环境变量 ═══
+export MLC_INTERFACE=<RDMA网卡>
+export DMLC_PS_ROOT_URI=<attn_ip>
+
+# ═══ Attn 节点（TP=6）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 6 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --afd-perspective attn --afd-micro-batch 3 \
+    --afd-attn-tp 6 --afd-ffn-tp 4 --afd-attn-ratio 0.6 \
+    --afd-grouped-stepmesh
+
+# ═══ FFN 节点（TP=4）═══
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
+    --afd-perspective ffn --afd-micro-batch 3 \
+    --afd-attn-tp 6 --afd-ffn-tp 4 --afd-attn-ratio 0.6 \
+    --afd-grouped-stepmesh
+```
+
+### 10. PD 分离 + AFD + 分组 StepMesh（4A:8F）
+
+```bash
+# ═══ 公共环境变量 ═══
+export MLC_INTERFACE=<RDMA网卡>
+export DMLC_PS_ROOT_URI=<attn_ip>
+
+# ═══ Prefill Attn 节点 ═══
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --disaggregation-mode prefill \
+    --afd-perspective attn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8 \
+    --afd-grouped-stepmesh
+
+# ═══ Prefill FFN 节点 ═══
+python -m sglang.launch_server \
+    --model-path <模型> --tp 8 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
+    --disaggregation-mode prefill \
+    --afd-perspective ffn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8 \
+    --afd-grouped-stepmesh
+
+# ═══ Decode Attn 节点 ═══
+python -m sglang.launch_server \
+    --model-path <模型> --tp 4 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --disaggregation-mode decode \
+    --afd-perspective attn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8 \
+    --afd-grouped-stepmesh
+
+# ═══ Decode FFN 节点 ═══
+python -m sglang.launch_server \
+    --model-path <模型> --tp 8 \
+    --disable-overlap-schedule --disable-cuda-graph \
+    --port 30002 --skip-server-warmup --watchdog-timeout 3600 \
+    --disaggregation-mode decode \
+    --afd-perspective ffn --afd-micro-batch 3 \
+    --afd-attn-tp 4 --afd-ffn-tp 8 \
+    --afd-grouped-stepmesh
+```
+
+### 配置速查表
+
+| # | 场景 | 通信方式 | Attn 侧关键参数 | FFN 侧关键参数 | 跨节点流量 |
+|---|------|---------|-----------------|----------------|-----------|
+| 1 | 同构 4:4 | ZMQ (TCP) | `--afd-perspective attn` | `--afd-perspective ffn` | 2NH |
+| 2 | 异构 4:8 | ZMQ (TCP) | `--afd-attn-tp 4 --afd-ffn-tp 8` | 同左 | 2NH |
+| 3 | 异构 8:4 | ZMQ (TCP) | `--afd-attn-tp 8 --afd-ffn-tp 4` | 同左 | 2NH |
+| 4 | 同构 4:4 | StepMesh (RDMA) | 同 #1 + `MLC_INTERFACE` | 同左 | 2NH |
+| 5 | 异构 4:8 不分组 | StepMesh (RDMA) | `--afd-attn-tp 4 --afd-ffn-tp 8` | 同左 | 12NH |
+| 6 | 异构 8:4 不分组 | StepMesh (RDMA) | `--afd-attn-tp 8 --afd-ffn-tp 4` | 同左 | 12NH |
+| 7 | 异构 4:8 **分组** | StepMesh (RDMA) | 同 #5 + `--afd-grouped-stepmesh` | 同左 | **3NH** |
+| 8 | 异构 8:4 **分组** | StepMesh (RDMA) | 同 #6 + `--afd-grouped-stepmesh` | 同左 | **3NH** |
+| 9 | 异构 6:4 **分组** | StepMesh (RDMA) | `--afd-attn-tp 6 --afd-ffn-tp 4 --afd-grouped-stepmesh` | 同左 | **5NH** |
+| 10 | PD + 异构 4:8 **分组** | StepMesh (RDMA) | 同 #7 + `--disaggregation-mode prefill/decode` | 同左 | **3NH** |
+
+> **注意**:
+> - `--afd-attn-tp` 和 `--afd-ffn-tp` 需要在 **Attn 和 FFN 两侧都设置**，且值相同。`--afd-grouped-stepmesh` 同理。
+> - ZMQ 异构 TP（#2, #3）通过 `ShardedParallelCommunicator` 包裹 1:1 ZMQ 通信实现，跨节点流量固定 2NH（与 TP 配比无关），但受限于 TCP 延迟，适合功能验证。
+> - StepMesh 不分组异构（#5, #6）跨节点流量高（12NH），但 RDMA 延迟低；加 `--afd-grouped-stepmesh`（#7-#10）可降至 3-5NH。
+> - `--afd-grouped-stepmesh` 仅对 StepMesh 生效（需 `MLC_INTERFACE`），ZMQ 路径自动忽略。
 
 ---
 
@@ -180,7 +443,7 @@ python -m sglang.launch_server --disaggregation-mode decode --afd-perspective at
 | F6 | DeepSeek-V2 `load_weights` 添加 AFDWeightFilter（generator 包装过滤） | **已修复** |
 | F7 | `afd_prepare_overlap` 添加 `is_target_verify()` 处理（scheduler.py + scheduler_afd_mixin.py） | **已修复** |
 | F8 | `afd_overlap.py` 移除冗余 `m is None` 检查 | **已修复** |
-| F9 | F→A 跨节点流量 4NH 是 StepMesh push_pull API 固有下限，降到 NH 需分组 StepMesh 实例 | 远期目标 |
+| F9 | GCD-based 分组 StepMesh（`--afd-grouped-stepmesh`），跨节点流量降至 NH×(TP_A+TP_F)/gcd | **已实现** |
 | F5 | Qwen2（不使用 LayerCommunicator 的旧 Dense 模型）不支持 AFD | 需重构 Qwen2DecoderLayer |
 
 ---
@@ -284,6 +547,179 @@ python -m sglang.launch_server --disaggregation-mode decode --afd-perspective at
 | P2 | F2 | CUDA Graph 支持 | 待实现 |
 | P2 | F3 | TBO + AFD 共存 | 待实现 |
 | P3 | F4 | 自动 profiling | 待实现 |
-| P3 | F9 | 分组 StepMesh 实现 F→A 流量 NH | 待实现 |
+| ~~P2~~ | ~~F9~~ | ~~分组 StepMesh：GCD-based 分组，跨节点流量 NH×(TP_A+TP_F)/gcd~~ | **已实现** |
 | ~~P3~~ | ~~G3~~ | ~~RDMA 末尾 shard 短于 pull_buf~~ — `ffn_send` 中对末尾 shard padding 到 `chunk_size`，`attn_recv` 中 `full[:original_num_tokens]` 截断 | **已修复** |
 | P3 | G6 | 异构路径 buffer 复用 | 待优化 |
+
+---
+
+## 九、F9 分组 StepMesh 实现（GCD-based 通用分组）
+
+### 设计
+
+使用 `num_groups = gcd(TP_A, TP_F)` 将全局 N:M StepMesh 拆成多个独立小组，**同时支持 TP_A > TP_F 和 TP_A < TP_F**：
+
+```
+num_groups        = gcd(TP_A, TP_F)
+workers_per_group = TP_A / num_groups
+servers_per_group = TP_F / num_groups
+```
+
+- 新增 `--afd-grouped-stepmesh` 开关（默认 False），可选启用
+- 每组独立 StepMesh 实例（独立端口 + scheduler 进程）
+- 组内复用现有异构 N:M 通信代码，组后 NVLink `all_gather` + stride 去重重建完整 tensor
+- 当 `gcd=1`（如 3A:2F）自动禁用（无收益）
+- 当两侧都大于 1（如 6A:4F → 3W:2S 组）可工作但收益较小，会 warn
+
+### 通用流量公式
+
+```
+A→F = NH × (TP_F / gcd)
+F→A = NH × (TP_A / gcd)
+总计 = NH × (TP_A + TP_F) / gcd
+```
+
+| TP_A:TP_F | gcd | 每组 | 无分组 | 有分组 | 改善 |
+|-----------|-----|------|--------|--------|------|
+| 4:8 | 4 | 1W:2S | 12NH | 3NH | 4x |
+| 8:4 | 4 | 2W:1S | 12NH | 3NH | 4x |
+| 6:4 | 2 | 3W:2S | 10NH | 5NH | 2x |
+| 4:6 | 2 | 2W:3S | 10NH | 5NH | 2x |
+| 8:2 | 2 | 4W:1S | 10NH | 5NH | 2x |
+| 3:2 | 1 | — | 6NH | 6NH | 无 |
+
+### 实现步骤（8 步，仅改 `afd.py` + `server_args.py`）
+
+1. **`server_args.py`**：新增 `afd_grouped_stepmesh` 字段 + `--afd-grouped-stepmesh` CLI + `_handle_afd` 验证
+2. **`__init__` 分组映射**：计算 `num_groups`、`workers_per_group`、`servers_per_group`、`group_id`、`intra_group_rank`
+3. **`_start_stepmesh_scheduler`**：per-group DMLC 配置（`NUM_WORKER=workers_per_group`、`NUM_SERVER=servers_per_group`、独立端口），每组第一个 Worker 启动 scheduler
+4. **`attn_send`**：push shard pad 到 `chunk_size`（保证 all_gather 尺寸一致），`n_pull = servers_per_group`
+5. **`ffn_recv`**：收 `workers_per_group` 个 shard + `all_gather` on TP_F group + stride `servers_per_group` 去重
+6. **`ffn_send`**：无需改动（`n_workers` 自动正确，shard 基于全局 TP_F 计算）
+7. **`attn_recv`**：cat `servers_per_group` 个 pull_tensor + `all_gather` on TP_A group + stride `workers_per_group` 去重 + 截断 `original_num_tokens`
+8. **更新文档**
+
+### 使用方式
+
+详细启动命令见**第五节**（场景 5-8）。核心要点：
+
+- 在已有异构 TP 命令基础上，两侧同时添加 `--afd-grouped-stepmesh` 即可
+- 需要 `MLC_INTERFACE` 环境变量（StepMesh RDMA 模式）
+- `--afd-attn-tp` 和 `--afd-ffn-tp` 需两侧一致
+- `gcd(TP_A, TP_F) > 1` 时才有收益（`gcd=1` 时自动禁用并 warn）
+
+### F9 Review 结果
+
+#### 发现的问题
+
+| 编号 | 严重度 | 位置 | 问题 | 影响 |
+|------|--------|------|------|------|
+| F9-1 | **低** | `ffn_recv` grouped path | FFN 处理 padded tensor（最多多 TP_A-1 个零 token 经过 MLP） | batch=1000 tokens 时 <0.7% 计算开销，可忽略 |
+| F9-2 | **低** | `_start_stepmesh_scheduler` | per-group scheduler flag 技术上冗余（每进程只调用一次 init） | 防御性编程，不影响正确性 |
+| F9-3 | **低** | `_start_stepmesh_scheduler` | 分组路径 force-set `DMLC_PS_ROOT_PORT`，与非分组路径 `_env_def` 语义略有不同 | 行为正确，仅风格差异 |
+
+#### 已验证正确的部分
+
+| 检查项 | 状态 |
+|--------|------|
+| GCD 分组计算：4A:8F → 4 组 1W:2S | OK |
+| GCD 分组计算：8A:4F → 4 组 2W:1S | OK |
+| GCD 分组计算：6A:4F → 2 组 3W:2S（混合组） | OK |
+| GCD 分组计算：3A:2F → gcd=1 → 自动禁用 | OK |
+| GCD 分组计算：4A:4F → 同构 → 自动禁用 | OK |
+| `attn_send` push shard padding 仅在 `_grouped` 模式生效，不影响非分组路径 | OK |
+| `attn_send` pull buffer 尺寸基于 `effective_tokens`（padded）匹配 `ffn_send` shard 大小 | OK |
+| `attn_send` key 增量 `1 + servers_per_group`（分组）vs `1 + ffn_tp`（非分组）| OK |
+| `ffn_recv` all_gather size=`self.ffn_tp` == `tp_group.size()` | OK |
+| `ffn_recv` stride-select 正确跳过组内重复数据 | OK |
+| `ffn_send` 无需改动：`n_workers` 自动正确，shard 基于全局 `ffn_tp` | OK |
+| `attn_recv` all_gather size=`self.attn_tp` == `tp_group.size()` | OK |
+| `attn_recv` stride-select + `full[:original_num_tokens]` 截断 | OK |
+| per-group DMLC 配置（独立 NUM_WORKER/NUM_SERVER/PORT） | OK |
+| per-group scheduler 启动（`intra_group_rank == 0` 条件） | OK |
+| `server_args.py` 验证逻辑（同构禁用、gcd=1 禁用、混合组 warn） | OK |
+| 后向兼容：`_grouped=False` 时所有代码路径与原实现完全一致 | OK |
+| `num_tokens=1` 极端 case 数据流正确 | OK |
+
+#### 逐配置数据流验证摘要
+
+**4A:8F** (`G=4, 1W:2S`): `chunk_a=4, eff=16, f2a=2` → `ffn_recv` stride=2 → 16 tokens → MLP → `ffn_send` 2/rank → `attn_recv` stride=1 → `[:15]` ✓
+
+**8A:4F** (`G=4, 2W:1S`): `chunk_a=1, eff=8, f2a=2` → `ffn_recv` stride=1 → 8 tokens → MLP → `ffn_send` 2/rank → `attn_recv` stride=2 → `[:7]` ✓
+
+**6A:4F** (`G=2, 3W:2S`): `chunk_a=2, eff=12, f2a=3` → `ffn_recv` stride=2 → 12 tokens → MLP → `ffn_send` 3/rank → `attn_recv` stride=3 → `[:10]` ✓
+
+### 后续优化方向
+
+- **Custom process sub-groups**：用 `num_groups`-way all_gather 替代全 TP all_gather + stride 去重，消除冗余 NVLink 传输（当 stride > 1 时）
+- **Grouped buffer pool**：将 `StepMeshTensorCache` free pool 扩展到分组路径（当前仅同构路径复用 buffer）
+- **F9-1 优化**：在 `ffn_recv` 重建 `original_num_tokens`（通过 metadata 嵌入或 broadcast），避免 padding tokens 经过 MLP
+
+---
+
+## 十、总结：未完成任务与影响评估
+
+### 已完成任务一览
+
+| 编号 | 描述 | 完成轮次 |
+|------|------|---------|
+| F1 | StepMesh N:M 双向分片通信（任意 TP_A:TP_F） | 第一轮 |
+| F6 | DeepSeek-V2 `load_weights` 添加 `AFDWeightFilter` | 第一轮 |
+| F7 | `afd_prepare_overlap` 添加 `is_target_verify()` 处理 | 第一轮 |
+| F8 | `afd_overlap.py` 移除冗余 `m is None` 检查 | 第一轮 |
+| G3 | RDMA 末尾 shard padding + 截断 | 第一轮 |
+| H1-H3 | StepMesh key 碰撞 / docstring / recv buffer 注册 | 第一轮 |
+| F9 | GCD-based 分组 StepMesh（`--afd-grouped-stepmesh`） | 本轮 |
+| Phase 6 | 异构 TP（`ShardedParallelCommunicator` + StepMesh N:M） | 早期 |
+| Task 6 | PD + AFD 独立控制 | 早期 |
+| C1-C5, S1-S3, G3-G6, E1-E5 | 通信/调度/计算/工程化优化 | 早期 |
+
+### 未完成任务总表
+
+| 优先级 | 编号 | 描述 | 影响评估 | 复杂度 |
+|--------|------|------|---------|--------|
+| **P1** | **F2** | **CUDA Graph + overlap schedule 支持** | **严重**：当前必须 `--disable-cuda-graph --disable-overlap-schedule`，kernel launch overhead 导致 **20-40% 性能损失**，是 AFD 上生产的最大阻碍 | 高 |
+| **P2** | **F3** | **TBO + AFD 共存** | **中等**：TBO（Two-Batch Overlap）通过批次间 overlap 提升吞吐。AFD 与 TBO 互斥，导致无法利用 TBO 的 **10-20% 吞吐提升** | 高 |
+| P2 | F5 | Qwen2（Dense）AFD 支持 | **低**：Qwen2 DecoderLayer 不使用 `LayerCommunicator`，需要重构。Qwen2 为旧模型，生产中多用 Qwen3/MoE，影响面小 | 中 |
+| P3 | F4 | 自动 profiling + `afd_attn_ratio` 自适应 | **低**：手动设置 `--afd-attn-ratio` 可满足需求，自动调参为便利性优化，不影响正确性和峰值性能 | 中 |
+| P3 | G6 | 异构路径 buffer 复用 | **极低**：PyTorch caching allocator 已处理重复分配，性能影响 <1%。主要改善长期运行的内存碎片化 | 低 |
+| P4 | F9-opt-1 | 分组 StepMesh: custom process sub-groups | **低**：消除 stride>1 时冗余 NVLink 传输，性能影响 1-5%。仅混合组（如 6A:4F）时有意义 | 中 |
+| P4 | F9-opt-2 | 分组 StepMesh: grouped buffer pool | **极低**：性能影响 <1%，改善内存友好度 | 低 |
+| P4 | F9-opt-3 | 分组 StepMesh: 避免 padding tokens 经过 MLP | **极低**：典型 batch（>100 tokens）下影响 <1%，仅极小 batch（<20）时有意义 | 低 |
+
+### 影响分级说明
+
+```
+严重（>20% 性能）: F2
+中等（10-20%）:     F3
+低（1-5%）:         F5, F4, F9-opt-1
+极低（<1%）:        G6, F9-opt-2, F9-opt-3
+```
+
+### 建议执行路径
+
+```
+阶段 1（上生产必须）:
+  F2 — CUDA Graph 支持 → 消除 20-40% kernel launch overhead
+
+阶段 2（提升吞吐）:
+  F3 — TBO + AFD 共存 → 解锁 batch overlap 的 10-20% 吞吐提升
+
+阶段 3（扩展模型 & 便利性）:
+  F5 — Qwen2 Dense AFD（按需求优先级）
+  F4 — 自动 profiling（便利性）
+
+阶段 4（锦上添花，可长期推进）:
+  G6, F9-opt-1/2/3 — 性能 <5%，非关键路径
+```
+
+### 当前 AFD 功能完整性
+
+| 维度 | 状态 | 说明 |
+|------|------|------|
+| 通信层 | **完整** | ZMQ（同构+异构）+ StepMesh（同构+异构+分组），支持任意 N:M |
+| 调度层 | **完整** | microbatch 切分、batch 对齐、PD 独立控制 |
+| 计算层 | **完整** | 流水线 overlap、非对称切分、预分配 output |
+| 模型支持 | **基本完整** | Qwen3-MoE/Qwen2-MoE/DeepSeek-V2/V3/Qwen3(Dense)，缺 Qwen2(Dense) |
+| 工程化 | **完整** | Mixin 抽象、权重过滤、独立文件、超时处理 |
+| **性能** | **受限** | 核心功能正确，但 F2（CUDA Graph）未解决前性能损失 20-40% |

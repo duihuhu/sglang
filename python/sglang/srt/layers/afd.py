@@ -242,6 +242,13 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
             separate pull_tensors; Attn concatenates all pull buffers.
     - StepMesh's push_pull natively supports multiple pull_tensors per
       Server, so each Server writes to its own buffer (no data overwrite).
+
+    F9 Grouped StepMesh (--afd-grouped-stepmesh):
+    Splits the global N:M StepMesh into gcd(TP_A, TP_F) independent groups,
+    each with workers_per_group Workers and servers_per_group Servers on
+    separate ports/schedulers. After group communication, NVLink all_gather
+    + stride deduplication reconstructs the full tensor.
+    Cross-node traffic: NH * (TP_A + TP_F) / gcd (vs NH * (TP_A + TP_F) ungrouped).
     """
 
     MAX_FREE_BUFFERS = 30
@@ -257,6 +264,34 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
         self.ffn_tp = getattr(server_args, "afd_ffn_tp", None) or local_tp
         self.local_rank = dist.get_rank() % local_tp if dist.is_initialized() else 0
         self._heterogeneous = self.attn_tp != self.ffn_tp
+
+        # F9: GCD-based grouped StepMesh
+        self._grouped = (
+            getattr(server_args, "afd_grouped_stepmesh", False)
+            and self._heterogeneous
+        )
+        if self._grouped:
+            from math import gcd
+
+            g = gcd(self.attn_tp, self.ffn_tp)
+            self.num_groups = g
+            self.workers_per_group = self.attn_tp // g
+            self.servers_per_group = self.ffn_tp // g
+            if afd_is_attn():
+                self.group_id = self.local_rank // self.workers_per_group
+                self.intra_group_rank = self.local_rank % self.workers_per_group
+            else:
+                self.group_id = self.local_rank // self.servers_per_group
+                self.intra_group_rank = self.local_rank % self.servers_per_group
+            logger.info(
+                "Grouped StepMesh: %d groups, %dW:%dS per group, "
+                "group_id=%d, intra_rank=%d",
+                self.num_groups,
+                self.workers_per_group,
+                self.servers_per_group,
+                self.group_id,
+                self.intra_group_rank,
+            )
 
         import fserver_lib as f
 
@@ -312,13 +347,20 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
         gpu = str(torch.cuda.current_device())
 
         self._env_def("DMLC_NODE_RANK", "0")
-        # F1 Step 1: dynamic DMLC_NUM_WORKER / DMLC_NUM_SERVER
-        self._env_def("DMLC_NUM_WORKER", str(self.attn_tp))
-        self._env_def("DMLC_NUM_SERVER", str(self.ffn_tp))
         self._env_def("DMLC_GROUP_SIZE", "1")
-        self._env_def("DMLC_PS_ROOT_PORT", "8123")
         self._env_def("DMLC_ENABLE_RDMA", "ibverbs")
         self._env_def("STEPMESH_GPU", gpu)
+
+        if self._grouped:
+            # F9: per-group DMLC config — force-set to override any defaults
+            base_port = int(os.environ.get("DMLC_PS_ROOT_PORT", "8123"))
+            os.environ["DMLC_NUM_WORKER"] = str(self.workers_per_group)
+            os.environ["DMLC_NUM_SERVER"] = str(self.servers_per_group)
+            os.environ["DMLC_PS_ROOT_PORT"] = str(base_port + self.group_id)
+        else:
+            self._env_def("DMLC_NUM_WORKER", str(self.attn_tp))
+            self._env_def("DMLC_NUM_SERVER", str(self.ffn_tp))
+            self._env_def("DMLC_PS_ROOT_PORT", "8123")
 
         if afd_is_attn():
             os.environ["DMLC_ROLE"] = "worker"
@@ -329,17 +371,33 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
             return
         if os.environ.get("DMLC_NODE_RANK") != "0":
             return
-        if os.environ["STEPMESH_GPU"] != "0":
-            return
-        if os.environ.get("STEPMESH_SCHEDULER_STARTED") == "1":
-            return
 
-        os.environ["STEPMESH_SCHEDULER_STARTED"] = "1"
+        if self._grouped:
+            # F9: each group's first Worker starts a scheduler
+            if self.intra_group_rank != 0:
+                return
+            flag = f"STEPMESH_SCHEDULER_STARTED_{self.group_id}"
+            if os.environ.get(flag) == "1":
+                return
+            os.environ[flag] = "1"
+        else:
+            if os.environ["STEPMESH_GPU"] != "0":
+                return
+            if os.environ.get("STEPMESH_SCHEDULER_STARTED") == "1":
+                return
+            os.environ["STEPMESH_SCHEDULER_STARTED"] = "1"
+
         os.environ["DMLC_PS_ROOT_URI"] = os.environ["DMLC_NODE_HOST"]
 
         p = multiprocessing.Process(target=_stepmesh_scheduler_process)
         p.daemon = True
         p.start()
+        logger.info(
+            "StepMesh scheduler started (grouped=%s, group_id=%s, port=%s)",
+            self._grouped,
+            getattr(self, "group_id", None),
+            os.environ.get("DMLC_PS_ROOT_PORT"),
+        )
 
     def _get_or_create_free_deque(self, shape: torch.Size) -> deque:
         q = self.free_tensors.get(shape)
@@ -379,14 +437,25 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
         end_idx = min(start + chunk_size, num_tokens)
         push_shard = x[start:end_idx].contiguous()
 
-        # Allocate TP_F pull buffers — each FFN Server will respond its shard
-        f2a_chunk = (num_tokens + self.ffn_tp - 1) // self.ffn_tp
+        # F9: pad push shard to chunk_size for uniform all_gather sizing (grouped only)
+        if self._grouped and push_shard.shape[0] < chunk_size:
+            pad = torch.zeros(
+                chunk_size - push_shard.shape[0], x.shape[1],
+                dtype=x.dtype, device=x.device,
+            )
+            push_shard = torch.cat([push_shard, pad], dim=0)
+
+        # F9: grouped path — pull from servers_per_group servers (not all TP_F)
+        n_pull = self.servers_per_group if self._grouped else self.ffn_tp
+        # In grouped mode, FFN processes padded tensor (attn_tp * chunk_size tokens),
+        # so pull buffers must be sized for the padded output, not original num_tokens.
+        effective_tokens = self.attn_tp * chunk_size if self._grouped else num_tokens
+        f2a_chunk = (effective_tokens + self.ffn_tp - 1) // self.ffn_tp
         pull_tensors = []
         pull_keys = []
-        # Reserve 1 push_key + TP_F pull_keys to avoid key collision
-        self.key += 1 + self.ffn_tp
+        self.key += 1 + n_pull
         push_key = self.key
-        for s in range(self.ffn_tp):
+        for s in range(n_pull):
             pull_buf = torch.empty(f2a_chunk, x.shape[1], dtype=x.dtype, device=x.device)
             pull_tensors.append(pull_buf)
             pull_keys.append(push_key + 1 + s)
@@ -429,7 +498,23 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
                 self.f.register_recv_buffer(y, [0], [key])
                 self.register_buf[key] = y
 
-        return torch.cat(shards, dim=0)
+        local_data = torch.cat(shards, dim=0)
+
+        if not self._grouped:
+            return local_data
+
+        # F9: grouped path — local_data has workers_per_group shards (partial tensor).
+        # attn_send pads all shards to uniform chunk_size, so all FFN ranks have
+        # the same local_data size → all_gather requires no additional padding.
+        # Truncation to original num_tokens is handled by attn_recv on the Attn side.
+        tp_group = self._get_tp_group()
+        gathered = [torch.empty_like(local_data) for _ in range(self.ffn_tp)]
+        dist.all_gather(gathered, local_data, group=tp_group.device_group)
+
+        # Stride-select: ranks within the same group have identical data
+        stride = self.servers_per_group
+        unique = [gathered[i] for i in range(0, self.ffn_tp, stride)]
+        return torch.cat(unique, dim=0)
 
     # --- F->A: FFN responds its shard, Attn concatenates from pull buffers ---
 
@@ -486,10 +571,24 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
             self._get_or_create_free_deque(t.push_tensor.shape).append(t)
             return t.pull_tensor.clone()
 
-        # Heterogeneous: pull buffers already have data from TP_F Servers
+        # Heterogeneous: pull buffers already have data from Servers
         h, pull_tensors, original_num_tokens = self.waits.popleft()
         self.f.wait(h)
-        full = torch.cat(pull_tensors, dim=0)
+        local_data = torch.cat(pull_tensors, dim=0)
+
+        if not self._grouped:
+            return local_data[:original_num_tokens]
+
+        # F9: grouped path — local_data has servers_per_group pull shards (partial).
+        # all_gather across full TP_A group, then stride-select to remove duplicates.
+        tp_group = self._get_tp_group()
+        gathered = [torch.empty_like(local_data) for _ in range(self.attn_tp)]
+        dist.all_gather(gathered, local_data, group=tp_group.device_group)
+
+        # Stride-select: ranks within the same group have identical data
+        stride = self.workers_per_group
+        unique = [gathered[i] for i in range(0, self.attn_tp, stride)]
+        full = torch.cat(unique, dim=0)
         return full[:original_num_tokens]
 
     # --- Public interface ---

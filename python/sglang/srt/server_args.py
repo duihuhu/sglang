@@ -634,6 +634,7 @@ class ServerArgs:
     afd_attn_ratio: float = 0.5
     afd_attn_tp: Optional[int] = None
     afd_ffn_tp: Optional[int] = None
+    afd_grouped_stepmesh: bool = False
 
     enable_torch_compile: bool = False
     disable_piecewise_cuda_graph: bool = False
@@ -3159,6 +3160,36 @@ class ServerArgs:
             if self.afd_micro_batch < 1:
                 raise ValueError("--afd-micro-batch must be >= 1.")
 
+            if self.afd_grouped_stepmesh:
+                from math import gcd
+
+                attn_tp = self.afd_attn_tp or self.tp_size
+                ffn_tp = self.afd_ffn_tp or self.tp_size
+                if attn_tp == ffn_tp:
+                    logger.warning(
+                        "--afd-grouped-stepmesh has no effect with homogeneous TP, disabling."
+                    )
+                    self.afd_grouped_stepmesh = False
+                elif gcd(attn_tp, ffn_tp) <= 1:
+                    logger.warning(
+                        "gcd(attn_tp=%d, ffn_tp=%d)=1, grouped stepmesh has no effect, disabling.",
+                        attn_tp,
+                        ffn_tp,
+                    )
+                    self.afd_grouped_stepmesh = False
+                else:
+                    g = gcd(attn_tp, ffn_tp)
+                    wpg = attn_tp // g
+                    spg = ffn_tp // g
+                    if wpg > 1 and spg > 1:
+                        logger.warning(
+                            "Grouped stepmesh: %d groups of %dW:%dS — "
+                            "neither side reduces to 1, traffic reduction is moderate.",
+                            g,
+                            wpg,
+                            spg,
+                        )
+
     def _validate_ib_devices(self, device_str: str) -> Optional[str]:
         """
         Validate IB devices before passing to mooncake.
@@ -5330,6 +5361,14 @@ class ServerArgs:
             type=int,
             default=ServerArgs.afd_ffn_tp,
             help="TP size for the FFN side (heterogeneous TP). Defaults to --tp.",
+        )
+        parser.add_argument(
+            "--afd-grouped-stepmesh",
+            action="store_true",
+            default=ServerArgs.afd_grouped_stepmesh,
+            help="Enable grouped StepMesh for reduced cross-node traffic. "
+            "Splits the global N:M StepMesh into gcd(TP_A, TP_F) independent groups, "
+            "each with its own scheduler. Requires heterogeneous TP and MLC_INTERFACE.",
         )
 
         parser.add_argument(
