@@ -44,6 +44,8 @@ class AFDDecoderLayerMixin:
 
     def _afd_init(self):
         """Inject AFD communicator and proxy modules. Call at the end of __init__."""
+        import types
+
         perspective = get_afd_perspective()
         if perspective is None:
             return
@@ -58,6 +60,13 @@ class AFDDecoderLayerMixin:
             perspective=perspective,
             layer_id=getattr(self, "layer_id", -1),
         )
+
+        # Bind default _run_attn/_run_mlp if the host class doesn't define them
+        # (needed when the host does not inherit AFDDecoderLayerMixin).
+        if not hasattr(self, "_run_attn"):
+            self._run_attn = types.MethodType(AFDDecoderLayerMixin._run_attn, self)
+        if not hasattr(self, "_run_mlp"):
+            self._run_mlp = types.MethodType(AFDDecoderLayerMixin._run_mlp, self)
 
         from sglang.srt.server_args import get_global_server_args
 

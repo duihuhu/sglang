@@ -671,7 +671,9 @@ class Qwen2MoeModel(nn.Module):
             residual = pp_proxy_tensors["residual"]
 
         aux_hidden_states = []
-        if getattr(forward_batch, "can_run_afd_overlap", False):
+        from sglang.srt.layers.afd import get_afd_perspective
+
+        if get_afd_perspective() is not None:
             from sglang.srt.layers.afd import model_forward_afd
 
             hidden_states, residual = model_forward_afd(

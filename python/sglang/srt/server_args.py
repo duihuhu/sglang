@@ -635,6 +635,7 @@ class ServerArgs:
     afd_attn_tp: Optional[int] = None
     afd_ffn_tp: Optional[int] = None
     afd_grouped_stepmesh: bool = False
+    afd_comm_backend: Optional[str] = None
     afd_enable_overlap_schedule: bool = False
 
     enable_torch_compile: bool = False
@@ -3191,6 +3192,29 @@ class ServerArgs:
                             spg,
                         )
 
+            # FFN warmup deadlocks: event_loop_afd waits for Attn's AFDReqInput
+            # before processing any batch, so local warmup requests never run.
+            if (
+                self.afd_perspective == AFDPerspective.AFD_PERSPECTIVE_FFN
+                and not self.skip_server_warmup
+            ):
+                self.skip_server_warmup = True
+                logger.info(
+                    "AFD FFN: auto-enabling --skip-server-warmup "
+                    "(FFN warmup would deadlock waiting for Attn sync)."
+                )
+
+            if not self.disable_cuda_graph:
+                self.disable_cuda_graph = True
+                logger.info(
+                    "AFD: auto-disabling CUDA graph (not yet supported with AFD, see F2-B)."
+                )
+            if not self.disable_piecewise_cuda_graph:
+                self.disable_piecewise_cuda_graph = True
+                logger.info(
+                    "AFD: auto-disabling piecewise CUDA graph (not yet supported with AFD)."
+                )
+
             if self.afd_enable_overlap_schedule:
                 if self.disable_overlap_schedule:
                     logger.warning(
@@ -5394,6 +5418,18 @@ class ServerArgs:
             help="Enable grouped StepMesh for reduced cross-node traffic. "
             "Splits the global N:M StepMesh into gcd(TP_A, TP_F) independent groups, "
             "each with its own scheduler. Requires heterogeneous TP and MLC_INTERFACE.",
+        )
+        parser.add_argument(
+            "--afd-comm-backend",
+            type=str,
+            choices=["auto", "ucx", "stepmesh", "zmq"],
+            default=ServerArgs.afd_comm_backend,
+            help="Communication backend for AFD Attn-FFN tensor transfer. "
+            "'ucx': UCX-Py RDMA (requires ucp). "
+            "'stepmesh': StepMesh via fserver_lib (requires MLC_INTERFACE). "
+            "'zmq': ZMQ + optional NVLink broadcast. "
+            "'auto': select based on available env vars (AFD_UCX_TLS -> ucx, MLC_INTERFACE -> stepmesh, else zmq). "
+            "Default: auto.",
         )
         parser.add_argument(
             "--afd-enable-overlap-schedule",

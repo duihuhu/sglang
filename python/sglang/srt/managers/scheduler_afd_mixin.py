@@ -7,6 +7,7 @@ Provides reusable AFD scheduling helpers that can be mixed into any event loop
 from __future__ import annotations
 
 import logging
+from collections import deque
 from typing import TYPE_CHECKING, Optional
 
 import zmq
@@ -31,6 +32,7 @@ class SchedulerAFDMixin:
         self._afd_batchsize_attn = None
         self._afd_forward_mode = None
         self._afd_req_ids = None
+        self._afd_pending_batch_infos: deque = deque()
 
         self._afd_poller = None
         from sglang.srt.layers.afd import afd_is_ffn
@@ -40,22 +42,23 @@ class SchedulerAFDMixin:
             self._afd_poller.register(self.afd_recv_from_attn, zmq.POLLIN)
 
     def afd_recv_messages(self: "Scheduler"):
-        """Poll for AFDReqInput messages from the Attn scheduler."""
-        from sglang.srt.managers.io_struct import AFDReqInput
+        """Poll for messages from the Attn scheduler.
 
+        Returns ALL messages (including AFDReqInput) so they can be
+        broadcast to all TP ranks. AFDReqInput state is extracted later
+        in _afd_process_input_requests on every rank.
+        """
         recv_socket = getattr(self, "afd_recv_from_attn", None)
         if recv_socket is None:
-            return
+            return []
+        extra_reqs = []
         while True:
             try:
                 msg = recv_socket.recv_pyobj(zmq.NOBLOCK)
-                if isinstance(msg, AFDReqInput):
-                    self._afd_batchsize_attn = msg.batch_size
-                    self._afd_forward_mode = msg.forward_mode
-                    self._afd_req_ids = msg.req_ids
-                    return
+                extra_reqs.append(msg)
             except zmq.ZMQError:
                 break
+        return extra_reqs
 
     def afd_ffn_should_wait(self: "Scheduler") -> bool:
         """Return True if FFN side should wait for Attn sync before running a batch."""
@@ -82,7 +85,7 @@ class SchedulerAFDMixin:
             batch_size=batch.batch_size(),
             forward_mode=batch.forward_mode,
             req_ids=[r.rid for r in batch.reqs],
-            seq_lens=[r.extend_input_len + r.seq_len for r in batch.reqs],
+            seq_lens=[r.extend_input_len + r.seqlen for r in batch.reqs],
             extend_lens=(
                 batch.extend_lens if hasattr(batch, "extend_lens") else None
             ),

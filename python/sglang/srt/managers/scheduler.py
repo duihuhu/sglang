@@ -501,17 +501,18 @@ class Scheduler(
         # AFD inter-scheduler channels (C5: configurable ports)
         self.afd_send_to_ffn = None
         self.afd_recv_from_attn = None
-        from sglang.srt.layers.afd import afd_is_attn, afd_is_ffn
+        from sglang.srt.layers.afd_type import AFDPerspective
 
+        afd_perspective = getattr(self.server_args, "afd_perspective", None)
         if self.pp_rank == 0 and self.attn_tp_rank == 0:
             host = os.getenv("AFD_SCHED_HOST", "127.0.0.1")
             port = int(os.getenv("AFD_SCHED_PORT", "65300"))
             afd_ipc = f"tcp://{host}:{port}"
-            if afd_is_attn():
+            if afd_perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN:
                 self.afd_send_to_ffn = get_zmq_socket(
                     context, zmq.PUSH, afd_ipc, False
                 )
-            elif afd_is_ffn():
+            elif afd_perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
                 self.afd_recv_from_attn = get_zmq_socket(
                     context, zmq.PULL, afd_ipc, True
                 )
@@ -1324,19 +1325,22 @@ class Scheduler(
             afd_poller.register(self.afd_recv_from_attn, zmq.POLLIN)
 
         def _recv_afd_messages():
-            """Poll for AFDReqInput messages from Attn scheduler."""
+            """Poll for messages from Attn scheduler.
+
+            Returns ALL messages (including AFDReqInput) so they can be
+            broadcast to all TP ranks. AFDReqInput state is extracted later
+            in _afd_process_input_requests on every rank.
+            """
             if self.afd_recv_from_attn is None:
-                return
+                return []
+            extra_reqs = []
             while True:
                 try:
                     msg = self.afd_recv_from_attn.recv_pyobj(zmq.NOBLOCK)
-                    if isinstance(msg, AFDReqInput):
-                        self._afd_batchsize_attn = msg.batch_size
-                        self._afd_forward_mode = msg.forward_mode
-                        self._afd_req_ids = msg.req_ids
-                        return
+                    extra_reqs.append(msg)
                 except zmq.ZMQError:
                     break
+            return extra_reqs
 
         def _prepare_afd_overlap(batch):
             """Compute microbatch split points for AFD."""
@@ -1377,7 +1381,20 @@ class Scheduler(
 
             # Step 3.6: FFN also receives AFD messages
             if afd_is_ffn():
-                _recv_afd_messages()
+                extra_reqs = _recv_afd_messages()
+                if extra_reqs:
+                    recv_reqs = recv_reqs + extra_reqs
+                # Re-broadcast so all TP ranks see the merged requests.
+                # Must be outside `if extra_reqs` — all ranks must participate.
+                if self.tp_size > 1 and not self.server_args.enable_dp_attention:
+                    from sglang.srt.utils.common import broadcast_pyobj
+
+                    recv_reqs = broadcast_pyobj(
+                        recv_reqs,
+                        self.tp_group.rank,
+                        self.tp_cpu_group,
+                        src=self.tp_group.ranks[0],
+                    )
 
             self._afd_process_input_requests(recv_reqs)
 
@@ -1404,7 +1421,7 @@ class Scheduler(
                         batch_size=batch.batch_size(),
                         forward_mode=batch.forward_mode,
                         req_ids=[r.rid for r in batch.reqs],
-                        seq_lens=[r.extend_input_len + r.seq_len for r in batch.reqs],
+                        seq_lens=[r.extend_input_len + r.seqlen for r in batch.reqs],
                         extend_lens=batch.extend_lens
                         if hasattr(batch, "extend_lens")
                         else None,
@@ -1424,6 +1441,8 @@ class Scheduler(
                 self._afd_req_ids = None
             else:
                 batch_result = None
+                self._afd_batchsize_attn = None
+                self._afd_req_ids = None
                 if afd_overlap:
                     self.cancel_bubble_timer()
                 else:
@@ -1442,15 +1461,35 @@ class Scheduler(
             self.last_batch = batch
 
     def _afd_process_input_requests(self, recv_reqs):
-        """Process input requests with AFD awareness (S1, S4)."""
+        """Process input requests with AFD awareness (S1, S4).
+
+        AFDReqInput messages are queued and consumed one per iteration
+        to avoid last-one-wins overwrites when multiple arrive in a
+        single drain cycle (fixes L6).
+        """
         from sglang.srt.layers.afd import afd_is_attn
         from sglang.srt.managers.io_struct import AFDReqInput
 
+        filtered_reqs = []
         for recv_req in recv_reqs:
             if isinstance(recv_req, AFDReqInput):
-                self._afd_batchsize_attn = recv_req.batch_size
-                self._afd_forward_mode = recv_req.forward_mode
-                self._afd_req_ids = recv_req.req_ids
+                self._afd_pending_batch_infos.append(recv_req)
+                continue
+
+        pending = getattr(self, "_afd_pending_batch_infos", None)
+        if pending is None:
+            from collections import deque
+            self._afd_pending_batch_infos = deque()
+            pending = self._afd_pending_batch_infos
+
+        if self._afd_batchsize_attn is None and pending:
+            afd_req = self._afd_pending_batch_infos.popleft()
+            self._afd_batchsize_attn = afd_req.batch_size
+            self._afd_forward_mode = afd_req.forward_mode
+            self._afd_req_ids = afd_req.req_ids
+
+        for recv_req in recv_reqs:
+            if isinstance(recv_req, AFDReqInput):
                 continue
 
             # Attn side: forward work requests to FFN
@@ -1465,7 +1504,9 @@ class Scheduler(
                 ):
                     self.afd_send_to_ffn.send_pyobj(recv_req)
 
-        self.process_input_requests(recv_reqs)
+            filtered_reqs.append(recv_req)
+
+        self.process_input_requests(filtered_reqs)
 
     @DynamicGradMode()
     def event_loop_overlap(self):

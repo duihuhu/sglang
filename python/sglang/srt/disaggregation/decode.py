@@ -1048,7 +1048,18 @@ class SchedulerDisaggregationDecodeMixin:
 
         while True:
             recv_reqs = self.recv_requests()
-            SchedulerAFDMixin.afd_recv_messages(self)
+            extra_reqs = SchedulerAFDMixin.afd_recv_messages(self)
+            if extra_reqs:
+                recv_reqs = recv_reqs + extra_reqs
+            if self.tp_size > 1 and not self.server_args.enable_dp_attention:
+                from sglang.srt.utils.common import broadcast_pyobj
+
+                recv_reqs = broadcast_pyobj(
+                    recv_reqs,
+                    self.tp_group.rank,
+                    self.tp_cpu_group,
+                    src=self.tp_group.ranks[0],
+                )
             SchedulerAFDMixin.afd_forward_work_requests(self, recv_reqs)
             self.process_input_requests(recv_reqs)
             self.process_decode_queue()

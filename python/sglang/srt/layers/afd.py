@@ -18,6 +18,7 @@ import itertools
 import logging
 import multiprocessing
 import os
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -191,9 +192,13 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
             data = socket.recv(copy=False)
         except zmq.Again:
             raise TimeoutError("AFD ZMQ recv timed out — peer may be dead")
-        buf = torch.frombuffer(bytearray(data), dtype=metadata["dtype"]).reshape(
-            metadata["shape"]
-        )
+        raw = bytearray(data)
+        if len(raw) == 0:
+            buf = torch.empty(metadata["shape"], dtype=metadata["dtype"])
+        else:
+            buf = torch.frombuffer(raw, dtype=metadata["dtype"]).reshape(
+                metadata["shape"]
+            )
         return buf.to(self._get_cuda_device(), non_blocking=True)
 
     def send_tensor(self, x: torch.Tensor):
@@ -203,7 +208,8 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
         metadata = {"shape": list(cpu_tensor.shape), "dtype": cpu_tensor.dtype}
         try:
             socket.send_pyobj(metadata, zmq.SNDMORE)
-            socket.send(cpu_tensor.numpy().tobytes())
+            # numpy doesn't support bfloat16; use raw storage bytes instead
+            socket.send(bytes(cpu_tensor.untyped_storage()))
         except zmq.Again:
             raise TimeoutError("AFD ZMQ send timed out — peer may be dead")
 
@@ -603,18 +609,18 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
             self.ffn_send(x)
 
 
-# --------------- Heterogeneous TP communicator (Phase 6.4: sharded parallel) ---------------
+# --------------- TP-aware communicator (rank-0 ZMQ + NVLink broadcast) ---------------
 
 
-class ShardedParallelCommunicator(FifoTensorCommunicator):
-    """Sharded parallel communicator for heterogeneous TP (TP_A != TP_F).
+class BroadcastTensorCommunicator(FifoTensorCommunicator):
+    """TP-aware communicator: rank 0 does ZMQ, other ranks get data via broadcast.
 
-    Each local rank sends/receives a shard of the FULL tensor to/from
-    corresponding remote rank(s), then all_gathers locally to reconstruct
-    the full tensor. This uses min(TP_A, TP_F) parallel cross-node links.
+    Works for both homogeneous and heterogeneous TP (any N:M).
+    After all-reduce each TP rank holds the identical full tensor, so only
+    one rank needs to send/recv cross-node.  Other ranks reconstruct via
+    NVLink broadcast (negligible latency).
 
-    R1 fix: supports different TP sizes via rank-to-rank mapping.
-    R2 fix: transmits original num_tokens in metadata so receiver can truncate padding.
+    Cross-node traffic: 2NH per layer (independent of TP sizes).
     """
 
     def __init__(
@@ -622,13 +628,11 @@ class ShardedParallelCommunicator(FifoTensorCommunicator):
         inner_comm: FifoTensorCommunicator,
         local_tp_size: int,
         local_tp_rank: int,
-        remote_tp_size: int,
     ):
         super().__init__()
         self.inner_comm = inner_comm
         self.local_tp_size = local_tp_size
         self.local_tp_rank = local_tp_rank
-        self.remote_tp_size = remote_tp_size
         self._tp_group = None
 
     def _get_tp_group(self):
@@ -639,64 +643,74 @@ class ShardedParallelCommunicator(FifoTensorCommunicator):
         return self._tp_group
 
     def send_tensor(self, x: torch.Tensor):
-        if self.local_tp_size == 1:
-            # R2: wrap with original num_tokens metadata
-            self.inner_comm.send_tensor(
-                self._pack_with_metadata(x, x.shape[0])
-            )
-            return
-
-        num_tokens = x.shape[0]
-        chunk_size = (num_tokens + self.local_tp_size - 1) // self.local_tp_size
-        padded_tokens = chunk_size * self.local_tp_size
-        if padded_tokens != num_tokens:
-            pad = torch.zeros(
-                padded_tokens - num_tokens,
-                x.shape[1],
-                dtype=x.dtype,
-                device=x.device,
-            )
-            x = torch.cat([x, pad], dim=0)
-
-        start = self.local_tp_rank * chunk_size
-        my_shard = x[start : start + chunk_size].contiguous()
-        # R2: embed original num_tokens so receiver can truncate
-        self.inner_comm.send_tensor(
-            self._pack_with_metadata(my_shard, num_tokens)
-        )
+        if self.local_tp_rank == 0:
+            self.inner_comm.send_tensor(x)
 
     def recv_tensor(self) -> torch.Tensor:
-        packed = self.inner_comm.recv_tensor()
-        my_shard, original_num_tokens = self._unpack_metadata(packed)
+        if self.local_tp_rank == 0:
+            tensor = self.inner_comm.recv_tensor()
+        else:
+            tensor = None
 
-        if self.local_tp_size == 1:
-            return my_shard[:original_num_tokens]
+        if self.local_tp_size <= 1:
+            return tensor
 
         tp_group = self._get_tp_group()
-        shard_list = [torch.empty_like(my_shard) for _ in range(self.local_tp_size)]
-        dist.all_gather(shard_list, my_shard, group=tp_group.device_group)
-        full = torch.cat(shard_list, dim=0)
-        # R2: truncate to original num_tokens (remove padding)
-        return full[:original_num_tokens]
 
-    @staticmethod
-    def _pack_with_metadata(
-        tensor: torch.Tensor, original_num_tokens: int
-    ) -> torch.Tensor:
-        """Append a 1-element metadata row containing original_num_tokens."""
-        device = tensor.device
-        dtype = tensor.dtype
-        meta = torch.zeros(1, tensor.shape[1], dtype=dtype, device=device)
-        meta[0, 0] = float(original_num_tokens)
-        return torch.cat([tensor, meta], dim=0)
+        # Broadcast shape + dtype so non-rank-0 can allocate
+        if self.local_tp_rank == 0:
+            shape_dtype = torch.tensor(
+                [tensor.shape[0], tensor.shape[1], _dtype_to_int(tensor.dtype)],
+                dtype=torch.long,
+                device=tensor.device,
+            )
+        else:
+            shape_dtype = torch.empty(3, dtype=torch.long, device=f"cuda:{torch.cuda.current_device()}")
 
-    @staticmethod
-    def _unpack_metadata(
-        packed: torch.Tensor,
-    ) -> Tuple[torch.Tensor, int]:
-        """Extract the metadata row and return (tensor, original_num_tokens)."""
-        original_num_tokens = int(packed[-1, 0].item())
-        return packed[:-1], original_num_tokens
+        dist.broadcast(shape_dtype, src=tp_group.ranks[0], group=tp_group.device_group)
+
+        if self.local_tp_rank != 0:
+            tensor = torch.empty(
+                int(shape_dtype[0].item()),
+                int(shape_dtype[1].item()),
+                dtype=_int_to_dtype(int(shape_dtype[2].item())),
+                device=f"cuda:{torch.cuda.current_device()}",
+            )
+
+        dist.broadcast(tensor, src=tp_group.ranks[0], group=tp_group.device_group)
+        return tensor
+
+
+# dtype <-> int mapping for broadcasting tensor metadata
+_DTYPE_MAP = {
+    torch.float16: 0,
+    torch.bfloat16: 1,
+    torch.float32: 2,
+    torch.float64: 3,
+    torch.int32: 4,
+    torch.int64: 5,
+}
+_INT_TO_DTYPE = {v: k for k, v in _DTYPE_MAP.items()}
+
+
+def _dtype_to_int(dtype: torch.dtype) -> int:
+    result = _DTYPE_MAP.get(dtype)
+    if result is None:
+        raise ValueError(
+            f"Unsupported dtype {dtype} for AFD tensor transfer. "
+            f"Supported: {list(_DTYPE_MAP.keys())}"
+        )
+    return result
+
+
+def _int_to_dtype(i: int) -> torch.dtype:
+    result = _INT_TO_DTYPE.get(i)
+    if result is None:
+        raise ValueError(
+            f"Unknown dtype code {i} in AFD tensor metadata. "
+            f"Known codes: {list(_INT_TO_DTYPE.keys())}"
+        )
+    return result
 
 
 # --------------- Async communication wrapper (C2 optimization) ---------------
@@ -717,11 +731,27 @@ class AsyncTensorCommunicator:
         )
         self._pending_recv: Optional[torch.Tensor] = None
         self._recv_event: Optional[torch.cuda.Event] = None
+        self._send_thread: Optional[object] = None
 
     @torch.compiler.disable()
     def send_async(self, x: torch.Tensor):
-        if self.comm_stream is not None:
+        if self.comm_stream is not None and hasattr(self.inner, "send_tensor_nonblocking"):
+            compute_event = torch.cuda.current_stream().record_event()
+
+            def _deferred_send():
+                compute_event.synchronize()
+                self.inner.send_tensor_nonblocking(x)
+
+            if self._send_thread is not None:
+                self._send_thread.join(timeout=30)
+            self._send_thread = threading.Thread(
+                target=_deferred_send, daemon=True, name="ucx-deferred-send",
+            )
+            self._send_thread.start()
+        elif self.comm_stream is not None:
+            compute_event = torch.cuda.current_stream().record_event()
             with torch.cuda.stream(self.comm_stream):
+                self.comm_stream.wait_event(compute_event)
                 self.inner.send_tensor(x)
         else:
             self.inner.send_tensor(x)
@@ -738,6 +768,11 @@ class AsyncTensorCommunicator:
 
     @torch.compiler.disable()
     def recv_wait(self) -> torch.Tensor:
+        if self._send_thread is not None:
+            self._send_thread.join(timeout=30)
+            self._send_thread = None
+        if hasattr(self.inner, "fence"):
+            self.inner.fence()
         if self._recv_event is not None:
             self._recv_event.synchronize()
         result = self._pending_recv
@@ -773,31 +808,32 @@ def get_tensor_communicator() -> FifoTensorCommunicator:
     if perspective is None:
         raise RuntimeError("AFD perspective is not set.")
 
-    if os.environ.get("MLC_INTERFACE"):
-        # F1 Step 6: StepMesh natively supports N:M sharded communication,
-        # no need for ShardedParallelCommunicator wrapper
+    server_args = get_global_server_args()
+    comm_backend = getattr(server_args, "afd_comm_backend", None) or "auto"
+
+    if comm_backend == "ucx" or (
+        comm_backend == "auto" and os.environ.get("AFD_UCX_TLS")
+    ):
+        from sglang.srt.layers.rdma_comm import UcxTensorCommunicator
+
+        return UcxTensorCommunicator(perspective)
+
+    if comm_backend == "stepmesh" or (
+        comm_backend == "auto" and os.environ.get("MLC_INTERFACE")
+    ):
         return StepMeshTensorCommunicator(perspective)
 
-    # ZMQ path: wrap with ShardedParallelCommunicator for heterogeneous TP
-    base_comm = ZMQSimpleTensorCommunicator(perspective)
-    server_args = get_global_server_args()
+    # ZMQ path: only rank 0 does ZMQ, others get data via NVLink broadcast.
     local_tp = server_args.tp_size
-    attn_tp = getattr(server_args, "afd_attn_tp", None) or local_tp
-    ffn_tp = getattr(server_args, "afd_ffn_tp", None) or local_tp
-    if attn_tp != ffn_tp:
-        remote_tp = (
-            ffn_tp
-            if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN
-            else attn_tp
-        )
-        local_tp_rank = dist.get_rank() % local_tp if dist.is_initialized() else 0
-        return ShardedParallelCommunicator(
+    local_tp_rank = dist.get_rank() % local_tp if dist.is_initialized() else 0
+    if local_tp > 1:
+        base_comm = ZMQSimpleTensorCommunicator(perspective) if local_tp_rank == 0 else None
+        return BroadcastTensorCommunicator(
             inner_comm=base_comm,
             local_tp_size=local_tp,
             local_tp_rank=local_tp_rank,
-            remote_tp_size=remote_tp,
         )
-    return base_comm
+    return ZMQSimpleTensorCommunicator(perspective)
 
 
 def get_afd_micro_batch() -> int:
@@ -837,6 +873,14 @@ def model_forward_afd_split_inputs(
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> List[Dict]:
+        if forward_batch.afd_children is None:
+            return [dict(
+                hidden_states=hidden_states,
+                residual=residual,
+                positions=positions,
+                forward_batch=forward_batch,
+                afd_subbatch_index=0,
+            )]
         result = []
         for idx, child_batch in enumerate(forward_batch.afd_children):
             token_slice = slice(*child_batch.afd_parent_token_range)
@@ -895,8 +939,14 @@ def model_forward_afd(
     residual: Optional[torch.Tensor],
     input_data_scatter_mode: ScatterMode,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if hidden_states.shape[0] == 0:
+        return hidden_states, residual
+
     num_layers = len(layers)
-    m_stage = get_afd_micro_batch()
+    if forward_batch.afd_children is not None:
+        m_stage = len(forward_batch.afd_children)
+    else:
+        m_stage = 1
 
     input_arrs = model_forward_afd_split_inputs(
         layers=layers,

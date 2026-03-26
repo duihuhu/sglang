@@ -207,6 +207,12 @@ class AfdAttnBackend(AttentionBackend):
     def init_forward_metadata(self, forward_batch: "ForwardBatch"):
         self.primary.init_forward_metadata(forward_batch=forward_batch)
         if forward_batch.afd_children is not None:
+            from sglang.srt.layers.afd import afd_is_ffn
+
+            if afd_is_ffn():
+                # FFN side uses AFDProxyAttention (no-op); children don't have
+                # req_pool_indices so skip their attention metadata init.
+                return
             for child_backend, child_batch in zip(
                 self.children, forward_batch.afd_children, strict=True
             ):

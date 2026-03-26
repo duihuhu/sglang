@@ -827,6 +827,9 @@ class CommunicateWithAllReduceAndLayerNormFn:
         *,
         residual_input_mode,
     ):
+        if hidden_states.shape[0] == 0:
+            return hidden_states, residual
+
         if get_attn_tp_context().input_scattered:
             return CommunicateWithAllReduceAndLayerNormFn._tp_all_reduce_with_scattered_residual(
                 hidden_states,

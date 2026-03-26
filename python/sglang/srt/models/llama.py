@@ -293,6 +293,56 @@ class LlamaDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
+        self.layer_id = layer_id
+
+        from sglang.srt.layers.afd import get_afd_perspective
+
+        if get_afd_perspective() is not None:
+            from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
+
+            self.layer_scatter_modes = LayerScatterModes.init_new(
+                layer_id=layer_id,
+                num_layers=config.num_hidden_layers,
+                is_layer_sparse=False,
+                is_previous_layer_sparse=False,
+                is_next_layer_sparse=False,
+            )
+            self.layer_communicator = LayerCommunicator(
+                layer_scatter_modes=self.layer_scatter_modes,
+                input_layernorm=self.input_layernorm,
+                post_attention_layernorm=self.post_attention_layernorm,
+                is_last_layer=(layer_id == config.num_hidden_layers - 1),
+            )
+
+            from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+            AFDDecoderLayerMixin._afd_init(self)
+
+    def forward_afd_A(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_A(
+            self, positions, hidden_states, forward_batch, residual
+        )
+
+    def forward_afd_F(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_F(
+            self, hidden_states, forward_batch, residual
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -376,6 +426,31 @@ class LlamaModel(nn.Module):
             hidden_states = pp_proxy_tensors["hidden_states"]
             residual = pp_proxy_tensors["residual"]
             deferred_norm = None
+
+        from sglang.srt.layers.afd import get_afd_perspective
+
+        if get_afd_perspective() is not None:
+            from sglang.srt.layers.afd import model_forward_afd
+            from sglang.srt.layers.communicator import ScatterMode
+
+            hidden_states, residual = model_forward_afd(
+                layers=self.layers,
+                positions=positions,
+                forward_batch=forward_batch,
+                hidden_states=hidden_states,
+                residual=residual,
+                input_data_scatter_mode=ScatterMode.model_input_output(),
+            )
+            if not self.pp_group.is_last_rank:
+                return PPProxyTensors(
+                    {"hidden_states": hidden_states, "residual": residual}
+                )
+            if hidden_states.shape[0] != 0:
+                if residual is not None:
+                    hidden_states, _ = self.norm(hidden_states, residual)
+                else:
+                    hidden_states = self.norm(hidden_states)
+            return hidden_states
 
         aux_hidden_states = []
         for i in range(self.start_layer, self.end_layer):
@@ -601,6 +676,17 @@ class LlamaForCausalLM(nn.Module):
         return len(params_dict)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        from sglang.srt.layers.afd import get_afd_perspective
+        from sglang.srt.layers.afd_mixin import AFDWeightFilter
+
+        afd_perspective = get_afd_perspective()
+        if afd_perspective is not None:
+            weights = (
+                (name, tensor)
+                for name, tensor in weights
+                if AFDWeightFilter.should_load(name, afd_perspective)
+            )
+
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
