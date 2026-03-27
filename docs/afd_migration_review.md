@@ -1510,11 +1510,30 @@ Prefill 和 Decode 各自有自己的 Attn+FFN 进程对。
 | L6-3 | NIC 自动检测依赖 nvidia-smi topo | 容器内不可用时回退 K=1 | AFD_UCX_NUM_NICS 手动覆盖 |
 | L6-4 | UCX-Py 0.35 已停维 | RAPIDS 推荐 UCXX | 功能满足，长期需迁移 |
 
-### 性能优化方案（R6-13 + R6-14 + R6-16）
+### 性能优化（已实现）
 
-**当前瓶颈分析：**
+**R6-18：热 BufferPool warmup 预分配**
 
-当前 UCX 通信器在 `_UcxP2PCommunicator.send()` 中使用 `torch.cuda.synchronize()`
+`_BufferPool` 新增 `warmup(shape, dtype, device, count)` 方法，在初始化时按模型
+hidden_size 和 microbatch 数预分配 GPU buffer。运行时 recv 路径零 `torch.empty()` 调用。
+不知道 shape 时保持懒分配向后兼容。
+
+**R6-19：完全异步 send pipeline**
+
+- `_UcxP2PCommunicator.send_nonblocking(x)` — 提交到 bridge 返回 Future，不等完成
+- `UcxTensorCommunicator.send_tensor_nonblocking(x)` — 上层非阻塞 send
+- `UcxTensorCommunicator.fence()` — 等待 in-flight send 完成
+- `AsyncTensorCommunicator.send_async(x)` — 后台线程等 CUDA event 后提交 nonblocking send
+- `AsyncTensorCommunicator.recv_wait()` — 自动 join send 线程 + 调用 fence
+
+数据安全保证：后台线程先 `compute_event.synchronize()` 确保 GPU 数据就绪，
+再提交 UCX send。Python GIL 不影响（关键操作 event.synchronize/UCX C 扩展均释放 GIL）。
+
+### 性能优化方案历史（R6-13 + R6-14 + R6-16）
+
+**原始瓶颈分析（已解决）：**
+
+原 UCX 通信器在 `_UcxP2PCommunicator.send()` 中使用 `torch.cuda.synchronize()`
 做全设备同步。这会阻塞所有 CUDA stream，破坏 microbatch pipeline 的通信-计算重叠。
 
 AFD 的 microbatch pipeline 依赖 `AsyncTensorCommunicator` 的三个方法实现重叠：
@@ -1611,14 +1630,16 @@ BufferPool 需要至少 M 个 buffer 同时在途：
 
 | 优先级 | 编号 | 描述 | 来源 | 状态 |
 |--------|------|------|------|------|
-| P1 | L5 | FFN sync 标志在 batch=None 时未清除 | 第五轮 | **已修复**（else 分支清除状态） |
-| P1 | L6 | ZMQ drain last-one-wins 潜在 batch 不匹配 | 第五轮 | **已修复**（deque 队列 FIFO） |
-| P2 | R6-12 | 多节点跨机 IB RDMA 实测 | 第六轮 | 待后续 |
-| P2 | R6-13 | torch.cuda.synchronize() → CUDA event 精细同步（R6-16 前置依赖） | 第六轮 | 待优化 |
-| P2 | R6-14 | UCX 参数调优（RNDV_THRESH/MAX_RNDV_RAILS） | 第六轮 | 待优化 |
+| P1 | L5 | FFN sync 标志在 batch=None 时未清除 | 第五轮 | **已修复** |
+| P1 | L6 | ZMQ drain last-one-wins 潜在 batch 不匹配 | 第五轮 | **已修复** |
+| P2 | R6-12 | 多节点跨机 IB RDMA 实测 | 第六轮 | 待后续（需第二台机器） |
+| P2 | R6-13 | CUDA event 精细同步 | 第六轮 | **已完成**（send_async event + current_stream sync） |
+| P2 | R6-14 | UCX 参数调优 | 第六轮 | **已完成**（put_zcopy + ZCOPY_THRESH） |
+| P2 | R6-18 | 热 BufferPool warmup 预分配 | 第六轮 | **已完成** |
+| P2 | R6-19 | 完全异步 send pipeline + fence | 第六轮 | **已完成** |
 | P2 | F5 | Qwen2 Dense AFD | 第五轮 | 待实现 |
-| P3 | R6-15 | TCP-only fallback 修复 | 第六轮 | 待修复 |
-| P3 | R5-9 | 非 rank-0 避免创建无用 ZMQ socket | 第五轮 | **已修复**（仅 rank 0 创建） |
-| P4 | R6-16 | M-buffer microbatch pipeline（通信与计算重叠，依赖 R6-13） | 第六轮 | 待优化 |
+| P3 | R6-15 | TCP-only fallback 修复 | 第六轮 | 待修复（低优先级） |
+| P3 | R5-9 | 非 rank-0 避免创建无用 ZMQ socket | 第五轮 | **已修复** |
+| P4 | R6-16 | M-buffer pipeline profiler 验证 | 第六轮 | 代码就绪，待 profiler |
 | P4 | R6-17 | UCXX 迁移评估 | 第六轮 | 长期规划 |
-| P4 | R5-10 | `_dtype_to_int` 未知 dtype 报错 | 第五轮 | **已修复**（raise ValueError） |
+| P4 | R5-10 | `_dtype_to_int` 未知 dtype 报错 | 第五轮 | **已修复** |
