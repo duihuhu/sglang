@@ -2,10 +2,14 @@ import argparse
 import csv
 import glob
 import os
+import re
 import subprocess
 import sys
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
+
+
+_D_POS_NAME_RE = re.compile(r"^(D_[A-Za-z0-9_]+)_pos(-?\d+)$")
 
 
 def run_nsys_stats(nsys_bin: str, rep_path: str, output_prefix: str) -> str:
@@ -41,7 +45,7 @@ def run_nsys_stats(nsys_bin: str, rep_path: str, output_prefix: str) -> str:
     return trace_csv
 
 
-def detect_columns(header: List[str]) -> Tuple[str, str]:
+def detect_columns(header: List[str]) -> Tuple[str, str, Optional[str]]:
     lowered = [h.strip().lower() for h in header]
 
     name_col = None
@@ -61,23 +65,36 @@ def detect_columns(header: List[str]) -> Tuple[str, str]:
             dur_col = header[i]
             break
 
+    start_col: Optional[str] = None
+    for i, h in enumerate(lowered):
+        if h in ("start", "start_us", "start (us)", "start(us)", "begin", "begin (us)", "begin(us)"):
+            start_col = header[i]
+            break
+    if start_col is None:
+        for i, h in enumerate(lowered):
+            if "start" in h or "begin" in h:
+                start_col = header[i]
+                break
+
     if name_col is None or dur_col is None:
         raise RuntimeError(
             "Cannot detect name/duration columns in CSV header. "
             f"header={header}"
         )
-    return name_col, dur_col
+    return name_col, dur_col, start_col
 
 
 def parse_trace_csv(csv_path: str) -> Dict[str, List[float]]:
-    values: Dict[str, List[float]] = defaultdict(list)
+    # Keep (start, duration) so we can sort by time even if nsys CSV is not ordered.
+    values_with_start: Dict[str, List[Tuple[float, float]]] = defaultdict(list)
     with open(csv_path, "r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
             raise RuntimeError(f"CSV has no header: {csv_path}")
-        name_col, dur_col = detect_columns(reader.fieldnames)
-        print(f"[info] name_col={name_col}, dur_col={dur_col}")
+        name_col, dur_col, start_col = detect_columns(reader.fieldnames)
+        print(f"[info] name_col={name_col}, dur_col={dur_col}, start_col={start_col}")
 
+        row_idx = 0
         for row in reader:
             name = (row.get(name_col) or "").strip()
             if not name:
@@ -89,7 +106,22 @@ def parse_trace_csv(csv_path: str) -> Dict[str, List[float]]:
                 dur = float(raw_dur)
             except ValueError:
                 continue
-            values[name].append(dur)
+            if start_col is None:
+                start = float(row_idx)
+            else:
+                raw_start = (row.get(start_col) or "").strip()
+                try:
+                    start = float(raw_start)
+                except ValueError:
+                    start = float(row_idx)
+
+            values_with_start[name].append((start, dur))
+            row_idx += 1
+
+    values: Dict[str, List[float]] = defaultdict(list)
+    for name, arr in values_with_start.items():
+        arr.sort(key=lambda x: x[0])
+        values[name] = [dur for _, dur in arr]
     return values
 
 
@@ -125,33 +157,68 @@ def write_combined_stats(
     values: Dict[str, List[float]],
     out_csv: str,
     d_bucket_count: int,
+    d_num_cycles: int,
     d_pick_positions: List[int],
 ):
     rows = []
     pick_cols = [f"d_pos_{p}_us" for p in d_pick_positions]
+    d_pos_group: Dict[str, Dict[int, List[float]]] = defaultdict(lambda: defaultdict(list))
+    d_fallback_seq: Dict[str, List[float]] = defaultdict(list)
+
     for raw_name, arr in values.items():
         if not arr:
             continue
-
         name = strip_leading_colon(raw_name)
-        cnt = len(arr)
-
-        mean_us = None
-        d_values = [None] * len(d_pick_positions)
 
         if name.startswith("P_"):
-            mean_us = sum(arr) / cnt
-        elif name.startswith("D_"):
-            merged = split_and_average_in_order(arr, d_bucket_count)
-            for i, pos in enumerate(d_pick_positions):
-                # 1-based position indexing by user definition: 32 means merged[31]
-                idx = pos - 1
-                if 0 <= idx < len(merged):
-                    d_values[i] = merged[idx]
-        else:
+            rows.append((name, len(arr), sum(arr) / len(arr), *([None] * len(d_pick_positions))))
             continue
 
-        rows.append((name, cnt, mean_us, *d_values))
+        if not name.startswith("D_"):
+            continue
+
+        m = _D_POS_NAME_RE.match(name)
+        if m is None:
+            # Backward compatibility: old traces without decode-position suffix.
+            d_fallback_seq[name].extend(arr)
+            continue
+
+        base_name = m.group(1)
+        pos_val = int(m.group(2))
+        d_pos_group[base_name][pos_val].extend(arr)
+
+    # Prefer exact position-tagged stats when available.
+    for base_name, pos_map in d_pos_group.items():
+        d_values = [None] * len(d_pick_positions)
+        sorted_positions = sorted(pos_map.keys())
+        for i, pick_pos in enumerate(d_pick_positions):
+            # pick_pos is 1-based output token position.
+            idx = pick_pos - 1
+            if 0 <= idx < len(sorted_positions):
+                k = sorted_positions[idx]
+                vals = pos_map[k]
+                if vals:
+                    d_values[i] = sum(vals) / len(vals)
+        total_cnt = sum(len(v) for v in pos_map.values())
+        rows.append((base_name, total_cnt, None, *d_values))
+
+    # Fallback for non-position-tagged D_* markers.
+    for name, arr in d_fallback_seq.items():
+        if d_num_cycles <= 0:
+            raise ValueError("--d-num-cycles must be >= 1")
+        d_values = [None] * len(d_pick_positions)
+        total_bucket_count = max(1, d_bucket_count) * d_num_cycles
+        merged_total = split_and_average_in_order(arr, total_bucket_count)
+        for i, pos in enumerate(d_pick_positions):
+            idx_in_cycle = pos - 1
+            vals: List[float] = []
+            for c in range(d_num_cycles):
+                idx = c * d_bucket_count + idx_in_cycle
+                if 0 <= idx < len(merged_total):
+                    vals.append(merged_total[idx])
+            if vals:
+                d_values[i] = sum(vals) / len(vals)
+        rows.append((name, len(arr), None, *d_values))
 
     rows.sort(key=lambda x: x[0])
     with open(out_csv, "w", newline="", encoding="utf-8") as f:
@@ -177,7 +244,7 @@ def main():
     parser.add_argument(
         "--out-dir",
         type=str,
-        default="/workspace/benchmark/sglang-afd/bash-test",
+        default="/mnt/nvme1/lt/cache/nvtx_stats",
         help="Output directory for generated CSVs",
     )
     parser.add_argument(
@@ -191,6 +258,15 @@ def main():
         type=int,
         default=128,
         help="For D_* ops, split sequential samples into this many ordered buckets and average each bucket.",
+    )
+    parser.add_argument(
+        "--d-num-cycles",
+        type=int,
+        default=1,
+        help=(
+            "Number of concatenated decode rounds/cycles in this trace. "
+            "Used to align D_* operator samples to the correct token position when num_seqs > batch_size."
+        ),
     )
     parser.add_argument(
         "--d-pick-positions",
@@ -224,10 +300,14 @@ def main():
             f"{effective_bucket_count} to satisfy d_pick_positions={d_pick_positions}"
         )
 
+    if args.d_num_cycles <= 0:
+        raise ValueError("--d-num-cycles must be >= 1")
+
     write_combined_stats(
         values,
         combined_csv,
         d_bucket_count=effective_bucket_count,
+        d_num_cycles=args.d_num_cycles,
         d_pick_positions=d_pick_positions,
     )
 

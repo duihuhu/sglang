@@ -28,6 +28,7 @@ from sglang.srt.model_loader.weight_utils import (
 )
 from sglang.srt.models.qwen2 import Qwen2MLP as Qwen3MLP
 from sglang.srt.models.qwen2 import Qwen2Model
+from sglang.srt.models.qwen2 import _profile_op
 from sglang.srt.models.utils import apply_qk_norm
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import add_prefix, is_cuda, is_npu
@@ -37,6 +38,7 @@ Qwen3Config = None
 logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_npu = is_npu()
+
 
 if _is_npu:
     from sgl_kernel_npu.norm.split_qkv_rmsnorm_rope import split_qkv_rmsnorm_rope
@@ -138,8 +140,11 @@ class Qwen3Attention(nn.Module):
         )
         self.alt_stream = alt_stream
 
-    def forward_prepare_native(self, positions, hidden_states):
-        qkv, _ = self.qkv_proj(hidden_states)
+    def forward_prepare_native(
+        self, positions, hidden_states, forward_batch: ForwardBatch
+    ):
+        with _profile_op("qkv_proj", forward_batch, positions=positions):
+            qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = apply_qk_norm(
             q=q,
@@ -149,27 +154,33 @@ class Qwen3Attention(nn.Module):
             head_dim=self.head_dim,
             alt_stream=self.alt_stream,
         )
-        q, k = self.rotary_emb(positions, q, k)
+        with _profile_op("rotary_emb", forward_batch, positions=positions):
+            q, k = self.rotary_emb(positions, q, k)
         return q, k, v
 
     def forward_prepare_npu(self, positions, hidden_states, forward_batch):
-        qkv, _ = self.qkv_proj(hidden_states)
+        with _profile_op("qkv_proj", forward_batch, positions=positions):
+            qkv, _ = self.qkv_proj(hidden_states)
 
         if self.attn.layer_id == forward_batch.token_to_kv_pool.start_layer:
             self.rotary_emb.get_cos_sin_with_position(positions)
-        q, k, v = split_qkv_rmsnorm_rope(
-            qkv,
-            self.rotary_emb.position_sin,
-            self.rotary_emb.position_cos,
-            self.q_size,
-            self.kv_size,
-            self.head_dim,
-            eps=self.q_norm.variance_epsilon,
-            q_weight=self.q_norm.weight,
-            k_weight=self.k_norm.weight,
-            q_bias=getattr(self.q_norm, "bias", None),
-            k_bias=getattr(self.k_norm, "bias", None),
-        )
+
+        with _profile_op(
+            "split_qkv_rmsnorm_rope", forward_batch, positions=positions
+        ):
+            q, k, v = split_qkv_rmsnorm_rope(
+                qkv,
+                self.rotary_emb.position_sin,
+                self.rotary_emb.position_cos,
+                self.q_size,
+                self.kv_size,
+                self.head_dim,
+                eps=self.q_norm.variance_epsilon,
+                q_weight=self.q_norm.weight,
+                k_weight=self.k_norm.weight,
+                q_bias=getattr(self.q_norm, "bias", None),
+                k_bias=getattr(self.k_norm, "bias", None),
+            )
         return q, k, v
 
     def forward(
@@ -185,6 +196,7 @@ class Qwen3Attention(nn.Module):
             q, k, v = self.forward_prepare_native(
                 positions=positions,
                 hidden_states=hidden_states,
+                forward_batch=forward_batch,
             )
         else:
             q, k, v = self.forward_prepare_npu(
@@ -197,8 +209,11 @@ class Qwen3Attention(nn.Module):
             q = q.to(torch.bfloat16)
             k = k.to(torch.bfloat16)
 
-        attn_output = self.attn(q, k, v, forward_batch)
-        output, _ = self.o_proj(attn_output)
+        with _profile_op("attn", forward_batch, positions=positions):
+            attn_output = self.attn(q, k, v, forward_batch)
+
+        with _profile_op("o_proj", forward_batch, positions=positions):
+            output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -279,12 +294,14 @@ class Qwen3DecoderLayer(nn.Module):
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
-        hidden_states, residual = self.layer_communicator.prepare_attn(
-            hidden_states,
-            residual,
-            forward_batch,
-            post_residual_addition=post_residual_addition,
-        )
+        with _profile_op("input_layernorm", forward_batch, positions=positions):
+            hidden_states, residual = self.layer_communicator.prepare_attn(
+                hidden_states,
+                residual,
+                forward_batch,
+                post_residual_addition=post_residual_addition,
+            )
+
         if hidden_states.shape[0] != 0:
             hidden_states = self.self_attn(
                 positions=positions,
@@ -293,22 +310,27 @@ class Qwen3DecoderLayer(nn.Module):
             )
 
         # Fully Connected
-        hidden_states, residual = self.layer_communicator.prepare_mlp(
-            hidden_states,
-            residual,
-            forward_batch,
-            cache=(
-                [self.mlp.gate_up_proj.weight, self.mlp.down_proj.weight]
-                if _is_npu
-                and not get_global_server_args().enable_piecewise_cuda_graph
-                and (
-                    hasattr(self.mlp.gate_up_proj, "weight")
-                    and hasattr(self.mlp.down_proj, "weight")
-                )
-                else None
-            ),
-        )
-        hidden_states = self.mlp(hidden_states)
+        with _profile_op(
+            "post_attention_layernorm", forward_batch, positions=positions
+        ):
+            hidden_states, residual = self.layer_communicator.prepare_mlp(
+                hidden_states,
+                residual,
+                forward_batch,
+                cache=(
+                    [self.mlp.gate_up_proj.weight, self.mlp.down_proj.weight]
+                    if _is_npu
+                    and not get_global_server_args().enable_piecewise_cuda_graph
+                    and (
+                        hasattr(self.mlp.gate_up_proj, "weight")
+                        and hasattr(self.mlp.down_proj, "weight")
+                    )
+                    else None
+                ),
+            )
+
+        hidden_states = self.mlp(hidden_states, forward_batch=forward_batch)
+
         if _is_npu and get_cmo_stream():
             wait_cmo_stream()
         hidden_states, residual = self.layer_communicator.postprocess_layer(
@@ -403,6 +425,18 @@ class Qwen3ForCausalLM(nn.Module):
         get_embedding: bool = False,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
+        input_ids_shape = tuple(input_ids.shape) if input_ids is not None else None
+        positions_shape = tuple(positions.shape) if positions is not None else None
+        input_embeds_shape = (
+            tuple(input_embeds.shape) if input_embeds is not None else None
+        )
+        logger.info(
+            "[model_input] input_ids.shape=%s positions.shape=%s input_embeds.shape=%s",
+            input_ids_shape,
+            positions_shape,
+            input_embeds_shape,
+        )
+
         hidden_states = self.model(
             input_ids,
             positions,

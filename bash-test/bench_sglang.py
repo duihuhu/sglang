@@ -1,4 +1,5 @@
 import argparse
+import concurrent.futures
 import copy
 import os
 import random
@@ -66,16 +67,29 @@ def extract_completion_tokens(resp_json: Dict[str, Any]) -> Optional[int]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark SGLang with sequential /generate requests")
+    parser = argparse.ArgumentParser(
+        description="Benchmark SGLang with batched /generate requests"
+    )
     parser.add_argument("--server-url", type=str, default="http://127.0.0.1:30000", help="SGLang HTTP base URL")
-    parser.add_argument("--num_seqs", type=int, default=5, help="Number of sequences (requests) to send sequentially")
+    parser.add_argument(
+        "--num_seqs",
+        type=int,
+        default=None,
+        help="Total number of requests to send. If omitted, defaults to --batch_size.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,                                                                                                                                         
+        default=1,
+        help="Number of /generate requests to run concurrently in one batch.",
+    )
     parser.add_argument("--input_len", type=int, default=32, help="Input token length (pre-tokenized input_ids)")
     parser.add_argument("--output_len", type=int, default=32, help="max_new_tokens per request")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
-    parser.add_argument("--mem_clock", type=int, default=1593, help="GPU memory clock (MHz)")
+    parser.add_argument("--mem_clock", type=int, default=1593, help="GPU memory clock (MHz)")                                                                                                                            
     parser.add_argument("--gpu_clock", type=int, default=1200, help="GPU graphics/memory clock (MHz)")
     parser.add_argument("--ignore_eos", action="store_true", help="Set sampling_params.ignore_eos=true")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed for generating input_ids")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for generating input_ids")                                                            
     parser.add_argument("--vocab_max", type=int, default=10000, help="Upper bound for random input_ids (exclusive)")
     parser.add_argument("--timeout_s", type=int, default=600, help="HTTP timeout seconds per request")
 
@@ -86,6 +100,12 @@ def main():
     parser.add_argument("--profile-activities", type=str, default="CUDA_PROFILER", help="Comma-separated activities, e.g. CUDA_PROFILER")
 
     args = parser.parse_args()
+    if args.batch_size <= 0:
+        raise ValueError("--batch_size must be >= 1")
+    if args.num_seqs is None:
+        args.num_seqs = args.batch_size
+    if args.num_seqs <= 0:
+        raise ValueError("--num_seqs must be >= 1")
 
     random.seed(args.seed)
     session = requests.Session()
@@ -102,6 +122,9 @@ def main():
         sampling_params = {
             "temperature": args.temperature,
             "max_new_tokens": args.output_len,
+            # Make generation reproducible even when temperature > 0.
+            # Note: this seed affects sampling, not prompt token generation.
+            "sampling_seed": args.seed,
         }
         if args.ignore_eos:
             sampling_params["ignore_eos"] = True
@@ -150,26 +173,47 @@ def main():
             )
 
         print("start to test-------------------")
+        print(f"num_seqs={args.num_seqs}, batch_size={args.batch_size}")
         t0 = time.time()
         total_tokens = 0
         completed = 0
 
-        # Sequential loop: mirrors the style of bash-test/bench.py
-        for i in range(args.num_seqs):
-            print(f"start {i}")
-            payload = {
-                "input_ids": prompts[i],
-                "sampling_params": copy.deepcopy(sampling_params),
-            }
-            resp_json = post_json(session, generate_url, payload, timeout_s=args.timeout_s)
-            ct = extract_completion_tokens(resp_json)
-            if ct is None:
-                raise RuntimeError(
-                    f"Cannot extract completion_tokens from response: {resp_json}"
-                )
-            total_tokens += ct
-            completed += 1
-            print(f"end {i} (completion_tokens={ct})")
+        # Batched loop: each batch can contain multiple concurrent requests.
+        for batch_start in range(0, args.num_seqs, args.batch_size):
+            batch_end = min(batch_start + args.batch_size, args.num_seqs)
+            batch_indexes = list(range(batch_start, batch_end))
+            print(f"start batch [{batch_start}, {batch_end})")
+
+            def _run_one(req_idx: int) -> int:
+                payload = {
+                    "input_ids": prompts[req_idx],
+                    "sampling_params": copy.deepcopy(sampling_params),
+                }
+                # One session per worker to avoid thread-safety issues.
+                with requests.Session() as worker_session:
+                    resp_json = post_json(
+                        worker_session, generate_url, payload, timeout_s=args.timeout_s
+                    )
+                ct = extract_completion_tokens(resp_json)
+                if ct is None:
+                    raise RuntimeError(
+                        f"Cannot extract completion_tokens from response: {resp_json}"
+                    )
+                return ct
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(batch_indexes)
+            ) as executor:
+                future_to_idx = {
+                    executor.submit(_run_one, req_idx): req_idx for req_idx in batch_indexes
+                }
+                for fut in concurrent.futures.as_completed(future_to_idx):
+                    req_idx = future_to_idx[fut]
+                    ct = fut.result()
+                    total_tokens += ct
+                    completed += 1
+                    print(f"end {req_idx} (completion_tokens={ct})")
+            print(f"end batch [{batch_start}, {batch_end})")
             garbage_collection()
 
         t = time.time() - t0

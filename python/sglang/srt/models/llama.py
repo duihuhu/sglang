@@ -17,6 +17,14 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 
 import logging
+import os
+import json
+import atexit
+import signal
+from collections import defaultdict
+import time
+from threading import Lock
+from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -57,6 +65,117 @@ from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
 _is_npu = is_npu()
+
+def _stage_prefix(forward_batch: Optional[ForwardBatch]) -> str:
+    """Decode vs prefill (and related modes) prefix for op logging."""
+    if forward_batch is not None and (
+        forward_batch.forward_mode.is_decode()
+        or forward_batch.forward_mode.is_target_verify()
+        or forward_batch.forward_mode.is_mixed()
+    ):
+        return "D_"
+    return "P_"
+
+
+def _sync_stage_bench_enabled() -> bool:
+    return os.getenv("SGLANG_SYNC_STAGE_BENCH", "0") == "1"
+
+
+def _sync_internal_op_bench_enabled() -> bool:
+    # Backward compatibility: older code used SGLANG_SYNC_OP_BENCH as an internal-op toggle.
+    if "SGLANG_SYNC_INTERNAL_OP_BENCH" in os.environ:
+        return os.getenv("SGLANG_SYNC_INTERNAL_OP_BENCH", "0") == "1"
+    return os.getenv("SGLANG_SYNC_OP_BENCH", "0") == "1"
+
+
+_sync_bench_lock = Lock()
+_sync_bench_values: Dict[str, List[float]] = defaultdict(list)  # op_key -> durations_us (chronological)
+_sync_bench_dump_path: Optional[str] = None
+
+
+def _get_sync_bench_dump_path() -> Optional[str]:
+    dump_dir = os.getenv("SGLANG_OP_BENCH_DUMP_DIR")
+    dump_prefix = os.getenv("SGLANG_OP_BENCH_DUMP_PREFIX")
+    if not dump_dir or not dump_prefix:
+        return None
+    tp_rank = get_tensor_model_parallel_rank()
+    return os.path.join(dump_dir, f"{dump_prefix}_rank{tp_rank}.json")
+
+
+def _dump_sync_op_bench() -> None:
+    global _sync_bench_dump_path
+    if _sync_bench_dump_path is None:
+        _sync_bench_dump_path = _get_sync_bench_dump_path()
+    if not _sync_bench_dump_path:
+        return
+
+    # Best-effort dump on exit; do not raise.
+    try:
+        os.makedirs(os.path.dirname(_sync_bench_dump_path), exist_ok=True)
+        with _sync_bench_lock:
+            payload = {"values": dict(_sync_bench_values)}
+        # Atomic write: write to temp file first, then replace.
+        tmp_path = _sync_bench_dump_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, _sync_bench_dump_path)
+    except Exception:
+        pass
+
+
+@contextmanager
+def _profile_op(
+    op_name: str,
+    stage_prefix: str,
+    positions: Optional[torch.Tensor] = None,
+):
+    start_time = None
+    is_stage_op = op_name in ("TTFT", "TPOT")
+    enable_sync_bench = (
+        (is_stage_op and _sync_stage_bench_enabled())
+        or ((not is_stage_op) and _sync_internal_op_bench_enabled())
+    ) and torch.cuda.is_available()
+
+    if enable_sync_bench:
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        if start_time is not None:
+            torch.cuda.synchronize()
+            elapsed_us = (time.perf_counter() - start_time) * 1e6
+
+            op_key = f"{stage_prefix}{op_name}"
+            # For decode stage, append the decode position (same convention as Qwen2 uses).
+            if (not is_stage_op) and stage_prefix == "D_" and positions is not None:
+                try:
+                    if positions.numel() > 0:
+                        pos_max = int(torch.max(positions).item())
+                        op_key = f"{op_key}_pos{pos_max}"
+                except Exception:
+                    pass
+
+            with _sync_bench_lock:
+                _sync_bench_values[op_key].append(elapsed_us)
+
+
+atexit.register(_dump_sync_op_bench)
+
+
+def _sync_bench_signal_handler(signum: int, _frame) -> None:
+    _dump_sync_op_bench()
+    # Bypass normal teardown to avoid partial writes when we are being killed.
+    os._exit(0)
+
+
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+        signal.signal(_sig, _sync_bench_signal_handler)
+    except Exception:
+        pass
 
 if _is_npu:
     from sgl_kernel_npu.norm.split_qkv_rmsnorm_rope import split_qkv_rmsnorm_rope
@@ -107,12 +226,20 @@ class LlamaMLP(nn.Module):
         forward_batch=None,
         use_reduce_scatter: bool = False,
     ):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(
-            x,
-            skip_all_reduce=use_reduce_scatter,
-        )
+        stage_prefix = _stage_prefix(forward_batch)
+        positions = getattr(forward_batch, "positions", None) if forward_batch else None
+
+        with _profile_op("gate_up_proj", stage_prefix, positions=positions):
+            gate_up, _ = self.gate_up_proj(x)
+
+        with _profile_op("act_fn", stage_prefix, positions=positions):
+            x = self.act_fn(gate_up)
+
+        with _profile_op("down_proj", stage_prefix, positions=positions):
+            x, _ = self.down_proj(
+                x,
+                skip_all_reduce=use_reduce_scatter,
+            )
         return x
 
 
@@ -195,16 +322,26 @@ class LlamaAttention(nn.Module):
             prefix=add_prefix("attn", prefix),
         )
 
-    def forward_prepare_native(self, positions, hidden_states):
-        qkv, _ = self.qkv_proj(hidden_states)
+    def forward_prepare_native(self, positions, hidden_states, forward_batch):
+        stage_prefix = _stage_prefix(forward_batch)
+
+        with _profile_op("qkv_proj", stage_prefix, positions=positions):
+            qkv, _ = self.qkv_proj(hidden_states)
+
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        with _profile_op("rotary_emb", stage_prefix, positions=positions):
+            q, k = self.rotary_emb(positions, q, k)
         return q, k, v
 
     def forward_prepare_npu(self, positions, hidden_states, forward_batch):
-        qkv, _ = self.qkv_proj(hidden_states)
+        stage_prefix = _stage_prefix(forward_batch)
+
+        with _profile_op("qkv_proj", stage_prefix, positions=positions):
+            qkv, _ = self.qkv_proj(hidden_states)
+
         if self.attn.layer_id == forward_batch.token_to_kv_pool.start_layer:
-            self.rotary_emb.get_cos_sin_with_position(positions)
+            with _profile_op("rotary_emb", stage_prefix, positions=positions):
+                self.rotary_emb.get_cos_sin_with_position(positions)
         q, k, v = split_qkv_rmsnorm_rope(
             qkv,
             self.rotary_emb.position_sin,
@@ -229,6 +366,7 @@ class LlamaAttention(nn.Module):
             q, k, v = self.forward_prepare_native(
                 positions=positions,
                 hidden_states=hidden_states,
+                forward_batch=forward_batch,
             )
         else:
             q, k, v = self.forward_prepare_npu(
@@ -237,8 +375,13 @@ class LlamaAttention(nn.Module):
                 forward_batch=forward_batch,
             )
 
-        attn_output = self.attn(q, k, v, forward_batch)
-        output, _ = self.o_proj(attn_output)
+        stage_prefix = _stage_prefix(forward_batch)
+
+        with _profile_op("attn", stage_prefix, positions=positions):
+            attn_output = self.attn(q, k, v, forward_batch)
+
+        with _profile_op("o_proj", stage_prefix, positions=positions):
+            output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -300,12 +443,16 @@ class LlamaDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        stage_prefix = _stage_prefix(forward_batch)
+
         # Self Attention
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            with _profile_op("input_layernorm", stage_prefix, positions=positions):
+                hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            with _profile_op("input_layernorm", stage_prefix, positions=positions):
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -313,8 +460,14 @@ class LlamaDecoderLayer(nn.Module):
         )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        with _profile_op(
+            "post_attention_layernorm", stage_prefix, positions=positions
+        ):
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
+
+        hidden_states = self.mlp(hidden_states, forward_batch=forward_batch)
         return hidden_states, residual
 
 
@@ -364,45 +517,54 @@ class LlamaModel(nn.Module):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]], PPProxyTensors]:
-        if self.pp_group.is_first_rank:
-            if input_embeds is None:
-                hidden_states = self.embed_tokens(input_ids)
+        # Stage-level TTFT/TPOT instrumentation.
+        # In sync-op bench mode we also attach decode position for D_TPOT to enable
+        # output-length aligned aggregation (same convention as Qwen2).
+        stage_prefix = _stage_prefix(forward_batch)
+        if stage_prefix == "P_":
+            ttft_or_tpot = "TTFT"
+        else:
+            ttft_or_tpot = "TPOT"
+        with _profile_op(ttft_or_tpot, stage_prefix, positions=positions):
+            if self.pp_group.is_first_rank:
+                if input_embeds is None:
+                    hidden_states = self.embed_tokens(input_ids)
+                else:
+                    hidden_states = input_embeds
+                residual = None
             else:
-                hidden_states = input_embeds
-            residual = None
-        else:
-            assert pp_proxy_tensors is not None
-            # FIXME(@ying): reduce the number of proxy tensors by not fusing layer norms
-            hidden_states = pp_proxy_tensors["hidden_states"]
-            residual = pp_proxy_tensors["residual"]
-            deferred_norm = None
+                assert pp_proxy_tensors is not None
+                # FIXME(@ying): reduce the number of proxy tensors by not fusing layer norms
+                hidden_states = pp_proxy_tensors["hidden_states"]
+                residual = pp_proxy_tensors["residual"]
+                deferred_norm = None
 
-        aux_hidden_states = []
-        for i in range(self.start_layer, self.end_layer):
-            if i in self.layers_to_capture:
-                aux_hidden_states.append(hidden_states + residual)
-            layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                forward_batch,
-                residual,
-            )
+            aux_hidden_states = []
+            for i in range(self.start_layer, self.end_layer):
+                if i in self.layers_to_capture:
+                    aux_hidden_states.append(hidden_states + residual)
+                layer = self.layers[i]
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    forward_batch,
+                    residual,
+                )
 
-        if not self.pp_group.is_last_rank:
-            return PPProxyTensors(
-                {
-                    "hidden_states": hidden_states,
-                    "residual": residual,
-                }
-            )
-        else:
-            hidden_states, _ = self.norm(hidden_states, residual)
+            if not self.pp_group.is_last_rank:
+                return PPProxyTensors(
+                    {
+                        "hidden_states": hidden_states,
+                        "residual": residual,
+                    }
+                )
+            else:
+                hidden_states, _ = self.norm(hidden_states, residual)
 
-        if len(aux_hidden_states) == 0:
-            return hidden_states
+            if len(aux_hidden_states) == 0:
+                return hidden_states
 
-        return hidden_states, aux_hidden_states
+            return hidden_states, aux_hidden_states
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

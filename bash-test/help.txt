@@ -15,8 +15,9 @@ CUDA_VISIBLE_DEVICES=1 python -m sglang.launch_server \
     --afd-perspective ffn \
     --afd-mirco-batch 3
 
+export HF_ENDPOINT=https://hf-mirror.com
 
-nohup hf download huggyllama/llama-30b --local-dir /mnt/nvme1/models/llama-30B > download.log 2>&1 &
+nohup hf download Qwen/Qwen3-32B --local-dir /mnt/nvme1/models/Qwen/Qwen3-32B > download.log 2>&1 &
 
 curl -s "http://127.0.0.1:30000/generate" -H "Content-Type: application/json" -d '{"text":"你好，介绍一下你自己","sampling_params":{"max_new_tokens":64,"temperature":0.7}}'
 
@@ -27,8 +28,8 @@ CUDA_VISIBLE_DEVICES=0 python -m sglang.launch_server \
   --port 30000
 
 
-CUDA_VISIBLE_DEVICES=0  \
-nsys profile \
+CUDA_VISIBLE_DEVICES=4,5,6,7  \
+nohup nsys profile \
   --capture-range=cudaProfilerApi \
   --trace=cuda,nvtx \
   --cuda-memory-usage=false \
@@ -39,24 +40,84 @@ nsys profile \
   --force-overwrite=true \
   -o sglang.out \
   python -m sglang.launch_server \
-    --model-path /mnt/nvme1/models/Qwen3___5-27B/ \
+    --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/ \
     --port 30000 \
-    --tensor-parallel-size 1 \
-    --context-length 4096 \
+    --max-prefill-tokens 1000000 \
+    --tensor-parallel-size 4 \
     --disable-cuda-graph \
     --disable-overlap-schedule \
-    --chunked-prefill-size -1
+    --chunked-prefill-size -1 \
+    --mem-fraction-static 0.9 > model_input.log 2>&1 &
 
+  
 
-CUDA_VISIBLE_DEVICES=0 python bash-test/bench_sglang.py \
+CUDA_VISIBLE_DEVICES=4,5,6,7 python bash-test/bench_sglang.py \
   --server-url http://127.0.0.1:30000 \
-  --num_seqs 1 \
+  --batch_size 32 \
   --input_len 1024 \
   --output_len 512 \
+  --ignore_eos \
   --use-server-profile-range \
   --profile-activities CUDA_PROFILER
 
 
 python bash-test/nvtx_stats_from_rep.py sglang.out.nsys-rep \
-  --d-bucket-count 255 \
-  --d-pick-positions 32,64,96,128,160,192,224
+  --out-dir /workspace/benchmark/sglang-main/bash-test \
+  --d-bucket-count 1 \
+  --d-pick-positions 1
+
+----------------------------------------------
+
+
+CUDA_VISIBLE_DEVICES=4,5,6,7  \
+nohup python -m sglang.launch_server \
+    --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/ \
+    --port 30000 \
+    --max-prefill-tokens 1000000 \
+    --tensor-parallel-size 4 \
+    --disable-cuda-graph \
+    --disable-overlap-schedule \
+    --chunked-prefill-size -1 \
+    --mem-fraction-static 0.9 > model_input.log 2>&1 &
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 python bash-test/bench_sglang.py \
+  --server-url http://127.0.0.1:30000 \
+  --batch_size 1024 \
+  --input_len 128 \
+  --output_len 512 \
+  --ignore_eos
+
+
+rm -rf /var/lib/apport/coredump/*
+
+
+
+
+
+# 汇总各 run 日志与 processed 产物，生成 pd_batch_summary.csv，便于筛失败/再跑/合并大表
+python bash-test/summarize_pd_batch_runs.py \
+  --log-dir bash-test/pd_batch_logs \
+  --work-dir bash-test/pd_batch_work \
+  --out-csv bash-test/pd_batch_summary.csv
+
+# 将各 run 的 processed/nvtx_PD_combined_stats.csv 合并为长表（与 batch 跑完生成的 pd_latency_big_table 同格式），默认不删 work 目录
+python bash-test/merge_pd_big_table.py \
+  --work-dir bash-test/pd_batch_work \
+  --output-lens 64,256,512 \
+  --final-csv bash-test/pd_latency_big_table.csv
+
+----------------------------------------------
+
+# batch_pd_nvtx_test.py 单测（快速自检）:
+# 运行 TTFT + per-op（自动两种都测，并合并进一个大表）:
+nohup /workspace/env/sglang-main/bin/python bash-test/batch_pd_nvtx_test.py \
+  --gpus 7 \
+  --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/ \
+  --tp-list 1 \
+  --input-lens 16384 \
+  --output-lens 512 \
+  --batch-size 1 \
+  --gpu-clocks 1200 \
+  --work-dir bash-test/pd_batch_work_ut_both \
+  --log-dir bash-test/pd_batch_logs_ut_both \
+  --final-csv bash-test/pd_latency_big_table_ut_both.csv > bash-test/test_both.log 2>&1 &
