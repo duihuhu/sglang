@@ -1,0 +1,23 @@
+{
+  "description": "Example: explicit runs (no Cartesian product). Omit combos you cannot run (e.g. OOM).",
+  "model_path": "/mnt/nvme1/models/Qwen/Qwen3-32B/",
+  "gpus": "4,5,6,7",
+  "work_dir": "bash-test/pd_batch_work_ut_both",
+  "log_dir": "bash-test/pd_batch_logs_ut_both",
+  "final_csv": "bash-test/pd_latency_big_table_ut_both.csv",
+  "output_lens": [1],
+  "mode": "AF",
+  "num_test": 5,
+  "port_base": 30000,
+  "mem_clock": 1593,
+  "keep_processed": true,
+  "defaults": {
+    "gpu_clock": [210,540,870,1200],
+    "batch_size": 1
+  },
+  "runs": [
+    { "tp": 1, "input_len": [128,256,512,1024,2048,4096,8192,16384,32000] },
+    { "tp": 2, "input_len": [128,256,512,1024,2048,4096,8192,16384,32000,40000] },
+    { "tp": 4, "input_len": [128,256,512,1024,2048,4096,8192,16384,32000,40000] }
+  ]
+}

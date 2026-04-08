@@ -104,6 +104,7 @@ from sglang.srt.utils import (
     configure_gc_warning,
     freeze_gc,
     get_bool_env_var,
+    get_int_env_var,
     get_or_create_event_loop,
     get_zmq_socket,
     kill_process_tree,
@@ -2111,6 +2112,13 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         while not self.gracefully_exit:
             await asyncio.sleep(5)
 
+        # After SIGTERM, wait until rid_to_state is empty. If a request never gets a
+        # finished_reason from the scheduler (e.g. stuck decode / zmq edge case),
+        # this loop would run forever unless SGL_GRACEFUL_SHUTDOWN_TIMEOUT_S > 0 or
+        # SGL_FORCE_SHUTDOWN is set.
+        drain_timeout_s = get_int_env_var("SGL_GRACEFUL_SHUTDOWN_TIMEOUT_S", 0)
+        drain_deadline = (time.time() + drain_timeout_s) if drain_timeout_s > 0 else None
+
         # Drain requests
         while True:
             remain_num_req = len(self.rid_to_state)
@@ -2131,6 +2139,21 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     "Signal SIGTERM received while force shutdown flag set. Force exiting."
                 )
                 self.force_exit_handler()
+                break
+
+            elif (
+                drain_deadline is not None
+                and remain_num_req > 0
+                and time.time() >= drain_deadline
+            ):
+                logger.error(
+                    "Graceful shutdown timed out after SGL_GRACEFUL_SHUTDOWN_TIMEOUT_S=%ds with "
+                    "%d request(s) still in rid_to_state %s; dumping state and forcing process exit.",
+                    drain_timeout_s,
+                    remain_num_req,
+                    remaining_rids,
+                )
+                self.dump_requests_before_crash()
                 break
 
             logger.info(

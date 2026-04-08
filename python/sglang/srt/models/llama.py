@@ -60,6 +60,7 @@ from sglang.srt.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from sglang.srt.server_args import get_global_server_args
+from sglang.srt.utils.sync_bench_state import is_sync_bench_active
 from sglang.srt.utils import add_prefix, is_npu, make_layers
 from sglang.utils import get_exception_traceback
 
@@ -86,6 +87,13 @@ def _sync_internal_op_bench_enabled() -> bool:
     if "SGLANG_SYNC_INTERNAL_OP_BENCH" in os.environ:
         return os.getenv("SGLANG_SYNC_INTERNAL_OP_BENCH", "0") == "1"
     return os.getenv("SGLANG_SYNC_OP_BENCH", "0") == "1"
+
+
+def _sync_bench_window_active() -> bool:
+    # Default: only collect sync bench inside /start_profile -> /stop_profile.
+    if os.getenv("SGLANG_SYNC_BENCH_REQUIRE_PROFILE_WINDOW", "1") != "1":
+        return True
+    return is_sync_bench_active()
 
 
 _sync_bench_lock = Lock()
@@ -136,7 +144,7 @@ def _profile_op(
     enable_sync_bench = (
         (is_stage_op and _sync_stage_bench_enabled())
         or ((not is_stage_op) and _sync_internal_op_bench_enabled())
-    ) and torch.cuda.is_available()
+    ) and _sync_bench_window_active() and torch.cuda.is_available()
 
     if enable_sync_bench:
         torch.cuda.synchronize()
@@ -445,29 +453,25 @@ class LlamaDecoderLayer(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         stage_prefix = _stage_prefix(forward_batch)
 
-        # Self Attention
-        if residual is None:
-            residual = hidden_states
-            with _profile_op("input_layernorm", stage_prefix, positions=positions):
+        # A block = input_layernorm + self_attn
+        with _profile_op("A", stage_prefix, positions=positions):
+            if residual is None:
+                residual = hidden_states
                 hidden_states = self.input_layernorm(hidden_states)
-        else:
-            with _profile_op("input_layernorm", stage_prefix, positions=positions):
+            else:
                 hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            forward_batch=forward_batch,
-        )
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                forward_batch=forward_batch,
+            )
 
-        # Fully Connected
-        with _profile_op(
-            "post_attention_layernorm", stage_prefix, positions=positions
-        ):
+        # F block = post_attention_layernorm + mlp
+        with _profile_op("F", stage_prefix, positions=positions):
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual
             )
-
-        hidden_states = self.mlp(hidden_states, forward_batch=forward_batch)
+            hidden_states = self.mlp(hidden_states, forward_batch=forward_batch)
         return hidden_states, residual
 
 

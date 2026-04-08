@@ -121,3 +121,15 @@ nohup /workspace/env/sglang-main/bin/python bash-test/batch_pd_nvtx_test.py \
   --work-dir bash-test/pd_batch_work_ut_both \
   --log-dir bash-test/pd_batch_logs_ut_both \
   --final-csv bash-test/pd_latency_big_table_ut_both.csv > bash-test/test_both.log 2>&1 &
+
+CUDA_VISIBLE_DEVICES=4 python -m sglang.bench_one_batch  \
+ --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/  \
+ --tp-size 1   \
+ --batch-size 1     \
+ --input-len 128     \
+ --output-len 1     \
+ --disable-cuda-graph \
+ --disable-overlap-schedule \
+ --chunked-prefill-size -1 \
+ --mem-fraction-static 0.9 \
+ --profile-activities CUDA_PROFILER

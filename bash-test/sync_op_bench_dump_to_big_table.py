@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple
 
 
 _D_POS_NAME_RE = re.compile(r"^(D_[A-Za-z0-9_]+)_pos(-?\d+)$")
+_ALLOWED_OPS = {"A", "F", "TTFT", "TPOT"}
 
 
 def _parse_run_dir_name(run_dir_name: str) -> Tuple[int, int, int, int]:
@@ -70,6 +71,8 @@ def _aggregate_one_run(
         if not arr:
             continue
         op_name = op_key[len("P_") :]
+        if op_name not in _ALLOWED_OPS:
+            continue
         mean_us = sum(arr) / len(arr)
         cnt = len(arr)
         for out_len in output_lens:
@@ -107,6 +110,8 @@ def _aggregate_one_run(
         if not pos_map:
             continue
         op_name = base_name[len("D_") :]
+        if op_name not in _ALLOWED_OPS:
+            continue
         sorted_positions = sorted(pos_map.keys())
         total_cnt = sum(len(v) for v in pos_map.values())
         for out_len in output_lens:
@@ -138,6 +143,8 @@ def _aggregate_one_run(
             continue
         # op_key like "D_TPOT" => op_name "TPOT"
         op_name = op_key[len("D_") :]
+        if op_name not in _ALLOWED_OPS:
+            continue
         mean_us = sum(arr) / len(arr)
         cnt = len(arr)
         for out_len in output_lens:

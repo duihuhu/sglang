@@ -57,6 +57,7 @@ from sglang.srt.model_loader.weight_utils import (
     kv_cache_scales_loader,
 )
 from sglang.srt.server_args import get_global_server_args
+from sglang.srt.utils.sync_bench_state import is_sync_bench_active
 from sglang.srt.utils import add_prefix, make_layers
 
 Qwen2Config = None
@@ -106,6 +107,13 @@ def _sync_internal_op_bench_enabled() -> bool:
         return os.getenv("SGLANG_SYNC_INTERNAL_OP_BENCH", "0") == "1"
     # Backward compatibility: older code might only set SGLANG_SYNC_OP_BENCH.
     return os.getenv("SGLANG_SYNC_OP_BENCH", "0") == "1"
+
+
+def _sync_bench_window_active() -> bool:
+    # Default: only collect sync bench inside /start_profile -> /stop_profile.
+    if os.getenv("SGLANG_SYNC_BENCH_REQUIRE_PROFILE_WINDOW", "1") != "1":
+        return True
+    return is_sync_bench_active()
 
 
 _sync_bench_lock = Lock()
@@ -161,7 +169,7 @@ def _profile_op(
     enable_sync_bench = (
         (is_stage_op and _sync_stage_bench_enabled())
         or ((not is_stage_op) and _sync_internal_op_bench_enabled())
-    ) and torch.cuda.is_available()
+    ) and _sync_bench_window_active() and torch.cuda.is_available()
 
     if enable_sync_bench:
         torch.cuda.synchronize()
@@ -240,15 +248,9 @@ class Qwen2MLP(nn.Module):
         if get_global_server_args().rl_on_policy_target is not None:
             x = x.bfloat16()
 
-        positions = getattr(forward_batch, "positions", None) if forward_batch else None
-        with _profile_op("gate_up_proj", forward_batch, positions=positions):
-            gate_up, _ = self.gate_up_proj(x)
-
-        with _profile_op("act_fn", forward_batch, positions=positions):
-            x = self.act_fn(gate_up)
-
-        with _profile_op("down_proj", forward_batch, positions=positions):
-            x, _ = self.down_proj(x)
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
         return x
 
 
@@ -334,19 +336,15 @@ class Qwen2Attention(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
-        with _profile_op("qkv_proj", forward_batch, positions=positions):
-            qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
 
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        with _profile_op("rotary_emb", forward_batch, positions=positions):
-            q, k = self.rotary_emb(positions, q, k)
+        q, k = self.rotary_emb(positions, q, k)
 
-        with _profile_op("attn", forward_batch, positions=positions):
-            attn_output = self.attn(q, k, v, forward_batch)
+        attn_output = self.attn(q, k, v, forward_batch)
 
-        with _profile_op("o_proj", forward_batch, positions=positions):
-            output, _ = self.o_proj(attn_output)
+        output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -400,15 +398,11 @@ class Qwen2DecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
-        with _profile_op(
-            "input_layernorm", forward_batch, positions=positions
-        ):
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -416,14 +410,9 @@ class Qwen2DecoderLayer(nn.Module):
             forward_batch=forward_batch,
         )
 
-        # Fully Connected
-        with _profile_op(
-            "post_attention_layernorm", forward_batch, positions=positions
-        ):
-            hidden_states, residual = self.post_attention_layernorm(
-                hidden_states, residual
-            )
-
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual
+        )
         hidden_states = self.mlp(hidden_states, forward_batch=forward_batch)
         return hidden_states, residual
 

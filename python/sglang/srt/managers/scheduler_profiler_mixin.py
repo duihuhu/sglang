@@ -15,6 +15,7 @@ from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import is_npu
 from sglang.srt.utils.profile_merger import ProfileMerger
 from sglang.srt.utils.profile_utils import ProfileManager
+from sglang.srt.utils.sync_bench_state import set_sync_bench_active
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import ScheduleBatch
@@ -145,6 +146,8 @@ class SchedulerProfilerMixin:
         logger.info(
             f"Profiling starts{stage_str}. Traces will be saved to: {self.torch_profiler_output_dir} (with profile id: {self.profile_id})",
         )
+        # Keep sync-op bench metrics in the same window as profile API.
+        set_sync_bench_active(True)
 
         activities = self.profiler_activities
         with_stack = self.torch_profiler_with_stack
@@ -257,6 +260,8 @@ class SchedulerProfilerMixin:
                 success=False,
                 message="Profiling is not in progress. Call /start_profile first.",
             )
+        # Close sync-op bench window before flushing profiler artifacts.
+        set_sync_bench_active(False)
 
         self.torch_profiler_output_dir.mkdir(parents=True, exist_ok=True)
 

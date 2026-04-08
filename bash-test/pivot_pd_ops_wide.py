@@ -5,7 +5,7 @@ import os
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
-A_OPS = {"input_layernorm", "qkv_proj", "rotary_emb", "attn", "o_proj"}
+A_OPS = {"A", "PA", "DA", "input_layernorm", "qkv_proj", "rotary_emb", "attn", "o_proj"}
 
 
 def _calc_a_f(op_map: Dict[str, float]) -> Tuple[float, float]:
@@ -145,6 +145,12 @@ def main() -> None:
         choices=["P", "D", "both"],
         help="Which stage to pivot",
     )
+    parser.add_argument(
+        "--only-af",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Only keep A/F coarse ops (plus TTFT/TPOT).",
+    )
     args = parser.parse_args()
 
     csv_path = os.path.abspath(args.csv)
@@ -173,6 +179,8 @@ def main() -> None:
                 continue
             op_name = (row["op_name"] or "").strip()
             if not op_name:
+                continue
+            if args.only_af and op_name not in {"A", "F", "TTFT", "TPOT"}:
                 continue
             tp = int(row["tp"])
             input_len = int(row["input_len"])

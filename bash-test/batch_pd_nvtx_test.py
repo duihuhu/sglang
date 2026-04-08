@@ -3,6 +3,7 @@ import argparse
 import contextlib
 import csv
 import glob
+import json
 import os
 import signal
 import subprocess
@@ -19,6 +20,35 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # Repo root (for PYTHONPATH when nsys cwd is per-run directory).
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 _CACHE_ROOT = "/mnt/nvme1/lt/cache"
+def _apply_json_config(args: argparse.Namespace) -> Optional[dict]:
+    cfg_path = str(getattr(args, "config", "") or "").strip()
+    if not cfg_path:
+        return None
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("--config JSON must be an object")
+    list_to_csv_keys = {
+        "tp_list",
+        "input_lens",
+        "output_lens",
+        "gpu_clocks",
+        "batch_size",
+        "gpus",
+    }
+    for k, v in cfg.items():
+        if hasattr(args, k):
+            if k in list_to_csv_keys and isinstance(v, list):
+                v = ",".join(str(x) for x in v)
+            setattr(args, k, v)
+    return cfg
+
+
+def _to_int_list(v) -> List[int]:
+    if isinstance(v, list):
+        return [int(x) for x in v]
+    return [int(v)]
+
 
 
 @dataclass(frozen=True)
@@ -450,6 +480,12 @@ def main() -> None:
         description="Batch PD NVTX profiling for different TP/input_len/gpu_clock. Output_len is extracted via NVTX D-pick positions."
     )
     parser.add_argument(
+        "--config",
+        type=str,
+        default="",
+        help="Path to pd_batch_config.json; values override CLI defaults.",
+    )
+    parser.add_argument(
         "--gpus",
         type=str,
         default="",
@@ -605,16 +641,26 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["ttft", "op", "both"],
-        default="both",
+        choices=["TTFT", "AF", "both", "ttft", "op"],
+        default="AF",
         help=(
             "Benchmark mode. "
-            "'ttft': disable sync-op benchmark to keep end-to-end latency natural; "
-            "'op': enable sync-op benchmark (torch.cuda.synchronize) for per-op timing."
-            " 'both': run both and combine results into one big table."
+            "'TTFT': only stage metrics (TTFT/TPOT); "
+            "'AF': only coarse per-op metrics (A/F); "
+            "'both': run TTFT and AF as two separate variants, then merge."
         ),
     )
     args = parser.parse_args()
+    cfg = _apply_json_config(args)
+    mode_norm = str(args.mode).strip().lower()
+    if mode_norm in {"ttft"}:
+        args.mode = "TTFT"
+    elif mode_norm in {"af", "op"}:
+        args.mode = "AF"
+    elif mode_norm == "both":
+        args.mode = "both"
+    else:
+        raise ValueError(f"Unsupported mode: {args.mode}")
 
     # Parse lists.
     tp_list = [int(x) for x in args.tp_list.split(",") if x.strip()]
@@ -676,21 +722,47 @@ def main() -> None:
     if not free_gpus:
         raise RuntimeError("No GPUs available.")
 
-    # Generate job list in the requested loop order: TP -> input_len -> GPU-clock.
+    # Generate job list. If --config includes runs/defaults, use explicit run list.
     jobs: List[JobSpec] = []
-    for tp in tp_list:
-        for input_len in input_lens:
-            for gpu_clock in gpu_clocks:
-                for batch_size in batch_sizes:
-                    jobs.append(
-                        JobSpec(
-                            tp=tp,
-                            input_len=input_len,
-                            gpu_clock=gpu_clock,
-                            output_len_max=output_len_max,
-                            batch_size=batch_size,
+    if cfg and isinstance(cfg.get("runs"), list):
+        defaults = cfg.get("defaults") or {}
+        default_input = _to_int_list(defaults.get("input_len", input_lens))
+        default_clock = _to_int_list(defaults.get("gpu_clock", gpu_clocks))
+        default_bs = _to_int_list(defaults.get("batch_size", batch_sizes))
+        for i, run in enumerate(cfg["runs"]):
+            if not isinstance(run, dict) or "tp" not in run:
+                raise ValueError(f"config runs[{i}] must be object and include tp")
+            tp = int(run["tp"])
+            run_inputs = _to_int_list(run.get("input_len", default_input))
+            run_clocks = _to_int_list(run.get("gpu_clock", default_clock))
+            run_bs = _to_int_list(run.get("batch_size", default_bs))
+            for input_len in run_inputs:
+                for gpu_clock in run_clocks:
+                    for batch_size in run_bs:
+                        jobs.append(
+                            JobSpec(
+                                tp=tp,
+                                input_len=input_len,
+                                gpu_clock=gpu_clock,
+                                output_len_max=output_len_max,
+                                batch_size=batch_size,
+                            )
                         )
-                    )
+    else:
+        # CLI Cartesian order: TP -> input_len -> GPU-clock.
+        for tp in tp_list:
+            for input_len in input_lens:
+                for gpu_clock in gpu_clocks:
+                    for batch_size in batch_sizes:
+                        jobs.append(
+                            JobSpec(
+                                tp=tp,
+                                input_len=input_len,
+                                gpu_clock=gpu_clock,
+                                output_len_max=output_len_max,
+                                batch_size=batch_size,
+                            )
+                        )
 
     print(f"[info] discovered GPUs: {free_gpus}")
     print(f"[info] total jobs: {len(jobs)}")
@@ -744,12 +816,13 @@ def main() -> None:
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in assigned_gpus)
         variant_defs = []
-        if args.mode == "ttft":
+        if args.mode == "TTFT":
             variant_defs = [("ttft", "1", "0")]
-        elif args.mode == "op":
-            variant_defs = [("op", "0", "1")]
+        elif args.mode == "AF":
+            variant_defs = [("af", "0", "1")]
         elif args.mode == "both":
-            variant_defs = [("ttft", "1", "0"), ("op", "0", "1")]
+            # Two separate runs: stage-only then AF-only.
+            variant_defs = [("ttft", "1", "0"), ("af", "0", "1")]
         else:
             raise ValueError(f"Unsupported mode: {args.mode}")
         # Ensure `python -m sglang.launch_server` resolves when nsys cwd is run_dir.

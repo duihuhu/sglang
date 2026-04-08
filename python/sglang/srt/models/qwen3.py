@@ -143,8 +143,7 @@ class Qwen3Attention(nn.Module):
     def forward_prepare_native(
         self, positions, hidden_states, forward_batch: ForwardBatch
     ):
-        with _profile_op("qkv_proj", forward_batch, positions=positions):
-            qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = apply_qk_norm(
             q=q,
@@ -154,33 +153,28 @@ class Qwen3Attention(nn.Module):
             head_dim=self.head_dim,
             alt_stream=self.alt_stream,
         )
-        with _profile_op("rotary_emb", forward_batch, positions=positions):
-            q, k = self.rotary_emb(positions, q, k)
+        q, k = self.rotary_emb(positions, q, k)
         return q, k, v
 
     def forward_prepare_npu(self, positions, hidden_states, forward_batch):
-        with _profile_op("qkv_proj", forward_batch, positions=positions):
-            qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
 
         if self.attn.layer_id == forward_batch.token_to_kv_pool.start_layer:
             self.rotary_emb.get_cos_sin_with_position(positions)
 
-        with _profile_op(
-            "split_qkv_rmsnorm_rope", forward_batch, positions=positions
-        ):
-            q, k, v = split_qkv_rmsnorm_rope(
-                qkv,
-                self.rotary_emb.position_sin,
-                self.rotary_emb.position_cos,
-                self.q_size,
-                self.kv_size,
-                self.head_dim,
-                eps=self.q_norm.variance_epsilon,
-                q_weight=self.q_norm.weight,
-                k_weight=self.k_norm.weight,
-                q_bias=getattr(self.q_norm, "bias", None),
-                k_bias=getattr(self.k_norm, "bias", None),
-            )
+        q, k, v = split_qkv_rmsnorm_rope(
+            qkv,
+            self.rotary_emb.position_sin,
+            self.rotary_emb.position_cos,
+            self.q_size,
+            self.kv_size,
+            self.head_dim,
+            eps=self.q_norm.variance_epsilon,
+            q_weight=self.q_norm.weight,
+            k_weight=self.k_norm.weight,
+            q_bias=getattr(self.q_norm, "bias", None),
+            k_bias=getattr(self.k_norm, "bias", None),
+        )
         return q, k, v
 
     def forward(
@@ -209,11 +203,8 @@ class Qwen3Attention(nn.Module):
             q = q.to(torch.bfloat16)
             k = k.to(torch.bfloat16)
 
-        with _profile_op("attn", forward_batch, positions=positions):
-            attn_output = self.attn(q, k, v, forward_batch)
-
-        with _profile_op("o_proj", forward_batch, positions=positions):
-            output, _ = self.o_proj(attn_output)
+        attn_output = self.attn(q, k, v, forward_batch)
+        output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -293,8 +284,8 @@ class Qwen3DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
-        with _profile_op("input_layernorm", forward_batch, positions=positions):
+        # A block = input_layernorm + self_attn
+        with _profile_op("A", forward_batch, positions=positions):
             hidden_states, residual = self.layer_communicator.prepare_attn(
                 hidden_states,
                 residual,
@@ -302,17 +293,15 @@ class Qwen3DecoderLayer(nn.Module):
                 post_residual_addition=post_residual_addition,
             )
 
-        if hidden_states.shape[0] != 0:
-            hidden_states = self.self_attn(
-                positions=positions,
-                hidden_states=hidden_states,
-                forward_batch=forward_batch,
-            )
+            if hidden_states.shape[0] != 0:
+                hidden_states = self.self_attn(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    forward_batch=forward_batch,
+                )
 
-        # Fully Connected
-        with _profile_op(
-            "post_attention_layernorm", forward_batch, positions=positions
-        ):
+        # F block = post_attention_layernorm + mlp
+        with _profile_op("F", forward_batch, positions=positions):
             hidden_states, residual = self.layer_communicator.prepare_mlp(
                 hidden_states,
                 residual,
@@ -328,8 +317,7 @@ class Qwen3DecoderLayer(nn.Module):
                     else None
                 ),
             )
-
-        hidden_states = self.mlp(hidden_states, forward_batch=forward_batch)
+            hidden_states = self.mlp(hidden_states, forward_batch=forward_batch)
 
         if _is_npu and get_cmo_stream():
             wait_cmo_stream()
