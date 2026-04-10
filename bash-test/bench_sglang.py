@@ -93,11 +93,6 @@ def main():
     parser.add_argument("--vocab_max", type=int, default=10000, help="Upper bound for random input_ids (exclusive)")
     parser.add_argument("--timeout_s", type=int, default=600, help="HTTP timeout seconds per request")
 
-    # Optional: let SGLang server call cudaProfilerStart/Stop, useful for nsys --capture-range=cudaProfilerApi
-    parser.add_argument("--use-server-profile-range", action="store_true", help="Call /start_profile and /stop_profile around the requests")
-    parser.add_argument("--profile-by-stage", action="store_true", help="Set profile_by_stage=true when starting profile")
-    parser.add_argument("--profile-num-steps", type=int, default=None, help="If set, pass num_steps to server profile (auto stop)")
-    parser.add_argument("--profile-activities", type=str, default="CUDA_PROFILER", help="Comma-separated activities, e.g. CUDA_PROFILER")
 
     args = parser.parse_args()
     if args.batch_size <= 0:
@@ -115,8 +110,6 @@ def main():
 
     try:
         generate_url = args.server_url.rstrip("/") + "/generate"
-        start_profile_url = args.server_url.rstrip("/") + "/start_profile"
-        stop_profile_url = args.server_url.rstrip("/") + "/stop_profile"
         server_info_url = args.server_url.rstrip("/") + "/get_server_info"
 
         sampling_params = {
@@ -153,36 +146,18 @@ def main():
             # Best-effort pre-check: continue if /get_server_info is unavailable.
             pass
 
-        if args.use_server_profile_range:
-            activities = [
-                x.strip() for x in args.profile_activities.split(",") if x.strip()
-            ]
-            payload = {
-                "activities": activities,
-                "profile_by_stage": bool(args.profile_by_stage),
-            }
-            if args.profile_num_steps is not None:
-                payload["num_steps"] = int(args.profile_num_steps)
-            print(f"[bench_sglang] starting server profile: {payload}")
-            post_json(
-                session,
-                start_profile_url,
-                payload,
-                timeout_s=args.timeout_s,
-                expect_json=False,
-            )
-
         print("start to test-------------------")
         print(f"num_seqs={args.num_seqs}, batch_size={args.batch_size}")
         t0 = time.time()
         total_tokens = 0
         completed = 0
 
-        # Batched loop: each batch can contain multiple concurrent requests.
-        for batch_start in range(0, args.num_seqs, args.batch_size):
+        def _run_batch(batch_start: int) -> tuple[int, int]:
             batch_end = min(batch_start + args.batch_size, args.num_seqs)
             batch_indexes = list(range(batch_start, batch_end))
             print(f"start batch [{batch_start}, {batch_end})")
+            batch_tokens = 0
+            batch_completed = 0
 
             def _run_one(req_idx: int) -> int:
                 payload = {
@@ -210,27 +185,20 @@ def main():
                 for fut in concurrent.futures.as_completed(future_to_idx):
                     req_idx = future_to_idx[fut]
                     ct = fut.result()
-                    total_tokens += ct
-                    completed += 1
+                    batch_tokens += ct
+                    batch_completed += 1
                     print(f"end {req_idx} (completion_tokens={ct})")
             print(f"end batch [{batch_start}, {batch_end})")
             garbage_collection()
+            return batch_tokens, batch_completed
+
+        # Single measured pass only.
+        for batch_start in range(0, args.num_seqs, args.batch_size):
+            tokens, done = _run_batch(batch_start)
+            total_tokens += tokens
+            completed += done
 
         t = time.time() - t0
-
-        if args.use_server_profile_range:
-            # If profile_num_steps was set, server may auto-stop; stop_profile should still be safe.
-            print("[bench_sglang] stopping server profile ...")
-            try:
-                post_json(
-                    session,
-                    stop_profile_url,
-                    {},
-                    timeout_s=args.timeout_s,
-                    expect_json=False,
-                )
-            except Exception as e:
-                print(f"[bench_sglang] stop_profile failed (maybe already stopped): {e}")
 
         throughput = total_tokens / t if t > 0 else 0.0
         print(f"Total requests: {completed}")

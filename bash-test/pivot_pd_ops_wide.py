@@ -2,8 +2,13 @@
 import argparse
 import csv
 import os
+import sys
 from collections import defaultdict
 from typing import Dict, List, Tuple
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+_DEFAULT_BIG_TABLE_CSV = os.path.join(_REPO_ROOT, "bash-test", "pd_latency_big_table.csv")
 
 A_OPS = {"A", "PA", "DA", "input_layernorm", "qkv_proj", "rotary_emb", "attn", "o_proj"}
 
@@ -17,11 +22,35 @@ def _calc_a_f(op_map: Dict[str, float]) -> Tuple[float, float]:
     for op_name, latency_us in op_map.items():
         if op_name in exclude_from_a_f:
             continue
-        if op_name in A_OPS:
+        if op_name in A_OPS or op_name.startswith("A"):
             a_sum += latency_us
         else:
             f_sum += latency_us
     return a_sum, f_sum
+
+
+def _calc_a_f_energy(metric_map: Dict[str, float], op_map: Dict[str, float]) -> Tuple[float, float]:
+    a_sum = 0.0
+    f_sum = 0.0
+    exclude = {"TTFT", "TPOT"}
+    for op_name in op_map.keys():
+        if op_name in exclude:
+            continue
+        val = metric_map.get(op_name)
+        if val is None:
+            continue
+        if op_name in A_OPS or op_name.startswith("A"):
+            a_sum += val
+        else:
+            f_sum += val
+    return a_sum, f_sum
+
+
+def _display_op_value(op_name: str, latency_us: float) -> float:
+    # Keep most ops in us; TTFT is displayed in ms per request.
+    if op_name == "TTFT":
+        return latency_us / 1000.0
+    return latency_us
 
 
 def _write_wide_block(
@@ -29,6 +58,7 @@ def _write_wide_block(
     stage: str,
     label: str,
     data_by_stage: Dict[str, Dict[Tuple[int, int, int, int, int], Dict[str, float]]],
+    energy_by_stage: Dict[str, Dict[Tuple[int, int, int, int, int], Dict[str, float]]],
     op_names_by_stage: Dict[str, List[str]],
     *,
     drop_p_output_len: bool = False,
@@ -41,14 +71,14 @@ def _write_wide_block(
             data_by_stage[stage].keys(), key=lambda k: (k[0], k[1], k[2], k[3], k[4])
         )
     # Section title row: label in column A.
-    # For P-with-drop: columns=tp,input_len,gpu_clock,batch_size + ops + P_A,P_F,D_A,D_F
-    # => 8 + len(op_names) total columns.
+    # For P-with-drop: columns=tp,input_len,gpu_clock,batch_size + ops
+    # => 4 + len(op_names) total columns.
     if stage == "P" and drop_p_output_len:
-        w.writerow([label] + [""] * (7 + len(op_names)))
+        w.writerow([label] + [""] * (3 + len(op_names)))
     else:
-        # P(without-drop) and D: columns=tp,input_len,output_len,gpu_clock,batch_size + ops + 4 summary cols
-        # => 9 + len(op_names) total columns.
-        w.writerow([label] + [""] * (8 + len(op_names)))
+        # P(without-drop) and D: columns=tp,input_len,output_len,gpu_clock,batch_size + ops
+        # => 5 + len(op_names) total columns.
+        w.writerow([label] + [""] * (4 + len(op_names)))
     if stage == "P" and drop_p_output_len:
         w.writerow(
             [
@@ -57,21 +87,30 @@ def _write_wide_block(
                 "gpu_clock",
                 "batch_size",
                 *op_names,
-                "P_A",
-                "P_F",
-                "D_A",
-                "D_F",
+                "A_energy_mj",
+                "F_energy_mj",
             ]
         )
         for (tp, input_len, gpu_clock, batch_size) in rows:  # type: ignore[misc]
             row_vals = ["" for _ in op_names]
             op_map = data_by_stage[stage][(tp, input_len, gpu_clock, batch_size)]  # type: ignore[index]
+            energy_map = energy_by_stage[stage][(tp, input_len, gpu_clock, batch_size)]  # type: ignore[index]
             for i, op in enumerate(op_names):
-                if op in op_map:
-                    row_vals[i] = f"{op_map[op]:.2f}"
-            a_sum, f_sum = _calc_a_f(op_map)
-            merged_cols = [f"{a_sum:.2f}", f"{f_sum:.2f}", "", ""]
-            w.writerow([tp, input_len, gpu_clock, batch_size, *row_vals, *merged_cols])
+                op_lookup = "TTFT" if op == "TTFT_ms" else op
+                if op_lookup in op_map:
+                    row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
+            a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
+            w.writerow(
+                [
+                    tp,
+                    input_len,
+                    gpu_clock,
+                    batch_size,
+                    *row_vals,
+                    f"{a_eu / 1000.0:.2f}",
+                    f"{f_eu / 1000.0:.2f}",
+                ]
+            )
         return
 
     w.writerow(
@@ -82,10 +121,8 @@ def _write_wide_block(
             "gpu_clock",
             "batch_size",
             *op_names,
-            "P_A",
-            "P_F",
-            "D_A",
-            "D_F",
+            "A_energy_mj",
+            "F_energy_mj",
         ]
     )
     for (tp, input_len, output_len, gpu_clock, batch_size) in rows:
@@ -93,16 +130,25 @@ def _write_wide_block(
         op_map = data_by_stage[stage][
             (tp, input_len, output_len, gpu_clock, batch_size)
         ]
+        energy_map = energy_by_stage[stage][
+            (tp, input_len, output_len, gpu_clock, batch_size)
+        ]
         for i, op in enumerate(op_names):
-            if op in op_map:
-                row_vals[i] = f"{op_map[op]:.2f}"
-        a_sum, f_sum = _calc_a_f(op_map)
-        if stage == "P":
-            merged_cols = [f"{a_sum:.2f}", f"{f_sum:.2f}", "", ""]
-        else:
-            merged_cols = ["", "", f"{a_sum:.2f}", f"{f_sum:.2f}"]
+            op_lookup = "TTFT" if op == "TTFT_ms" else op
+            if op_lookup in op_map:
+                row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
+        a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
         w.writerow(
-            [tp, input_len, output_len, gpu_clock, batch_size, *row_vals, *merged_cols]
+            [
+                tp,
+                input_len,
+                output_len,
+                gpu_clock,
+                batch_size,
+                *row_vals,
+                f"{a_eu / 1000.0:.2f}",
+                f"{f_eu / 1000.0:.2f}",
+            ]
         )
 
 
@@ -113,8 +159,8 @@ def main() -> None:
     parser.add_argument(
         "--csv",
         type=str,
-        default="/mnt/nvme1/lt/cache/pd_latency_big_table.csv",
-        help="Path to pd_latency_big_table.csv",
+        default=_DEFAULT_BIG_TABLE_CSV,
+        help="Path to pd_latency_big_table.csv (default: bash-test/pd_latency_big_table.csv under repo root).",
     )
     parser.add_argument(
         "--out-dir",
@@ -156,8 +202,26 @@ def main() -> None:
     csv_path = os.path.abspath(args.csv)
     out_dir = os.path.abspath(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
+    if not os.path.isfile(csv_path):
+        print(f"[error] input CSV not found: {csv_path}", file=sys.stderr)
+        sys.exit(2)
 
     data_by_stage: Dict[str, Dict[object, Dict[str, float]]] = {
+        "P": defaultdict(dict),
+        "D": defaultdict(dict),
+    }
+    energy_by_stage: Dict[str, Dict[object, Dict[str, float]]] = {
+        "P": defaultdict(dict),
+        "D": defaultdict(dict),
+    }
+    # Accumulate duplicate (cfg, op) rows using weighted mean by `count`.
+    # key -> [lat_sum, weight_sum]
+    latency_acc: Dict[str, Dict[object, Dict[str, List[float]]]] = {
+        "P": defaultdict(dict),
+        "D": defaultdict(dict),
+    }
+    # key -> [energy_sum, weight_sum]
+    energy_acc: Dict[str, Dict[object, Dict[str, List[float]]]] = {
         "P": defaultdict(dict),
         "D": defaultdict(dict),
     }
@@ -180,7 +244,11 @@ def main() -> None:
             op_name = (row["op_name"] or "").strip()
             if not op_name:
                 continue
-            if args.only_af and op_name not in {"A", "F", "TTFT", "TPOT"}:
+            if args.only_af and not (
+                op_name in {"TTFT", "TPOT"}
+                or op_name.startswith("A")
+                or op_name.startswith("F")
+            ):
                 continue
             tp = int(row["tp"])
             input_len = int(row["input_len"])
@@ -189,16 +257,51 @@ def main() -> None:
             # Backward compatibility: old big tables may not contain batch_size.
             batch_size = int((row.get("batch_size") or "1").strip())
             latency_us = float(row["latency_us"])
+            energy_uj = (
+                float(row.get("energy_uj"))
+                if row.get("energy_uj") not in (None, "", "None")
+                else None
+            )
 
             if stage == "P" and args.drop_p_output_len:
                 cfg_key = (tp, input_len, gpu_clock, batch_size)
             else:
                 cfg_key = (tp, input_len, output_len, gpu_clock, batch_size)
-            data_by_stage[stage][cfg_key][op_name] = latency_us
+            weight = float((row.get("count") or "1").strip() or "1")
+            if weight <= 0:
+                weight = 1.0
+
+            if op_name not in latency_acc[stage][cfg_key]:
+                latency_acc[stage][cfg_key][op_name] = [0.0, 0.0]
+            latency_acc[stage][cfg_key][op_name][0] += latency_us * weight
+            latency_acc[stage][cfg_key][op_name][1] += weight
+
+            if energy_uj is not None:
+                if op_name not in energy_acc[stage][cfg_key]:
+                    energy_acc[stage][cfg_key][op_name] = [0.0, 0.0]
+                energy_acc[stage][cfg_key][op_name][0] += energy_uj * weight
+                energy_acc[stage][cfg_key][op_name][1] += weight
 
             if op_name not in seen_op[stage]:
                 seen_op[stage].add(op_name)
                 op_names_by_stage[stage].append(op_name)
+
+    # Finalize weighted means into wide-table maps.
+    for stage in ("P", "D"):
+        for cfg_key, op_map in latency_acc[stage].items():
+            for op_name, (lat_sum, w_sum) in op_map.items():
+                if w_sum > 0:
+                    data_by_stage[stage][cfg_key][op_name] = lat_sum / w_sum
+        for cfg_key, op_map in energy_acc[stage].items():
+            for op_name, (e_sum, w_sum) in op_map.items():
+                if w_sum > 0:
+                    energy_by_stage[stage][cfg_key][op_name] = e_sum / w_sum
+
+    # Rename TTFT column to indicate display unit in output tables.
+    for stage in ("P", "D"):
+        op_names_by_stage[stage] = [
+            "TTFT_ms" if name == "TTFT" else name for name in op_names_by_stage[stage]
+        ]
 
     def write_wide_file(stage: str, path: str) -> None:
         op_names = op_names_by_stage[stage]
@@ -212,22 +315,31 @@ def main() -> None:
                         "gpu_clock",
                         "batch_size",
                         *op_names,
-                        "P_A",
-                        "P_F",
-                        "D_A",
-                        "D_F",
+                        "A_energy_mj",
+                        "F_energy_mj",
                     ]
                 )
                 rows = sorted(data_by_stage[stage].keys(), key=lambda k: (k[0], k[1], k[2], k[3]))  # type: ignore[index]
                 for (tp, input_len, gpu_clock, batch_size) in rows:  # type: ignore[misc]
                     row_vals = ["" for _ in op_names]
                     op_map = data_by_stage[stage][(tp, input_len, gpu_clock, batch_size)]  # type: ignore[index]
+                    energy_map = energy_by_stage[stage][(tp, input_len, gpu_clock, batch_size)]  # type: ignore[index]
                     for i, op in enumerate(op_names):
-                        if op in op_map:
-                            row_vals[i] = f"{op_map[op]:.2f}"
-                    a_sum, f_sum = _calc_a_f(op_map)
-                    merged_cols = [f"{a_sum:.2f}", f"{f_sum:.2f}", "", ""]
-                    w.writerow([tp, input_len, gpu_clock, batch_size, *row_vals, *merged_cols])
+                        op_lookup = "TTFT" if op == "TTFT_ms" else op
+                        if op_lookup in op_map:
+                            row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
+                    a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
+                    w.writerow(
+                        [
+                            tp,
+                            input_len,
+                            gpu_clock,
+                            batch_size,
+                            *row_vals,
+                            f"{a_eu / 1000.0:.2f}",
+                            f"{f_eu / 1000.0:.2f}",
+                        ]
+                    )
                 return
 
             rows = sorted(data_by_stage[stage].keys(), key=lambda k: (k[0], k[1], k[2], k[3], k[4]))  # type: ignore[index]
@@ -239,10 +351,8 @@ def main() -> None:
                     "gpu_clock",
                     "batch_size",
                     *op_names,
-                    "P_A",
-                    "P_F",
-                    "D_A",
-                    "D_F",
+                    "A_energy_mj",
+                    "F_energy_mj",
                 ]
             )
             for (tp, input_len, output_len, gpu_clock, batch_size) in rows:  # type: ignore[misc]
@@ -250,14 +360,14 @@ def main() -> None:
                 op_map = data_by_stage[stage][
                     (tp, input_len, output_len, gpu_clock, batch_size)
                 ]
+                energy_map = energy_by_stage[stage][
+                    (tp, input_len, output_len, gpu_clock, batch_size)
+                ]
                 for i, op in enumerate(op_names):
-                    if op in op_map:
-                        row_vals[i] = f"{op_map[op]:.2f}"
-                a_sum, f_sum = _calc_a_f(op_map)
-                if stage == "P":
-                    merged_cols = [f"{a_sum:.2f}", f"{f_sum:.2f}", "", ""]
-                else:
-                    merged_cols = ["", "", f"{a_sum:.2f}", f"{f_sum:.2f}"]
+                    op_lookup = "TTFT" if op == "TTFT_ms" else op
+                    if op_lookup in op_map:
+                        row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
+                a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
                 w.writerow(
                     [
                         tp,
@@ -266,7 +376,8 @@ def main() -> None:
                         gpu_clock,
                         batch_size,
                         *row_vals,
-                        *merged_cols,
+                        f"{a_eu / 1000.0:.2f}",
+                        f"{f_eu / 1000.0:.2f}",
                     ]
                 )
 
@@ -274,6 +385,7 @@ def main() -> None:
 
     # Default: one CSV with two sections (P block, blank row, D block)
     combined_path = os.path.join(out_dir, args.out)
+    wrote_any = False
     with open(combined_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         first = True
@@ -284,14 +396,37 @@ def main() -> None:
                 "P",
                 "[P] Prefill",
                 data_by_stage,  # type: ignore[arg-type]
+                energy_by_stage,  # type: ignore[arg-type]
                 op_names_by_stage,
                 drop_p_output_len=bool(args.drop_p_output_len),
             )
+            wrote_any = True
             first = False
         if args.stage in ("D", "both") and op_names_by_stage["D"]:
             if not first:
                 w.writerow([])  # blank row between the two tables
-            _write_wide_block(w, "D", "[D] Decode", data_by_stage, op_names_by_stage)
+            _write_wide_block(
+                w,
+                "D",
+                "[D] Decode",
+                data_by_stage,  # type: ignore[arg-type]
+                energy_by_stage,  # type: ignore[arg-type]
+                op_names_by_stage,
+            )
+            wrote_any = True
+        if not wrote_any:
+            print(
+                f"[warn] pivot: no rows matched stage={args.stage!r} from {csv_path}. "
+                "Big table may be header-only, wrong path, or use --stage P for prefill-only data.",
+                file=sys.stderr,
+            )
+            w.writerow(
+                [
+                    "# pivot_pd_ops_wide: no data",
+                    f"input={csv_path}",
+                    f"stage={args.stage}",
+                ]
+            )
     outputs.append(combined_path)
 
     if args.split_files:

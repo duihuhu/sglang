@@ -21,9 +21,10 @@ import time
 import json
 import atexit
 import signal
+import contextlib
 from collections import defaultdict
 from threading import Lock
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -98,27 +99,90 @@ def _nvtx_range_name(
 
 
 def _sync_stage_bench_enabled() -> bool:
-    return os.getenv("SGLANG_SYNC_STAGE_BENCH", "0") == "1"
+    return False
 
 
 def _sync_internal_op_bench_enabled() -> bool:
-    # New convention: SGLANG_SYNC_INTERNAL_OP_BENCH.
-    if "SGLANG_SYNC_INTERNAL_OP_BENCH" in os.environ:
-        return os.getenv("SGLANG_SYNC_INTERNAL_OP_BENCH", "0") == "1"
-    # Backward compatibility: older code might only set SGLANG_SYNC_OP_BENCH.
-    return os.getenv("SGLANG_SYNC_OP_BENCH", "0") == "1"
+    return False
 
 
 def _sync_bench_window_active() -> bool:
-    # Default: only collect sync bench inside /start_profile -> /stop_profile.
-    if os.getenv("SGLANG_SYNC_BENCH_REQUIRE_PROFILE_WINDOW", "1") != "1":
-        return True
-    return is_sync_bench_active()
+    return False
 
 
 _sync_bench_lock = Lock()
 _sync_bench_values: Dict[str, List[float]] = defaultdict(list)  # op_key -> durations_us
+_sync_bench_energy_uj: Dict[str, List[float]] = defaultdict(list)  # op_key -> energy uJ
+_sync_bench_profile_stats: Dict[str, Dict[str, float]] = defaultdict(
+    lambda: {
+        "latency_us_sum": 0.0,
+        "energy_j_sum": 0.0,
+        "count": 0.0,
+        "finalized": 0.0,
+    }
+)  # op_key -> accumulate until dump (one averaged sample per op_key)
 _sync_bench_dump_path: Optional[str] = None
+_sync_bench_nvml_mod = None
+_sync_bench_nvml_handle = None
+
+
+def _sync_qwen3_loop_bench_enabled() -> bool:
+    return False
+
+
+def _get_sync_bench_num_iters() -> int:
+    try:
+        v = int(os.getenv("SGLANG_SYNC_BENCH_NUM_ITERS", "50"))
+    except Exception:
+        v = 50
+    return max(v, 1)
+
+
+def _get_sync_bench_warmup_iters() -> int:
+    try:
+        v = int(os.getenv("SGLANG_SYNC_BENCH_WARMUP_ITERS", "10"))
+    except Exception:
+        v = 10
+    return max(v, 0)
+
+
+def qwen3_loop_bench_decoder_block(
+    op_name: str,
+    forward_batch: ForwardBatch,
+    positions: Optional[torch.Tensor],
+    *,
+    is_a_block: bool,
+    run_clone: Callable[..., Tuple[torch.Tensor, Optional[torch.Tensor]]],
+    run_real: Callable[[], Tuple[torch.Tensor, Optional[torch.Tensor]]],
+    hidden_states: torch.Tensor,
+    residual: Optional[torch.Tensor],
+    post_residual_addition: Optional[torch.Tensor],
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    return run_real()
+
+
+def _get_nvml_energy_handle():
+    global _sync_bench_nvml_mod, _sync_bench_nvml_handle
+    if _sync_bench_nvml_mod is not None and _sync_bench_nvml_handle is not None:
+        return _sync_bench_nvml_mod, _sync_bench_nvml_handle
+    try:
+        import pynvml  # type: ignore
+
+        pynvml.nvmlInit()
+        dev_idx = torch.cuda.current_device()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(dev_idx)
+        _sync_bench_nvml_mod = pynvml
+        _sync_bench_nvml_handle = handle
+        return pynvml, handle
+    except Exception:
+        return None, None
+
+
+def _read_total_energy_mj(pynvml_mod, handle) -> Optional[float]:
+    try:
+        return float(pynvml_mod.nvmlDeviceGetTotalEnergyConsumption(handle))
+    except Exception:
+        return None
 
 
 def _get_sync_bench_dump_path() -> Optional[str]:
@@ -131,79 +195,27 @@ def _get_sync_bench_dump_path() -> Optional[str]:
 
 
 def _dump_sync_op_bench() -> None:
-    global _sync_bench_dump_path
-    if _sync_bench_dump_path is None:
-        _sync_bench_dump_path = _get_sync_bench_dump_path()
-    if not _sync_bench_dump_path:
-        return
-
-    # Best-effort dump on exit; do not raise.
-    try:
-        os.makedirs(os.path.dirname(_sync_bench_dump_path), exist_ok=True)
-        with _sync_bench_lock:
-            payload = {"values": dict(_sync_bench_values)}
-        # Atomic write: temp -> flush/fsync -> replace.
-        tmp_path = _sync_bench_dump_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, _sync_bench_dump_path)
-    except Exception:
-        pass
+    return
 
 
 import atexit as _atexit  # avoid shadowing in some tooling
-import contextlib as _contextlib
 
 
-@_contextlib.contextmanager
 def _profile_op(
     op_name: str,
     forward_batch: Optional[ForwardBatch],
     positions: Optional[torch.Tensor] = None,
 ):
-    start_time = None
-    is_stage_op = op_name in ("TTFT", "TPOT")
-    stage_prefix = _nvtx_stage_prefix(forward_batch)
-    enable_sync_bench = (
-        (is_stage_op and _sync_stage_bench_enabled())
-        or ((not is_stage_op) and _sync_internal_op_bench_enabled())
-    ) and _sync_bench_window_active() and torch.cuda.is_available()
-
-    if enable_sync_bench:
-        torch.cuda.synchronize()
-        start_time = time.perf_counter()
-
-    try:
-        yield
-    finally:
-        if start_time is not None:
-            torch.cuda.synchronize()
-            elapsed_us = (time.perf_counter() - start_time) * 1e6
-
-            op_key = f"{stage_prefix}{op_name}"
-            # For D stage, tag decode position for internal ops only.
-            if (not is_stage_op) and stage_prefix == "D_" and positions is not None:
-                try:
-                    if positions.numel() > 0:
-                        pos_max = int(torch.max(positions).item())
-                        op_key = f"{op_key}_pos{pos_max}"
-                except Exception:
-                    pass
-
-            with _sync_bench_lock:
-                _sync_bench_values[op_key].append(elapsed_us)
+    return contextlib.nullcontext()
 
 
 @_atexit.register
 def _dump_on_exit() -> None:
-    _dump_sync_op_bench()
+    return
 
 
 def _sync_bench_signal_handler(signum: int, _frame) -> None:
-    _dump_sync_op_bench()
-    os._exit(0)
+    return
 
 
 for _sig in (signal.SIGTERM, signal.SIGINT):

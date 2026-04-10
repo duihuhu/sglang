@@ -133,3 +133,10 @@ CUDA_VISIBLE_DEVICES=4 python -m sglang.bench_one_batch  \
  --chunked-prefill-size -1 \
  --mem-fraction-static 0.9 \
  --profile-activities CUDA_PROFILER
+
+ du -x -B1 --max-depth=1 /var/lib/apport 2>/dev/null | awk '$1>=1073741824 {printf "%.2f GB\t%s\n",$1/1073741824,$2}' | sort -nr
+
+CUDA_VISIBLE_DEVICES=2 SGLANG_DEBUG_A_INPUT=1 \
+nohup python bench_prefill_af.py \
+  --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/ \
+  --no-resume > bench_prefill_af.log 2>&1 &

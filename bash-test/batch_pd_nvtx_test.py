@@ -242,6 +242,18 @@ def _wait_for_http_ok(url: str, timeout_s: float = 300.0, interval_s: float = 1.
     raise TimeoutError(f"Server not ready: {url}. last_err={last_err}")
 
 
+def _http_post_best_effort(url: str, timeout_s: float = 15.0) -> bool:
+    # Avoid adding new deps; use urllib.
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(url, data=b"{}", method="POST")
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            return 200 <= int(getattr(resp, "status", 0)) < 300
+    except Exception:
+        return False
+
+
 def _parse_csv_float(s: str) -> Optional[float]:
     s = (s or "").strip()
     if not s:
@@ -460,7 +472,7 @@ def _background_process_one_run(
         raise FileNotFoundError(f"Combined CSV not found after processing: {combined_csv}")
 
 
-def _run_pivot_wide(final_csv_path: str) -> str:
+def _run_pivot_wide(final_csv_path: str, bench_stage: str = "P") -> str:
     pivot_out_dir = os.path.join(os.path.dirname(os.path.abspath(final_csv_path)), "pivot_pd_ops_out")
     cmd = [
         sys.executable,
@@ -470,6 +482,8 @@ def _run_pivot_wide(final_csv_path: str) -> str:
         "--out-dir",
         pivot_out_dir,
         "--drop-p-output-len",
+        "--stage",
+        str(bench_stage).strip().upper(),
     ]
     subprocess.run(cmd, cwd="/workspace/benchmark/sglang-main", check=True)
     return pivot_out_dir
@@ -650,6 +664,37 @@ def main() -> None:
             "'both': run TTFT and AF as two separate variants, then merge."
         ),
     )
+    parser.add_argument(
+        "--bench-stage",
+        type=str,
+        default="D",
+        choices=["P", "D", "p", "d"],
+        help=(
+            "P: prefill-only benchmark (max_new_tokens=0, no decode). "
+            "D: decode proxy benchmark (max output_len + 1)."
+        ),
+    )
+    parser.add_argument(
+        "--sync-bench-num-iters",
+        type=int,
+        default=1,
+        help="Internal A/F benchmark repeat count (env: SGLANG_SYNC_BENCH_NUM_ITERS).",
+    )
+    parser.add_argument(
+        "--sync-bench-warmup-iters",
+        type=int,
+        default=0,
+        help="Internal A/F benchmark warmup count (env: SGLANG_SYNC_BENCH_WARMUP_ITERS).",
+    )
+    parser.add_argument(
+        "--bench-energy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable NVML energy (uJ per A/F op) in server-side qwen3 profiling "
+            "(env: SGLANG_BENCH_ENERGY). JSON key: bench_energy."
+        ),
+    )
     args = parser.parse_args()
     cfg = _apply_json_config(args)
     mode_norm = str(args.mode).strip().lower()
@@ -661,6 +706,14 @@ def main() -> None:
         args.mode = "both"
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")
+    stage_norm = str(args.bench_stage).strip().upper()
+    if stage_norm not in {"P", "D"}:
+        raise ValueError(f"Unsupported bench stage: {args.bench_stage}")
+    args.bench_stage = stage_norm
+    if args.sync_bench_num_iters < 1:
+        raise ValueError("--sync-bench-num-iters must be >= 1")
+    if args.sync_bench_warmup_iters < 0:
+        raise ValueError("--sync-bench-warmup-iters must be >= 0")
 
     # Parse lists.
     tp_list = [int(x) for x in args.tp_list.split(",") if x.strip()]
@@ -668,9 +721,9 @@ def main() -> None:
     output_lens = [int(x) for x in args.output_lens.split(",") if x.strip()]
     gpu_clocks = [int(x) for x in args.gpu_clocks.split(",") if x.strip()]
     batch_sizes = [int(x) for x in args.batch_size.split(",") if x.strip()]
-    # Prefill boundary produces one token, so run with max(output_len)+1 to align
-    # D positions with requested output lengths.
-    output_len_max = max(output_lens) + 1
+    # D stage uses one prefill boundary token (+1).
+    # P stage runs prefill-only with no decode token.
+    output_len_max = max(output_lens) + 1 if args.bench_stage == "D" else 0
     if args.num_seqs is not None and args.num_seqs <= 0:
         raise ValueError("--num-seqs must be >= 1 when provided")
 
@@ -688,7 +741,7 @@ def main() -> None:
         )
         print(f"[saved] big table: {out_csv_path}")
         print("[info] converting big table to wide pivot csv...")
-        pivot_out_dir = _run_pivot_wide(out_csv_path)
+        pivot_out_dir = _run_pivot_wide(out_csv_path, args.bench_stage)
         print(f"[saved] pivot dir: {pivot_out_dir}")
         return
 
@@ -857,39 +910,73 @@ def main() -> None:
         )
 
         try:
+            # Shared-server mode: start once, run TTFT/AF sequentially.
+            env_server = env.copy()
+            if args.mode == "TTFT":
+                env_server["SGLANG_SYNC_STAGE_BENCH"] = "1"
+                env_server["SGLANG_SYNC_INTERNAL_OP_BENCH"] = "0"
+            elif args.mode == "AF":
+                env_server["SGLANG_SYNC_STAGE_BENCH"] = "0"
+                env_server["SGLANG_SYNC_INTERNAL_OP_BENCH"] = "1"
+            else:
+                env_server["SGLANG_SYNC_STAGE_BENCH"] = "1"
+                env_server["SGLANG_SYNC_INTERNAL_OP_BENCH"] = "1"
+            env_server["SGLANG_SYNC_BENCH_REQUIRE_PROFILE_WINDOW"] = "0"
+            env_server["SGLANG_SYNC_BENCH_NUM_ITERS"] = str(args.sync_bench_num_iters)
+            env_server["SGLANG_SYNC_BENCH_WARMUP_ITERS"] = str(args.sync_bench_warmup_iters)
+            env_server["SGLANG_BENCH_ENERGY"] = (
+                "1" if bool(getattr(args, "bench_energy", True)) else "0"
+            )
+            env_server["SGLANG_TTFT_AF_CSV_ENABLE"] = "1"
+            env_server["SGLANG_TTFT_AF_CSV_PATH"] = os.path.join(
+                processed_dir, f"{unique_tag}_both_ttft_af.csv"
+            )
+            env_server["SGLANG_BENCH_TP"] = str(tp)
+            env_server["SGLANG_BENCH_INPUT_LEN"] = str(input_len)
+            env_server["SGLANG_BENCH_GPU_CLOCK"] = str(gpu_clock)
+            env_server["SGLANG_BENCH_BATCH_SIZE"] = str(batch_size)
+            env_server["SGLANG_OP_BENCH_DUMP_DIR"] = processed_dir
+            phase_file = os.path.join(processed_dir, f"{unique_tag}_bench_phase.txt")
+            env_server["SGLANG_BENCH_PHASE_FILE"] = phase_file
+
+            # Boot with first variant phase.
+            with open(phase_file, "w", encoding="utf-8") as f:
+                f.write(variant_defs[0][0])
+
+            proc = _run_cmd(
+                server_cmd,
+                env=env_server,
+                stdout_path=stdout_path,
+                stderr_path=stderr_path,
+                cwd=run_dir,
+                preexec_fn=os.setsid,
+            )
+            _wait_for_http_ok(
+                f"http://127.0.0.1:{port}/model_info",
+                timeout_s=args.server_start_timeout_s,
+            )
+            merged_log_f.write(f"[pd-batch] server ready at port={port}\n")
+            merged_log_f.flush()
+
             for variant_idx, (variant_name, stage_bench, internal_op_bench) in enumerate(
                 variant_defs
             ):
-                env_variant = env.copy()
-                env_variant["SGLANG_SYNC_STAGE_BENCH"] = stage_bench
-                env_variant["SGLANG_SYNC_INTERNAL_OP_BENCH"] = internal_op_bench
-                env_variant["SGLANG_OP_BENCH_DUMP_DIR"] = processed_dir
-                env_variant["SGLANG_OP_BENCH_DUMP_PREFIX"] = (
-                    f"{unique_tag}_{variant_name}"
-                )
+                with open(phase_file, "w", encoding="utf-8") as f:
+                    f.write(variant_name)
+                env_bench = env.copy()
+                env_bench["CUDA_VISIBLE_DEVICES"] = env["CUDA_VISIBLE_DEVICES"]
+                env_bench["SGLANG_BENCH_TP"] = str(tp)
+                env_bench["SGLANG_BENCH_INPUT_LEN"] = str(input_len)
+                env_bench["SGLANG_BENCH_GPU_CLOCK"] = str(gpu_clock)
+                env_bench["SGLANG_BENCH_BATCH_SIZE"] = str(batch_size)
+                env_bench["SGLANG_SYNC_STAGE_BENCH"] = stage_bench
+                env_bench["SGLANG_SYNC_INTERNAL_OP_BENCH"] = internal_op_bench
 
                 merged_log_f.write(
                     f"[pd-batch] start variant={variant_name} stage_bench={stage_bench} internal_op_bench={internal_op_bench}\n"
                 )
                 merged_log_f.flush()
 
-                proc = _run_cmd(
-                    server_cmd,
-                    env=env_variant,
-                    stdout_path=stdout_path,
-                    stderr_path=stderr_path,
-                    cwd=run_dir,
-                    preexec_fn=os.setsid,
-                )
-
-                _wait_for_http_ok(
-                    f"http://127.0.0.1:{port}/model_info",
-                    timeout_s=args.server_start_timeout_s,
-                )
-                merged_log_f.write(f"[pd-batch] server ready at port={port}\n")
-                merged_log_f.flush()
-
-                # Run bench under same GPU set.
                 bench_cmd = [
                     sys.executable,
                     "bash-test/bench_sglang.py",
@@ -910,16 +997,13 @@ def main() -> None:
                     "--mem_clock",
                     str(args.mem_clock),
                     "--ignore_eos",
-                    "--use-server-profile-range",
-                    "--profile-activities",
-                    "CUDA_PROFILER",
                 ]
                 with open(bench_stdout, "w", encoding="utf-8") as out_f, open(
                     bench_stderr, "w", encoding="utf-8"
                 ) as err_f:
                     bench_proc = subprocess.Popen(
                         bench_cmd,
-                        env=env_variant,
+                        env=env_bench,
                         cwd="/workspace/benchmark/sglang-main",
                         stdout=out_f,
                         stderr=err_f,
@@ -936,30 +1020,33 @@ def main() -> None:
                 )
                 merged_log_f.flush()
 
-                # Terminate the server and wait for llama.py dumps.
-                merged_log_f.write(
-                    f"[pd-batch] stopping server (variant={variant_name}), wait for json...\n"
-                )
-                merged_log_f.flush()
+                # Between TTFT and AF in shared-server mode, clear KV cache.
+                if variant_name == "ttft" and variant_idx + 1 < len(variant_defs):
+                    ok = _http_post_best_effort(f"http://127.0.0.1:{port}/flush_cache")
+                    merged_log_f.write(
+                        f"[pd-batch] flush_cache after ttft: {'ok' if ok else 'failed'}\n"
+                    )
+                    merged_log_f.flush()
 
-                _request_terminate_process_group(
-                    proc,
-                    timeout_s=args.server_shutdown_timeout_s,
-                    last_resort_force_kill=True,
-                )
-
-                expected_dump_files = tp * (variant_idx + 1)
-                t0 = time.time()
-                while time.time() - t0 < 60.0:
-                    if len(glob.glob(dump_glob)) >= expected_dump_files:
-                        break
-                    time.sleep(0.5)
-                dump_count = len(glob.glob(dump_glob))
-                merged_log_f.write(
-                    f"[pd-batch] dump json ready variant={variant_name}: {dump_count} files (expected>={expected_dump_files})\n"
-                )
-                merged_log_f.flush()
-                proc = None
+            merged_log_f.write("[pd-batch] stopping server, wait for json...\n")
+            merged_log_f.flush()
+            _request_terminate_process_group(
+                proc,
+                timeout_s=args.server_shutdown_timeout_s,
+                last_resort_force_kill=True,
+            )
+            t0 = time.time()
+            expected_dump_files = tp
+            while time.time() - t0 < 60.0:
+                if len(glob.glob(dump_glob)) >= expected_dump_files:
+                    break
+                time.sleep(0.5)
+            dump_count = len(glob.glob(dump_glob))
+            merged_log_f.write(
+                f"[pd-batch] dump json ready: {dump_count} files (expected>={expected_dump_files})\n"
+            )
+            merged_log_f.flush()
+            proc = None
 
         finally:
             # In case something went wrong, try to stop server process group.
@@ -1060,6 +1147,8 @@ def main() -> None:
         "bash-test/sync_op_bench_dump_to_big_table.py",
         "--work-dir",
         work_dir,
+        "--bench-stage",
+        args.bench_stage,
         "--output-lens",
         args.output_lens,
         "--final-csv",
@@ -1068,15 +1157,17 @@ def main() -> None:
     subprocess.run(cmd, cwd="/workspace/benchmark/sglang-main", check=True)
     print(f"[saved] big table: {out_csv_path}")
     print("[info] converting big table to wide pivot csv...")
-    pivot_out_dir = _run_pivot_wide(out_csv_path)
+    pivot_out_dir = _run_pivot_wide(out_csv_path, args.bench_stage)
     print(f"[saved] pivot dir: {pivot_out_dir}")
 
     # Cleanup run dirs except final outputs.
-    for processed_dir in glob.glob(os.path.join(work_dir, "tp*", "processed")):
-        try:
-            shutil.rmtree(os.path.dirname(processed_dir), ignore_errors=True)
-        except Exception:
-            pass
+    # Keep intermediate artifacts when --keep-processed is enabled.
+    if not args.keep_processed:
+        for processed_dir in glob.glob(os.path.join(work_dir, "tp*", "processed")):
+            try:
+                shutil.rmtree(os.path.dirname(processed_dir), ignore_errors=True)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
