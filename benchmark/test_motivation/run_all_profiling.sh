@@ -100,7 +100,7 @@ if [[ "$MODE" == "all" || "$MODE" == "decode" ]]; then
 
     # tp=1
     echo "--- Decode tp=1 ---"
-    python bench_decode_af.py \
+    python bench_decode_af_fast.py \
         --model-path "$MODEL_PATH" \
         --tp-size 1 \
         --output decode_data_v1_tp1.txt
@@ -108,7 +108,7 @@ if [[ "$MODE" == "all" || "$MODE" == "decode" ]]; then
 
     # tp=2
     echo "--- Decode tp=2 ---"
-    python bench_decode_af.py \
+    python bench_decode_af_fast.py \
         --model-path "$MODEL_PATH" \
         --tp-size 2 \
         --output decode_data_v1_tp2.txt
@@ -116,7 +116,7 @@ if [[ "$MODE" == "all" || "$MODE" == "decode" ]]; then
 
     # tp=4
     echo "--- Decode tp=4 ---"
-    python bench_decode_af.py \
+    python bench_decode_af_fast.py \
         --model-path "$MODEL_PATH" \
         --tp-size 4 \
         --output decode_data_v1_tp4.txt
@@ -124,7 +124,7 @@ if [[ "$MODE" == "all" || "$MODE" == "decode" ]]; then
 
     # tp=8
     echo "--- Decode tp=8 ---"
-    python bench_decode_af.py \
+    python bench_decode_af_fast.py \
         --model-path "$MODEL_PATH" \
         --tp-size 8 \
         --output decode_data_v1_tp8.txt
@@ -164,7 +164,7 @@ if [[ "$MODE" == "quick" ]]; then
     echo ""
 
     echo "--- Decode quick ---"
-    python bench_decode_af.py \
+    python bench_decode_af_fast.py \
         --model-path "$MODEL_PATH" \
         --tp-size 1 \
         --quick \

@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
 """
-Decode Attention/FFN latency + energy profiling using real SGLang model.
+Decode Attention/FFN latency + energy profiling (fast KV cache setup).
 
-Loads the actual model via SGLang's ModelRunner, runs prefill to populate
-KV cache, then independently profiles layer.self_attn and layer.mlp for
-a single decode step with the NVML energy counter.
+Same goal as bench_decode_af.py, but uses a trick to speed up KV cache
+preparation: instead of running output_len decode steps one by one, we
+prefill (input_len + output_len - K) tokens at once, then only run K
+decode steps to reach the target KV length. This is ~100x faster for
+large output_len (e.g., 4096).
 
-Based on sglang.bench_one_batch pattern — no server needed.
+The final measurement is taken at KV length = input_len + output_len,
+identical to the slow version.
 
 Prerequisites:
     cd benchmark/test_motivation/dvfs && make
 
 Usage:
-    # Quick validation
-    sudo python bench_decode_af.py --model-path Qwen/Qwen3-32B --load-format dummy --quick
-
-    # Full sweep tp=1
-    sudo python bench_decode_af.py --model-path Qwen/Qwen3-32B --tp-size 1
-
-    # tp=2
-    sudo python bench_decode_af.py --model-path Qwen/Qwen3-32B --tp-size 2
-
-Note:
-    Requires root or nvidia-persistenced for frequency control.
+    sudo python bench_decode_af_fast.py --model-path /models/Qwen/Qwen3-32B/ --quick
+    sudo python bench_decode_af_fast.py --model-path /models/Qwen/Qwen3-32B/ --tp-size 1
+    sudo python bench_decode_af_fast.py --model-path /models/Qwen/Qwen3-32B/ --tp-size 2
 """
 
 import argparse
@@ -61,9 +56,13 @@ from sglang.srt.utils import (
 )
 
 DEFAULT_FREQS = [210, 450, 690, 930, 1170, 1410]
-DEFAULT_INPUT_LENS = [128, 512, 1024, 2048, 4096, 8192]
-DEFAULT_OUTPUT_LENS = [64, 256, 512, 4096]
+DEFAULT_INPUT_LENS = [64, 128, 256, 512, 1024, 2048, 4096, 8192]
+DEFAULT_OUTPUT_LENS = [64, 128, 256, 512, 1024, 2048, 4096]
 DEFAULT_BATCH_SIZES = [1, 4, 8, 16, 32, 64, 128, 256]
+
+# Number of real decode steps after the fast prefill.
+# Must be >= warmup+1 to ensure KV cache is in decode mode before measurement.
+DECODE_SETTLE_STEPS = 5
 
 
 class TreeCacheNamespace(SimpleNamespace):
@@ -106,9 +105,10 @@ def load_model(server_args, port_args, gpu_id, tp_rank):
     return model_runner
 
 
-def make_reqs(batch_size, input_len, output_len):
-    input_ids = np.random.randint(0, 10000, (batch_size, input_len), dtype=np.int32)
-    sampling_params = SamplingParams(temperature=0, max_new_tokens=output_len)
+def make_reqs(batch_size, prefill_len, max_output_len):
+    """Create requests with prefill_len input tokens."""
+    input_ids = np.random.randint(0, 10000, (batch_size, prefill_len), dtype=np.int32)
+    sampling_params = SamplingParams(temperature=0, max_new_tokens=max_output_len)
     reqs = []
     for i in range(batch_size):
         req = Req(rid=i, origin_input_text="", origin_input_ids=list(input_ids[i]),
@@ -121,7 +121,6 @@ def make_reqs(batch_size, input_len, output_len):
 
 
 def run_prefill(reqs, model_runner):
-    """Run prefill to populate KV cache. Returns (next_token_ids, batch)."""
     dummy_tree_cache = TreeCacheNamespace(
         page_size=model_runner.server_args.page_size,
         device=model_runner.device,
@@ -145,7 +144,6 @@ def run_prefill(reqs, model_runner):
 
 
 def run_decode_steps(next_token_ids, batch, model_runner, n_steps):
-    """Run n_steps decode iterations to grow KV cache."""
     for _ in range(n_steps):
         batch.output_ids = next_token_ids
         batch.prepare_for_decode()
@@ -157,7 +155,6 @@ def run_decode_steps(next_token_ids, batch, model_runner, n_steps):
 
 
 def build_decode_forward_batch(next_token_ids, batch, model_runner):
-    """Build a valid decode ForwardBatch (1 step) with initialized metadata."""
     batch.output_ids = next_token_ids
     batch.prepare_for_decode()
     model_worker_batch = batch.get_model_worker_batch()
@@ -196,11 +193,6 @@ def _sync_repeat_count(actual_repeat: int, tp_size: int) -> int:
 
 
 def profile_one(fn, ctrl, n_warmup, n_repeat, tp_size=1):
-    """Run fn() enough times to get stable energy readings.
-
-    For tp>1, synchronizes repeat count across all ranks to prevent
-    all-reduce deadlocks from mismatched iteration counts.
-    """
     for _ in range(n_warmup):
         fn()
 
@@ -243,7 +235,7 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
     n_repeat = bench_args.repeat
 
     rank_print(f"\n{'='*65}")
-    rank_print(f" Decode A/F Profiling  (real SGLang model, tp={tp_size})")
+    rank_print(f" Decode A/F Profiling — FAST mode  (tp={tp_size})")
     rank_print(f"{'='*65}")
     rank_print(f"  Model:       {server_args.model_path}")
     rank_print(f"  GPU:         {gpu_id}  (TP rank {tp_rank})")
@@ -252,7 +244,11 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
     rank_print(f"  Output lens: {output_lens}")
     rank_print(f"  Batch sizes: {batch_sizes}")
     rank_print(f"  Repeat:      {n_repeat},  Warmup: {n_warmup}")
+    rank_print(f"  Settle steps: {DECODE_SETTLE_STEPS}")
     rank_print(f"  Max tokens:  {model_runner.max_total_num_tokens}")
+    rank_print(f"{'='*65}")
+    rank_print(f"  Strategy: prefill (il+ol-{DECODE_SETTLE_STEPS}) tokens, "
+               f"then {DECODE_SETTLE_STEPS} decode steps → measure at KV=il+ol")
     rank_print(f"{'='*65}\n")
 
     out_path = _script_dir / bench_args.output
@@ -298,85 +294,149 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
     done = len(completed)
     t_start = time.time()
 
+    # Calibrated activation memory per token (set after first successful prefill).
+    # Much more accurate than any formula — we measure the actual peak delta.
+    activation_bytes_per_token = None
+
+    # Group configs by (il, ol, bs) so we can reuse KV cache setup across freqs.
+    grouped_configs = []
+    for (il, ol, bs, freq) in configs:
+        if not grouped_configs or grouped_configs[-1][0] != (il, ol, bs):
+            grouped_configs.append(((il, ol, bs), [freq]))
+        else:
+            grouped_configs[-1][1].append(freq)
+
     try:
-        for il, ol, bs, freq in configs:
+        for (il, ol, bs), freq_list in grouped_configs:
             model_runner.req_to_token_pool.clear()
             model_runner.token_to_kv_pool_allocator.clear()
 
-            # ── Pre-flight: setup + allocate tensors, sync OOM ───────
+            # ── Fast KV cache setup ──────────────────────────────────
+            prefill_len = il + ol - DECODE_SETTLE_STEPS
+            if prefill_len < 1:
+                prefill_len = 1
+            actual_decode_steps = (il + ol) - prefill_len - 1
+
+            # ── Pre-flight: check capacity BEFORE any TP communication ──
+            total_kv_tokens = (il + ol) * bs
+            capacity_ok = total_kv_tokens <= model_runner.max_total_num_tokens
+            # Only apply activation memory check for large prefills where OOM
+            # is a real risk.  The calibrated activation_bytes_per_token is
+            # measured from the *first* prefill and includes one-time overheads
+            # (NCCL buffers, CUDA context growth, …), so it over-estimates for
+            # small batches.  Skip the heuristic when total prefill tokens are
+            # small (< 32k) — the OOM try/except will catch real failures.
+            prefill_tokens = prefill_len * bs
+            if capacity_ok and activation_bytes_per_token is not None and prefill_tokens >= 32768:
+                torch.cuda.empty_cache()
+                free_mem, _ = torch.cuda.mem_get_info(device)
+                est_need = activation_bytes_per_token * prefill_tokens
+                if free_mem < est_need * 1.2:
+                    capacity_ok = False
+                    rank_print(f"  [MEM-check] il={il} ol={ol} bs={bs} — "
+                               f"free={free_mem/1e9:.2f}GB, "
+                               f"est_need={est_need*1.2/1e9:.2f}GB "
+                               f"(calib={activation_bytes_per_token:.0f} B/tok)")
+            if not capacity_ok:
+                torch.cuda.empty_cache()
+            if _sync_skip(not capacity_ok, tp_size):
+                rank_print(f"  [SKIP-capacity] il={il} ol={ol} bs={bs} — skipped "
+                           f"({len(freq_list)} freq points)")
+                done += len(freq_list)
+                continue
+
+            # ── Setup: prefill + decode settle (involves TP communication) ──
             setup_failed = False
             forward_batch = None
             hidden_states = None
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats(device)
+            mem_before = torch.cuda.memory_allocated(device)
             try:
-                reqs = make_reqs(bs, il, ol)
+                reqs = make_reqs(bs, prefill_len, actual_decode_steps + 1)
                 next_token_ids, batch = run_prefill(reqs, model_runner)
-                if ol > 1:
+                if actual_decode_steps > 0:
                     next_token_ids, batch = run_decode_steps(
-                        next_token_ids, batch, model_runner, ol - 1)
+                        next_token_ids, batch, model_runner, actual_decode_steps)
                 forward_batch = build_decode_forward_batch(
                     next_token_ids, batch, model_runner)
                 hidden_states = torch.randn(bs, hidden_size,
                                             device=device, dtype=torch.bfloat16)
                 residual = hidden_states.clone()
                 positions = forward_batch.positions
-            except (torch.cuda.OutOfMemoryError, RuntimeError):
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
                 torch.cuda.empty_cache()
                 setup_failed = True
+                rank_print(f"  [OOM-setup-local] il={il} ol={ol} bs={bs} — {e}")
+
+            # Calibrate activation_bytes_per_token from the first success.
+            if not setup_failed and activation_bytes_per_token is None:
+                peak = torch.cuda.max_memory_allocated(device)
+                peak_delta = peak - mem_before
+                n_tokens = prefill_len * bs
+                if n_tokens > 0:
+                    activation_bytes_per_token = peak_delta / n_tokens
+                    rank_print(f"  [CALIBRATED] peak_delta={peak_delta/1e9:.2f}GB "
+                               f"for {n_tokens} tokens → "
+                               f"{activation_bytes_per_token:.0f} B/tok")
 
             if _sync_skip(setup_failed, tp_size):
-                rank_print(f"  [OOM-setup] il={il} ol={ol} bs={bs} — skipped")
+                rank_print(f"  [OOM-setup] il={il} ol={ol} bs={bs} — skipped "
+                           f"({len(freq_list)} freq points)")
                 if forward_batch is not None:
                     del forward_batch
                 if hidden_states is not None:
                     del hidden_states
                 torch.cuda.empty_cache()
+                done += len(freq_list)
                 continue
 
-            ret = ctrl.lock_sm_clock(freq)
-            if ret != 0:
-                rank_print(f"  [ERROR] lock_sm_clock({freq}) failed (code={ret}). "
-                           f"Need root? Try: sudo python ...")
-                break
-            time.sleep(0.05)
+            # ── Profile each frequency with the SAME KV cache ──
+            for freq in freq_list:
+                ret = ctrl.lock_sm_clock(freq)
+                if ret != 0:
+                    rank_print(f"  [ERROR] lock_sm_clock({freq}) failed (code={ret}). "
+                               f"Need root? Try: sudo python ...")
+                    break
+                time.sleep(0.05)
 
-            # ── Profile: no try/except around forward for tp>1 safety ──
-            with torch.no_grad():
-                def _attn_with_norm():
-                    hs, _ = layer.input_layernorm(
-                        hidden_states, residual)
-                    return layer.self_attn(
-                        positions=positions,
-                        hidden_states=hs,
-                        forward_batch=forward_batch)
+                with torch.no_grad():
+                    def _attn_with_norm():
+                        hs, _ = layer.input_layernorm(
+                            hidden_states, residual)
+                        return layer.self_attn(
+                            positions=positions,
+                            hidden_states=hs,
+                            forward_batch=forward_batch)
 
-                def _ffn_with_norm():
-                    hs, _ = layer.post_attention_layernorm(
-                        hidden_states, residual)
-                    return layer.mlp(hs)
+                    def _ffn_with_norm():
+                        hs, _ = layer.post_attention_layernorm(
+                            hidden_states, residual)
+                        return layer.mlp(hs)
 
-                a_lat, a_energy = profile_one(
-                    _attn_with_norm, ctrl, n_warmup, n_repeat, tp_size)
-                f_lat, f_energy = profile_one(
-                    _ffn_with_norm, ctrl, n_warmup, n_repeat, tp_size)
+                    a_lat, a_energy = profile_one(
+                        _attn_with_norm, ctrl, n_warmup, n_repeat, tp_size)
+                    f_lat, f_energy = profile_one(
+                        _ffn_with_norm, ctrl, n_warmup, n_repeat, tp_size)
 
-            ctrl.unlock_sm_clock()
+                ctrl.unlock_sm_clock()
 
-            if tp_rank == 0:
-                f_out.write(f"{tp}\t{il}\t{ol}\t{freq}\t{bs}\t"
-                            f"{a_lat:.2f}\t{f_lat:.2f}\t"
-                            f"{a_energy:.4f}\t{f_energy:.4f}\n")
-                f_out.flush()
+                if tp_rank == 0:
+                    f_out.write(f"{tp}\t{il}\t{ol}\t{freq}\t{bs}\t"
+                                f"{a_lat:.2f}\t{f_lat:.2f}\t"
+                                f"{a_energy:.4f}\t{f_energy:.4f}\n")
+                    f_out.flush()
 
-            done += 1
-            elapsed = time.time() - t_start
-            progress = done - len(completed)
-            remaining = len(configs) - progress
-            eta = elapsed / progress * remaining if progress > 0 else 0
-            rank_print(f"  [{done}/{total}] il={il:>5} ol={ol:>4} bs={bs:>3} "
-                       f"f={freq:>4}MHz | "
-                       f"A: {a_lat:>9.1f}us {a_energy:>7.3f}mJ | "
-                       f"F: {f_lat:>9.1f}us {f_energy:>7.3f}mJ | "
-                       f"ETA: {eta/60:.1f}min")
+                done += 1
+                elapsed = time.time() - t_start
+                progress = done - len(completed)
+                remaining = total - done
+                eta = elapsed / progress * remaining if progress > 0 else 0
+                rank_print(f"  [{done}/{total}] il={il:>5} ol={ol:>4} bs={bs:>3} "
+                           f"f={freq:>4}MHz | "
+                           f"A: {a_lat:>9.1f}us {a_energy:>7.3f}mJ | "
+                           f"F: {f_lat:>9.1f}us {f_energy:>7.3f}mJ | "
+                           f"ETA: {eta/60:.1f}min")
 
             del hidden_states, residual, positions, forward_batch
             torch.cuda.empty_cache()
@@ -395,7 +455,8 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Decode A/F latency + energy profiling")
+    parser = argparse.ArgumentParser(
+        description="Decode A/F profiling (fast KV setup via prefill)")
     ServerArgs.add_cli_args(parser)
     parser.add_argument("--freqs", type=int, nargs="+", default=DEFAULT_FREQS)
     parser.add_argument("--input-lens", type=int, nargs="+", default=DEFAULT_INPUT_LENS)

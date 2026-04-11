@@ -148,14 +148,40 @@ def build_prefill_forward_batch(reqs, model_runner):
     return forward_batch
 
 
+# ── TP-safe profiling helpers ────────────────────────────────────────────
+
 MIN_MEASURE_TIME_S = 0.5
 
 
-def profile_one(fn, ctrl, n_warmup, n_repeat):
+def _sync_skip(skip_local: bool, tp_size: int) -> bool:
+    """All TP ranks agree on whether to skip. If ANY rank wants to skip, ALL skip.
+    Uses the TP process group to avoid deadlocks with model-internal all-reduce."""
+    if tp_size <= 1:
+        return skip_local
+    from sglang.srt.distributed.parallel_state import get_tp_group
+    tp_group = get_tp_group().device_group
+    flag = torch.tensor([1 if skip_local else 0], dtype=torch.int32, device="cuda")
+    torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX, group=tp_group)
+    return flag.item() > 0
+
+
+def _sync_repeat_count(actual_repeat: int, tp_size: int) -> int:
+    """All TP ranks agree on the same repeat count (use the max across ranks).
+    Uses the TP process group to avoid deadlocks with model-internal all-reduce."""
+    if tp_size <= 1:
+        return actual_repeat
+    from sglang.srt.distributed.parallel_state import get_tp_group
+    tp_group = get_tp_group().device_group
+    count = torch.tensor([actual_repeat], dtype=torch.int64, device="cuda")
+    torch.distributed.all_reduce(count, op=torch.distributed.ReduceOp.MAX, group=tp_group)
+    return count.item()
+
+
+def profile_one(fn, ctrl, n_warmup, n_repeat, tp_size=1):
     """Run fn() enough times to get stable energy readings.
 
-    NVML energy counter updates every ~20-100ms. We ensure the total
-    measurement window is at least MIN_MEASURE_TIME_S to avoid 0 mJ readings.
+    For tp>1, synchronizes repeat count across all ranks to prevent
+    all-reduce deadlocks from mismatched iteration counts.
     """
     for _ in range(n_warmup):
         fn()
@@ -167,6 +193,7 @@ def profile_one(fn, ctrl, n_warmup, n_repeat):
     t_single = time.perf_counter() - t_probe
 
     actual_repeat = max(n_repeat, int(MIN_MEASURE_TIME_S / max(t_single, 1e-6)) + 1)
+    actual_repeat = _sync_repeat_count(actual_repeat, tp_size)
 
     torch.cuda.synchronize()
     e0 = ctrl.get_energy_mj()
@@ -179,9 +206,12 @@ def profile_one(fn, ctrl, n_warmup, n_repeat):
     return (t1 - t0) / actual_repeat * 1e6, (e1 - e0) / actual_repeat
 
 
+# ── Main profiling worker ────────────────────────────────────────────────
+
 def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
     """Main profiling logic — runs in each TP worker."""
     rank_print = print if tp_rank == 0 else lambda *_, **__: None
+    tp_size = server_args.tp_size
 
     model_runner = load_model(server_args, port_args, gpu_id, tp_rank)
     ctrl = DVFSController(gpu_id)
@@ -195,7 +225,7 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
     n_repeat = bench_args.repeat
 
     rank_print(f"\n{'='*65}")
-    rank_print(f" Prefill A/F Profiling  (real SGLang model, tp={server_args.tp_size})")
+    rank_print(f" Prefill A/F Profiling  (real SGLang model, tp={tp_size})")
     rank_print(f"{'='*65}")
     rank_print(f"  Model:       {server_args.model_path}")
     rank_print(f"  GPU:         {gpu_id}  (TP rank {tp_rank})")
@@ -220,7 +250,7 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
 
     configs = []
     total = 0
-    tp = server_args.tp_size
+    tp = tp_size
     for il in input_lens:
         for bs in batch_sizes:
             max_bs = model_runner.max_total_num_tokens // il
@@ -252,50 +282,56 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
             model_runner.req_to_token_pool.clear()
             model_runner.token_to_kv_pool_allocator.clear()
 
+            # ── Pre-flight OOM check: all ranks agree before any forward ──
+            alloc_failed = False
+            forward_batch = None
             try:
                 reqs = make_reqs(bs, il)
                 forward_batch = build_prefill_forward_batch(reqs, model_runner)
+                n_tokens = forward_batch.seq_lens_sum
+                hidden_states = torch.randn(n_tokens, hidden_size,
+                                            device=device, dtype=torch.bfloat16)
+                residual = hidden_states.clone()
+                positions = forward_batch.positions
             except (torch.cuda.OutOfMemoryError, RuntimeError):
                 torch.cuda.empty_cache()
+                alloc_failed = True
+
+            if _sync_skip(alloc_failed, tp_size):
                 rank_print(f"  [OOM-alloc] il={il} bs={bs} — skipped")
+                if forward_batch is not None:
+                    del forward_batch
+                torch.cuda.empty_cache()
                 continue
 
-            n_tokens = forward_batch.seq_lens_sum
-            hidden_states = torch.randn(n_tokens, hidden_size,
-                                        device=device, dtype=torch.bfloat16)
-            residual = hidden_states.clone()
-            positions = forward_batch.positions
-
-            ctrl.lock_sm_clock(freq)
+            ret = ctrl.lock_sm_clock(freq)
+            if ret != 0:
+                rank_print(f"  [ERROR] lock_sm_clock({freq}) failed (code={ret}). "
+                           f"Need root? Try: sudo python ...")
+                break
             time.sleep(0.05)
 
-            try:
-                with torch.no_grad():
-                    def _attn_with_norm():
-                        hs, _ = layer.input_layernorm(
-                            hidden_states, residual)
-                        return layer.self_attn(
-                            positions=positions,
-                            hidden_states=hs,
-                            forward_batch=forward_batch)
+            # ── Profile: no try/except around forward for tp>1 safety ────
+            with torch.no_grad():
+                def _attn_with_norm():
+                    hs, _ = layer.input_layernorm(
+                        hidden_states, residual)
+                    return layer.self_attn(
+                        positions=positions,
+                        hidden_states=hs,
+                        forward_batch=forward_batch)
 
-                    def _ffn_with_norm():
-                        hs, _ = layer.post_attention_layernorm(
-                            hidden_states, residual)
-                        return layer.mlp(hs)
+                def _ffn_with_norm():
+                    hs, _ = layer.post_attention_layernorm(
+                        hidden_states, residual)
+                    return layer.mlp(hs)
 
-                    a_lat, a_energy = profile_one(
-                        _attn_with_norm,
-                        ctrl, n_warmup, n_repeat)
-                    f_lat, f_energy = profile_one(
-                        _ffn_with_norm,
-                        ctrl, n_warmup, n_repeat)
-            except (torch.cuda.OutOfMemoryError, RuntimeError):
-                torch.cuda.empty_cache()
-                rank_print(f"  [OOM-run] il={il} bs={bs} freq={freq} — skipped")
-                continue
-            finally:
-                ctrl.unlock_sm_clock()
+                a_lat, a_energy = profile_one(
+                    _attn_with_norm, ctrl, n_warmup, n_repeat, tp_size)
+                f_lat, f_energy = profile_one(
+                    _ffn_with_norm, ctrl, n_warmup, n_repeat, tp_size)
+
+            ctrl.unlock_sm_clock()
 
             if tp_rank == 0:
                 f_out.write(f"{tp}\t{il}\t{freq}\t{bs}\t"
@@ -305,13 +341,15 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
 
             done += 1
             elapsed = time.time() - t_start
-            eta = elapsed / (done - len(completed)) * (len(configs) - (done - len(completed))) if done > len(completed) else 0
+            progress = done - len(completed)
+            remaining = len(configs) - progress
+            eta = elapsed / progress * remaining if progress > 0 else 0
             rank_print(f"  [{done}/{total}] il={il:>5} bs={bs:>2} f={freq:>4}MHz | "
                        f"A: {a_lat:>10.1f}us {a_energy:>8.3f}mJ | "
                        f"F: {f_lat:>10.1f}us {f_energy:>8.3f}mJ | "
                        f"ETA: {eta/60:.1f}min")
 
-            del hidden_states, positions, forward_batch
+            del hidden_states, residual, positions, forward_batch
             torch.cuda.empty_cache()
 
     except KeyboardInterrupt:
@@ -320,7 +358,7 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
         if f_out:
             f_out.close()
         ctrl.unlock_sm_clock()
-        if server_args.tp_size > 1:
+        if tp_size > 1:
             from sglang.srt.distributed.parallel_state import destroy_distributed_environment
             destroy_distributed_environment()
 
@@ -375,7 +413,6 @@ def main():
                 workers.append(proc)
         for proc in workers:
             proc.join()
-        proc.terminate()
 
 
 if __name__ == "__main__":
