@@ -122,9 +122,9 @@ nohup /workspace/env/sglang-main/bin/python bash-test/batch_pd_nvtx_test.py \
   --log-dir bash-test/pd_batch_logs_ut_both \
   --final-csv bash-test/pd_latency_big_table_ut_both.csv > bash-test/test_both.log 2>&1 &
 
-CUDA_VISIBLE_DEVICES=4 python -m sglang.bench_one_batch  \
+CUDA_VISIBLE_DEVICES=6,7 python -m sglang.bench_one_batch  \
  --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/  \
- --tp-size 1   \
+ --tp-size 2   \
  --batch-size 1     \
  --input-len 128     \
  --output-len 1     \
@@ -136,7 +136,24 @@ CUDA_VISIBLE_DEVICES=4 python -m sglang.bench_one_batch  \
 
  du -x -B1 --max-depth=1 /var/lib/apport 2>/dev/null | awk '$1>=1073741824 {printf "%.2f GB\t%s\n",$1/1073741824,$2}' | sort -nr
 
-CUDA_VISIBLE_DEVICES=2 SGLANG_DEBUG_A_INPUT=1 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 SGLANG_DEBUG_A_INPUT=1 BENCH_SM_LOCK_SETTLE_S=3 \
 nohup python bench_prefill_af.py \
+  --tp-size 8 \
   --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/ \
   --no-resume > bench_prefill_af.log 2>&1 &
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 SGLANG_DEBUG_A_INPUT=1 \
+python bench_prefill_af.py \
+  --tp-size 4 \
+  --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/ \
+  --no-resume
+
+./bash-test/set_gpu_frequency.sh --gpus all --gpu-clock 210
+./set_gpu_frequency.sh --gpus 6,7 --gpu-clock 1410
+./set_gpu_frequency.sh --gpus 4,5 --gpu-clock 210
+
+
+python bench_prefill_af.py \
+  --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/ \
+  --tp-size 1 \
+  --output prefill_data_v1_tp2.txt

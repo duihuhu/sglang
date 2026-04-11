@@ -513,56 +513,50 @@ class Qwen2Model(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
 
-        stage_prefix = _nvtx_stage_prefix(forward_batch)
-        if stage_prefix == "P_":
-            ttft_or_tpot = "TTFT"
+        if self.pp_group.is_first_rank:
+            if input_embeds is None:
+                hidden_states = self.embed_tokens(input_ids)
+            else:
+                hidden_states = input_embeds
+            residual = None
         else:
-            ttft_or_tpot = "TPOT"
-        with _profile_op(ttft_or_tpot, forward_batch, positions=None):
-            if self.pp_group.is_first_rank:
-                if input_embeds is None:
-                    hidden_states = self.embed_tokens(input_ids)
+            assert pp_proxy_tensors is not None
+            hidden_states = pp_proxy_tensors["hidden_states"]
+            residual = pp_proxy_tensors["residual"]
+
+        aux_hidden_states = []
+        for i in range(self.start_layer, self.end_layer):
+            if i in self.layers_to_capture:
+                aux_hidden_states.append(
+                    hidden_states + residual
+                    if residual is not None
+                    else hidden_states
+                )
+            layer = self.layers[i]
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                forward_batch,
+                residual,
+            )
+        if not self.pp_group.is_last_rank:
+            return PPProxyTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                }
+            )
+        else:
+            if hidden_states.shape[0] != 0:
+                if residual is None:
+                    hidden_states = self.norm(hidden_states)
                 else:
-                    hidden_states = input_embeds
-                residual = None
-            else:
-                assert pp_proxy_tensors is not None
-                hidden_states = pp_proxy_tensors["hidden_states"]
-                residual = pp_proxy_tensors["residual"]
+                    hidden_states, _ = self.norm(hidden_states, residual)
 
-            aux_hidden_states = []
-            for i in range(self.start_layer, self.end_layer):
-                if i in self.layers_to_capture:
-                    aux_hidden_states.append(
-                        hidden_states + residual
-                        if residual is not None
-                        else hidden_states
-                    )
-                layer = self.layers[i]
-                hidden_states, residual = layer(
-                    positions,
-                    hidden_states,
-                    forward_batch,
-                    residual,
-                )
-            if not self.pp_group.is_last_rank:
-                return PPProxyTensors(
-                    {
-                        "hidden_states": hidden_states,
-                        "residual": residual,
-                    }
-                )
-            else:
-                if hidden_states.shape[0] != 0:
-                    if residual is None:
-                        hidden_states = self.norm(hidden_states)
-                    else:
-                        hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) == 0:
+            return hidden_states
 
-            if len(aux_hidden_states) == 0:
-                return hidden_states
-
-            return hidden_states, aux_hidden_states
+        return hidden_states, aux_hidden_states
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

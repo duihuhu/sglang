@@ -34,7 +34,6 @@ from sglang.srt.model_loader.weight_utils import (
 from sglang.srt.models.qwen2 import Qwen2MLP as Qwen3MLP
 from sglang.srt.models.qwen2 import Qwen2Model
 from sglang.srt.models.qwen2 import (
-    _profile_op,
     _sync_bench_window_active,
     _sync_internal_op_bench_enabled,
     _sync_qwen3_loop_bench_enabled,
@@ -913,24 +912,14 @@ class Qwen3ForCausalLM(nn.Module):
         if collect_ttft:
             torch.cuda.synchronize()
             _t0 = time.perf_counter()
-            hidden_states = self.model(
-                input_ids,
-                positions,
-                forward_batch,
-                input_embeds,
-                pp_proxy_tensors=pp_proxy_tensors,
-            )
-            torch.cuda.synchronize()
-            _ttft_us = (time.perf_counter() - _t0) * 1e6
-            _record_latency("TTFT", _ttft_us)
-        else:
-            hidden_states = self.model(
-                input_ids,
-                positions,
-                forward_batch,
-                input_embeds,
-                pp_proxy_tensors=pp_proxy_tensors,
-            )
+
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            forward_batch,
+            input_embeds,
+            pp_proxy_tensors=pp_proxy_tensors,
+        )
 
         aux_hidden_states = None
         if self.capture_aux_hidden_states:
@@ -938,7 +927,7 @@ class Qwen3ForCausalLM(nn.Module):
 
         if self.pp_group.is_last_rank:
             if not get_embedding:
-                return self.logits_processor(
+                out = self.logits_processor(
                     input_ids,
                     hidden_states,
                     self.lm_head,
@@ -946,9 +935,16 @@ class Qwen3ForCausalLM(nn.Module):
                     aux_hidden_states,
                 )
             else:
-                return self.pooler(hidden_states, forward_batch)
+                out = self.pooler(hidden_states, forward_batch)
         else:
-            return hidden_states
+            out = hidden_states
+
+        if collect_ttft:
+            torch.cuda.synchronize()
+            _ttft_us = (time.perf_counter() - _t0) * 1e6
+            _record_latency("TTFT", _ttft_us)
+
+        return out
 
     @torch.no_grad()
     def forward_split_prefill(
