@@ -85,7 +85,6 @@ DEFAULT_FREQS = [210, 1410]
 DEFAULT_INPUT_LENS = [128]
 DEFAULT_BATCH_SIZES = [1]
 
-
 def _debug_a_input_enabled() -> bool:
     return os.getenv("SGLANG_DEBUG_A_INPUT", "0") == "1"
 
@@ -206,6 +205,9 @@ def build_prefill_forward_batch(reqs, model_runner):
     return forward_batch
 
 
+MIN_MEASURE_TIME_S = 3
+
+
 def profile_one(
     fn,
     n_warmup,
@@ -213,17 +215,34 @@ def profile_one(
     sample_hook=None,
     *,
     nvdev=None,
+    tp_size=1,
 ):
     """Run fn(); return (avg_latency_us, avg_energy_mj_per_repeat).
 
-    Energy = (NVML total mJ at end − at start) / n_repeat on the timed loop only
-    (hardware counter). If ``nvdev`` is None, energy is NaN.
+    Probes single-call latency after warmup, then ensures the measurement
+    window is at least MIN_MEASURE_TIME_S (0.5s) so that NVML energy
+    counters (updated every ~20-100ms) produce non-zero readings.
+
+    When tp_size > 1, actual_repeat is broadcast from rank 0 so all
+    workers call fn() the same number of times (required by NCCL
+    collectives inside fn).
     """
     for _ in range(n_warmup):
         fn()
 
     torch.cuda.synchronize()
-    actual_repeat = max(n_repeat, 1)
+    t_probe = time.perf_counter()
+    fn()
+    torch.cuda.synchronize()
+    t_single = time.perf_counter() - t_probe
+
+    actual_repeat = max(n_repeat, int(MIN_MEASURE_TIME_S / max(t_single, 1e-6)) + 1)
+
+    if tp_size > 1:
+        import torch.distributed as dist
+        ar = torch.tensor([actual_repeat], dtype=torch.long, device="cuda")
+        dist.broadcast(ar, src=0)
+        actual_repeat = ar.item()
 
     torch.cuda.synchronize()
 
@@ -239,7 +258,14 @@ def profile_one(
 
     if nvdev is not None:
         e1 = nvdev.total_energy_mj()
-        avg_e = (e1 - e0) / actual_repeat
+        local_e = (e1 - e0) / actual_repeat
+        if tp_size > 1:
+            import torch.distributed as dist
+            e_tensor = torch.tensor([local_e], dtype=torch.double, device="cuda")
+            dist.all_reduce(e_tensor, op=dist.ReduceOp.SUM)
+            avg_e = e_tensor.item()
+        else:
+            avg_e = local_e
     else:
         avg_e = float("nan")
     t1 = time.perf_counter()
@@ -297,75 +323,58 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
             )
 
     out_path = _script_dir / bench_args.output
-    completed = set()
-    if tp_rank == 0 and bench_args.resume and out_path.exists():
-        with open(out_path) as f:
-            for line in f:
-                if line.startswith("tp\t"):
-                    continue
-                parts = line.strip().split("\t")
-                if len(parts) >= 4:
-                    completed.add(tuple(parts[:4]))
-        rank_print(f"Resuming: {len(completed)} configs already done.")
 
     configs = []
     total = 0
     tp = server_args.tp_size
-    for il in input_lens:
-        for bs in batch_sizes:
-            max_bs = model_runner.max_total_num_tokens // il
-            if bs > max_bs:
-                continue
-            for freq in freqs:
+    for freq in freqs:
+        for il in input_lens:
+            for bs in batch_sizes:
+                max_bs = model_runner.max_total_num_tokens // il
+                if bs > max_bs:
+                    continue
                 total += 1
-                key = (str(tp), str(il), str(freq), str(bs))
-                if key not in completed:
-                    configs.append((il, bs, freq))
+                configs.append((freq, il, bs))
 
-    rank_print(f"Total: {total} configs ({len(configs)} remaining)\n")
-    if len(configs) == 0:
-        rank_print(
-            "No pending config to run. GPU clock will NOT be adjusted in this run. "
-            "Use --no-resume or a new --output file to force rerun."
-        )
+    rank_print(f"Total: {total} configs\n")
 
     f_out = None
     if tp_rank == 0:
-        if bench_args.resume:
-            write_header = not out_path.exists() or len(completed) == 0
+        if bench_args.append and out_path.exists():
             f_out = open(out_path, "a")
         else:
-            write_header = True
             f_out = open(out_path, "w")
-        if write_header:
             f_out.write(
                 "tp\tinput_len\tsm_lock_mhz\tbatch_size\t"
-                "P_A_lat\tP_F_lat\t"
+                "P_A_lat\tP_F_lat\t(A+F)*64\t"
                 "P_A_E_mj_per_rep\tP_F_E_mj_per_rep\n"
             )
             f_out.flush()
     sample_f = None
     sample_path = _script_dir / bench_args.samples_output
     if tp_rank == 0:
-        if bench_args.resume:
-            write_samples_header = not sample_path.exists() or len(completed) == 0
+        if bench_args.append and sample_path.exists():
             sample_f = open(sample_path, "a")
         else:
-            write_samples_header = True
             sample_f = open(sample_path, "w")
-        if write_samples_header:
             sample_f.write("tp\tinput_len\tsm_lock_mhz\tbatch_size\top\titer\tlatency_us\n")
             sample_f.flush()
 
     layer = model_runner.model.model.layers[0]
-    done = len(completed)
+    done = 0
     t_start = time.time()
     a_input_logged = False
     last_sm_mhz = None
 
     def _run_config_loop(nvg: "NvmlEnergyGpu") -> None:
         nonlocal done, a_input_logged, last_sm_mhz
-        for il, bs, freq in configs:
+        for freq, il, bs in configs:
+
+            if freq != last_sm_mhz:
+                nvg.lock_sm_clock(freq)
+                time.sleep(0.5)
+                last_sm_mhz = freq
+                rank_print(f"  SM locked to {freq} MHz")
 
             model_runner.req_to_token_pool.clear()
             model_runner.token_to_kv_pool_allocator.clear()
@@ -383,10 +392,6 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
                                         device=device, dtype=torch.bfloat16)
             residual = hidden_states.clone()
             positions = forward_batch.positions
-            
-            nvg.lock_sm_clock(freq)
-            print('sleeping for 3 seconds')
-            time.sleep(5)
 
             try:
                 with torch.no_grad():
@@ -416,6 +421,7 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
                             else None
                         ),
                         nvdev=nvg,
+                        tp_size=server_args.tp_size,
                     )
                     f_lat, f_e_mj = profile_one(
                         _ffn_with_norm,
@@ -430,6 +436,7 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
                             else None
                         ),
                         nvdev=nvg,
+                        tp_size=server_args.tp_size,
                     )
                     if tp_rank == 0 and sample_f is not None:
                         sample_f.flush()
@@ -444,21 +451,24 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
                 )
                 continue
 
+            af64 = (a_lat + f_lat) * 64
+
             if tp_rank == 0:
                 f_out.write(
                     f"{tp}\t{il}\t{freq}\t{bs}\t"
-                    f"{a_lat:.2f}\t{f_lat:.2f}\t"
+                    f"{a_lat:.2f}\t{f_lat:.2f}\t{af64:.2f}\t"
                     f"{a_e_mj:.6f}\t{f_e_mj:.6f}\n"
                 )
                 f_out.flush()
 
             done += 1
             elapsed = time.time() - t_start
-            eta = elapsed / (done - len(completed)) * (len(configs) - (done - len(completed))) if done > len(completed) else 0
+            eta = elapsed / done * (len(configs) - done) if done > 0 else 0
             rank_print(
                 f"  [{done}/{total}] il={il:>5} bs={bs:>2} sm={freq:>4}MHz | "
                 f"A: {a_lat:>10.1f}us E={a_e_mj:.4f}mJ/rep | "
                 f"F: {f_lat:>10.1f}us E={f_e_mj:.4f}mJ/rep | "
+                f"(A+F)*64: {af64:>10.1f}us | "
                 f"ETA: {eta/60:.1f}min"
             )
 
@@ -492,16 +502,21 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
         if sample_f:
             sample_f.close()
         if server_args.tp_size > 1:
+            import torch.distributed as dist
+            try:
+                if dist.is_initialized():
+                    dist.barrier()
+            except Exception:
+                pass
             from sglang.srt.distributed.parallel_state import destroy_distributed_environment
             destroy_distributed_environment()
 
     rank_print(f"\nDone. Results: {out_path}")
 
 
-def _worker_with_env(env, server_args, port_args, bench_args, tp_rank):
-    """Set per-process CUDA_VISIBLE_DEVICES then run profiling_worker with gpu_id=0."""
-    os.environ.update(env)
-    profiling_worker(server_args, port_args, bench_args, 0, tp_rank)
+def _worker_with_env(server_args, port_args, bench_args, gpu_id, tp_rank):
+    """Run profiling_worker; gpu_id is the CUDA device index within CUDA_VISIBLE_DEVICES."""
+    profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank)
 
 
 def main():
@@ -536,11 +551,8 @@ def main():
     )
     parser.add_argument("--quick", action="store_true")
     parser.add_argument(
-        "--resume",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Resume from existing output file by skipping completed configs "
-             "(default: True). Use --no-resume to rerun all configs.",
+        "--append", action="store_true",
+        help="追加到已有输出文件而非覆盖（由 run_tp_sweep.py 使用）。",
     )
     parser.add_argument(
         "--skip-nvml-sm-lock",
@@ -556,7 +568,7 @@ def main():
         batch_sizes=args.batch_sizes, repeat=args.repeat,
         warmup=args.warmup, mem_clock=args.mem_clock, output=args.output,
         samples_output=args.samples_output,
-        resume=args.resume,
+        append=args.append,
         skip_nvml_sm_lock=args.skip_nvml_sm_lock,
     )
 
@@ -577,32 +589,28 @@ def main():
         profiling_worker(server_args, port_args, bench_args, 0, 0)
     else:
         workers = []
-        cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-        if cvd:
-            phys_gpus = [g.strip() for g in cvd.split(",") if g.strip()]
-        else:
-            phys_gpus = [str(i) for i in range(server_args.tp_size)]
-        if len(phys_gpus) < server_args.tp_size:
-            raise ValueError(
-                f"CUDA_VISIBLE_DEVICES only has {len(phys_gpus)} device(s), "
-                f"but tp_size={server_args.tp_size} requires at least that many"
-            )
         for tp_rank in range(server_args.tp_size):
-            per_rank_cvd = phys_gpus[tp_rank]
-            env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = per_rank_cvd
-            env["SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"] = "1"
             proc = multiprocessing.Process(
                 target=_worker_with_env,
-                args=(env, server_args, port_args, bench_args, tp_rank),
+                args=(server_args, port_args, bench_args, tp_rank, tp_rank),
             )
             proc.start()
             workers.append(proc)
-        for proc in workers:
-            proc.join()
-        for proc in workers:
-            if proc.is_alive():
-                proc.terminate()
+        try:
+            for proc in workers:
+                proc.join(timeout=600)
+        except KeyboardInterrupt:
+            print("\n[Main] Interrupted, killing workers...")
+        finally:
+            for proc in workers:
+                if proc.is_alive():
+                    proc.terminate()
+            for proc in workers:
+                proc.join(timeout=10)
+            for proc in workers:
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=3)
 
 
 if __name__ == "__main__":

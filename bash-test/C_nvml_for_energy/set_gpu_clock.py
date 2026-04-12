@@ -34,11 +34,25 @@ def _query_clocks_smi(gpu: int) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
+def _resolve_gpus(gpu_arg: str) -> list[int]:
+    """解析 -i 参数：'all' 返回全部 GPU 索引，否则返回单个索引。"""
+    if gpu_arg.lower() == "all":
+        with NvmlEnergy() as nv:
+            return list(range(nv.device_count()))
+    try:
+        return [int(gpu_arg)]
+    except ValueError:
+        raise ValueError(f"无效的 GPU 参数: {gpu_arg!r}，需为整数或 'all'")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="NVML：SM 锁频 (-lgc 类) 或 应用时钟 (-ac/-rac)。"
     )
-    p.add_argument("-i", "--gpu", type=int, default=0, metavar="N", help="GPU 索引")
+    p.add_argument(
+        "-i", "--gpu", type=str, default="0", metavar="N",
+        help="GPU 索引，或 'all' 表示所有 GPU",
+    )
     p.add_argument(
         "--lock-sm",
         type=int,
@@ -74,41 +88,48 @@ def main() -> int:
             "请指定其一：--query | --reset | --reset-lock | --lock-sm ... | (--mem 与 --graphics)"
         )
 
+    gpus = _resolve_gpus(args.gpu)
+
     if args.query:
-        sm, gr, mem = _query_clocks_smi(args.gpu)
-        print(f"GPU {args.gpu} (nvidia-smi): sm={sm} graphics={gr} mem={mem} MHz")
+        for g in gpus:
+            sm, gr, mem = _query_clocks_smi(g)
+            print(f"GPU {g} (nvidia-smi): sm={sm} graphics={gr} mem={mem} MHz")
         return 0
 
     if args.reset:
         with NvmlEnergy() as nv:
-            nv.reset_applications_clocks(args.gpu)
-        print(f"GPU {args.gpu}: 已 -rac")
+            for g in gpus:
+                nv.reset_applications_clocks(g)
+                print(f"GPU {g}: 已 -rac")
         return 0
 
     if args.reset_lock:
         with NvmlEnergy() as nv:
-            nv.unlock_sm_clock(args.gpu)
-        print(f"GPU {args.gpu}: 已清除 SM 锁频")
+            for g in gpus:
+                nv.reset_gpu_locked(g)
+                print(f"GPU {g}: 已清除 SM 锁频")
         return 0
 
     if args.lock_sm is not None:
         mhz = args.lock_sm
         with NvmlEnergy() as nv:
-            nv.lock_sm_clock(args.gpu, mhz)
-        sm, gr, mem = _query_clocks_smi(args.gpu)
-        print(
-            f"GPU {args.gpu}: SM locked {mhz} MHz "
-            f"(nvidia-smi: sm={sm} graphics={gr} mem={mem} MHz)"
-        )
+            for g in gpus:
+                nv.set_gpu_locked_mhz(g, mhz)
+                sm, gr, mem = _query_clocks_smi(g)
+                print(
+                    f"GPU {g}: SM locked {mhz} MHz "
+                    f"(nvidia-smi: sm={sm} graphics={gr} mem={mem} MHz)"
+                )
         return 0
 
     with NvmlEnergy() as nv:
-        nv.set_applications_clocks_mhz(args.gpu, args.mem, args.graphics)
-    sm, gr, mem = _query_clocks_smi(args.gpu)
-    print(
-        f"GPU {args.gpu}: 已 -ac {args.mem},{args.graphics} "
-        f"(nvidia-smi: sm={sm} graphics={gr} mem={mem} MHz)"
-    )
+        for g in gpus:
+            nv.set_applications_clocks_mhz(g, args.mem, args.graphics)
+            sm, gr, mem = _query_clocks_smi(g)
+            print(
+                f"GPU {g}: 已 -ac {args.mem},{args.graphics} "
+                f"(nvidia-smi: sm={sm} graphics={gr} mem={mem} MHz)"
+            )
     return 0
 
 
