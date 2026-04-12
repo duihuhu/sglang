@@ -70,15 +70,10 @@ def _write_wide_block(
         rows = sorted(  # type: ignore[index]
             data_by_stage[stage].keys(), key=lambda k: (k[0], k[1], k[2], k[3], k[4])
         )
-    # Section title row: label in column A.
-    # For P-with-drop: columns=tp,input_len,gpu_clock,batch_size + ops
-    # => 4 + len(op_names) total columns.
     if stage == "P" and drop_p_output_len:
-        w.writerow([label] + [""] * (3 + len(op_names)))
-    else:
-        # P(without-drop) and D: columns=tp,input_len,output_len,gpu_clock,batch_size + ops
-        # => 5 + len(op_names) total columns.
         w.writerow([label] + [""] * (4 + len(op_names)))
+    else:
+        w.writerow([label] + [""] * (5 + len(op_names)))
     if stage == "P" and drop_p_output_len:
         w.writerow(
             [
@@ -87,6 +82,7 @@ def _write_wide_block(
                 "gpu_clock",
                 "batch_size",
                 *op_names,
+                "(A+F)*64_ms",
                 "A_energy_mj",
                 "F_energy_mj",
             ]
@@ -99,6 +95,8 @@ def _write_wide_block(
                 op_lookup = "TTFT" if op == "TTFT_ms" else op
                 if op_lookup in op_map:
                     row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
+            a_val, f_val = _calc_a_f(op_map)
+            af_64_ms = (a_val + f_val) * 64 / 1000.0
             a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
             w.writerow(
                 [
@@ -107,6 +105,7 @@ def _write_wide_block(
                     gpu_clock,
                     batch_size,
                     *row_vals,
+                    f"{af_64_ms:.2f}",
                     f"{a_eu / 1000.0:.2f}",
                     f"{f_eu / 1000.0:.2f}",
                 ]
@@ -121,6 +120,7 @@ def _write_wide_block(
             "gpu_clock",
             "batch_size",
             *op_names,
+            "(A+F)*64_ms",
             "A_energy_mj",
             "F_energy_mj",
         ]
@@ -137,6 +137,8 @@ def _write_wide_block(
             op_lookup = "TTFT" if op == "TTFT_ms" else op
             if op_lookup in op_map:
                 row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
+        a_val, f_val = _calc_a_f(op_map)
+        af_64_ms = (a_val + f_val) * 64 / 1000.0
         a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
         w.writerow(
             [
@@ -146,6 +148,7 @@ def _write_wide_block(
                 gpu_clock,
                 batch_size,
                 *row_vals,
+                f"{af_64_ms:.2f}",
                 f"{a_eu / 1000.0:.2f}",
                 f"{f_eu / 1000.0:.2f}",
             ]
@@ -315,6 +318,7 @@ def main() -> None:
                         "gpu_clock",
                         "batch_size",
                         *op_names,
+                        "(A+F)*64_ms",
                         "A_energy_mj",
                         "F_energy_mj",
                     ]
@@ -328,6 +332,8 @@ def main() -> None:
                         op_lookup = "TTFT" if op == "TTFT_ms" else op
                         if op_lookup in op_map:
                             row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
+                    a_val, f_val = _calc_a_f(op_map)
+                    af_64_ms = (a_val + f_val) * 64 / 1000.0
                     a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
                     w.writerow(
                         [
@@ -336,6 +342,7 @@ def main() -> None:
                             gpu_clock,
                             batch_size,
                             *row_vals,
+                            f"{af_64_ms:.2f}",
                             f"{a_eu / 1000.0:.2f}",
                             f"{f_eu / 1000.0:.2f}",
                         ]
@@ -351,6 +358,7 @@ def main() -> None:
                     "gpu_clock",
                     "batch_size",
                     *op_names,
+                    "(A+F)*64_ms",
                     "A_energy_mj",
                     "F_energy_mj",
                 ]
@@ -367,6 +375,8 @@ def main() -> None:
                     op_lookup = "TTFT" if op == "TTFT_ms" else op
                     if op_lookup in op_map:
                         row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
+                a_val, f_val = _calc_a_f(op_map)
+                af_64_ms = (a_val + f_val) * 64 / 1000.0
                 a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
                 w.writerow(
                     [
@@ -376,6 +386,7 @@ def main() -> None:
                         gpu_clock,
                         batch_size,
                         *row_vals,
+                        f"{af_64_ms:.2f}",
                         f"{a_eu / 1000.0:.2f}",
                         f"{f_eu / 1000.0:.2f}",
                     ]

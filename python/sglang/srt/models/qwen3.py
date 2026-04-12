@@ -1,4 +1,5 @@
 # Adapted from qwen2.py
+import json
 import logging
 import os
 import time
@@ -51,6 +52,85 @@ _latency_lock = Lock()
 _latency_values: Dict[str, List[float]] = {"TTFT": [], "A": [], "F": []}
 _energy_values_uj: Dict[str, List[float]] = {"A": [], "F": []}
 _nvml_lock = Lock()
+
+# Per-job bench config read from the JSON phase file.
+# When the file changes (mtime), accumulators are cleared so each job starts fresh.
+_bench_job_cfg: Dict[str, object] = {}
+_bench_job_cfg_phase: str = ""
+_bench_job_cfg_file_mtime: float = 0.0
+
+
+def _refresh_bench_job_config() -> None:
+    """Read the phase/config file.  If JSON, update per-job config and phase.
+    If plain text, update phase only (backward compat).
+    On config change, reset latency/energy accumulators."""
+    global _bench_job_cfg, _bench_job_cfg_phase, _bench_job_cfg_file_mtime
+
+    phase_file = os.getenv("SGLANG_BENCH_PHASE_FILE", "").strip()
+    if not phase_file:
+        return
+
+    try:
+        mt = os.path.getmtime(phase_file)
+    except OSError:
+        return
+    if mt == _bench_job_cfg_file_mtime:
+        return
+
+    _bench_job_cfg_file_mtime = mt
+    try:
+        with open(phase_file, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+    except Exception:
+        return
+    if not content:
+        return
+
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            _bench_job_cfg = data
+            _bench_job_cfg_phase = str(data.get("phase", "none")).strip().lower()
+            with _latency_lock:
+                for arr in _latency_values.values():
+                    arr.clear()
+                for arr in _energy_values_uj.values():
+                    arr.clear()
+            return
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Plain text — just the phase string.
+    _bench_job_cfg_phase = content.lower()
+
+
+def _bench_cfg_int(key: str, default: int) -> int:
+    val = _bench_job_cfg.get(key)
+    if val is not None:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            pass
+    env_map = {"input_len": "SGLANG_BENCH_INPUT_LEN", "batch_size": "SGLANG_BENCH_BATCH_SIZE"}
+    env_name = env_map.get(key)
+    if env_name:
+        return _env_int(env_name, default)
+    return default
+
+
+def _bench_cfg_str(key: str, default: str = "") -> str:
+    val = _bench_job_cfg.get(key)
+    if val is not None:
+        return str(val)
+    env_map = {
+        "tp": "SGLANG_BENCH_TP",
+        "sm_clock": "SGLANG_BENCH_SM_CLOCK",
+        "csv_path": "SGLANG_TTFT_AF_CSV_PATH",
+    }
+    env_name = env_map.get(key)
+    if env_name:
+        return os.getenv(env_name, default)
+    return default
 _nvml_pynvml = None
 _nvml_handle = None
 _nvml_init_attempted = False
@@ -134,66 +214,88 @@ def _bench_energy_enabled() -> bool:
     return os.getenv("SGLANG_BENCH_ENERGY", "1") == "1"
 
 
-def _profile_one_like_prefill(fn, n_warmup: int, n_repeat: int) -> Tuple[float, Optional[float]]:
-    """Same timing style as bench_prefill_af.profile_one()."""
+_MIN_MEASURE_TIME_S = 3
+
+
+def _profile_one_like_prefill(fn, n_warmup: int, n_repeat: int) -> Tuple[float, Optional[float], int]:
+    """Same timing style as bench_prefill_af.profile_one().
+
+    Probes single-call latency after warmup, then ensures the measurement
+    window is at least _MIN_MEASURE_TIME_S so that NVML energy counters
+    (updated every ~20-100 ms) produce non-zero readings.
+
+    When TP > 1, actual_repeat is broadcast from rank 0 so all workers
+    call fn() the same number of times (required by NCCL collectives
+    inside fn).
+
+    Returns (avg_latency_us, energy_per_op_uj, actual_repeat).
+    """
     for _ in range(n_warmup):
         fn()
 
     torch.cuda.synchronize()
-    actual_repeat = max(n_repeat, 1)
+    t_probe = time.perf_counter()
+    fn()
+    torch.cuda.synchronize()
+    t_single = time.perf_counter() - t_probe
+
+    actual_repeat = max(n_repeat, int(_MIN_MEASURE_TIME_S / max(t_single, 1e-6)) + 1)
+
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        ar = torch.tensor([actual_repeat], dtype=torch.long, device="cuda")
+        torch.distributed.broadcast(ar, src=0)
+        actual_repeat = int(ar.item())
+
     measure_energy = _bench_energy_enabled()
     pynvml_mod, nvml_handle = (None, None)
     if measure_energy:
         pynvml_mod, nvml_handle = _try_init_nvml_for_current_device()
+
+    tp_size = (
+        torch.distributed.get_world_size()
+        if torch.distributed.is_initialized()
+        else 1
+    )
+
     start_energy_mj = None
-    start_power_w = None
     if measure_energy and pynvml_mod is not None and nvml_handle is not None:
         start_energy_mj = _read_nvml_total_energy_mj(pynvml_mod, nvml_handle)
-        start_power_w = _read_nvml_power_w(pynvml_mod, nvml_handle)
+
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for _ in range(actual_repeat):
         fn()
     torch.cuda.synchronize()
     t1 = time.perf_counter()
-    end_power_w = None
+
     end_energy_mj = None
     if measure_energy and pynvml_mod is not None and nvml_handle is not None:
-        end_power_w = _read_nvml_power_w(pynvml_mod, nvml_handle)
         end_energy_mj = _read_nvml_total_energy_mj(pynvml_mod, nvml_handle)
 
     elapsed_s = t1 - t0
     avg_latency_us = elapsed_s / actual_repeat * 1e6
+
     energy_per_op_uj: Optional[float] = None
-    energy_source = "none"
-    counter_delta_mj: Optional[float] = None
-    if not measure_energy:
-        return avg_latency_us, None
-    if start_energy_mj is not None and end_energy_mj is not None:
+    if measure_energy and start_energy_mj is not None and end_energy_mj is not None:
         counter_delta_mj = float(end_energy_mj) - float(start_energy_mj)
-    # Prefer HW counter when it advanced (short runs may see 0 mJ delta -> use power estimate).
-    if counter_delta_mj is not None and counter_delta_mj > 0:
-        total_energy_j = counter_delta_mj / 1000.0
-        energy_per_op_uj = (total_energy_j * 1e6) / actual_repeat
-        energy_source = "nvml_total_energy"
-    elif start_power_w is not None and end_power_w is not None:
-        total_energy_j = 0.5 * (start_power_w + end_power_w) * elapsed_s
-        energy_per_op_uj = (total_energy_j * 1e6) / actual_repeat
-        energy_source = "power_estimate"
-        if counter_delta_mj is not None and counter_delta_mj <= 0:
-            energy_source = "power_estimate_counter_stale"
+        if counter_delta_mj > 0:
+            local_e_uj = counter_delta_mj / actual_repeat * 1000.0
+            if tp_size > 1:
+                e_tensor = torch.tensor([local_e_uj], dtype=torch.double, device="cuda")
+                torch.distributed.all_reduce(e_tensor, op=torch.distributed.ReduceOp.SUM)
+                energy_per_op_uj = float(e_tensor.item())
+            else:
+                energy_per_op_uj = local_e_uj
 
     if _debug_energy_enabled():
         print(
             "[sglang-energy] "
-            f"elapsed_s={elapsed_s:.6f} repeat={actual_repeat} "
+            f"elapsed_s={elapsed_s:.6f} actual_repeat={actual_repeat} "
             f"start_mj={start_energy_mj} end_mj={end_energy_mj} "
-            f"delta_mj={counter_delta_mj} "
-            f"start_power_w={start_power_w} end_power_w={end_power_w} "
-            f"energy_per_op_uj={energy_per_op_uj} source={energy_source}"
+            f"energy_per_op_uj={energy_per_op_uj} tp_size={tp_size}"
         )
 
-    return avg_latency_us, energy_per_op_uj
+    return avg_latency_us, energy_per_op_uj, actual_repeat
 
 
 def _debug_a_input_enabled() -> bool:
@@ -219,16 +321,11 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _bench_phase() -> str:
-    # Runtime phase switch for shared-server runs: "ttft" -> "af".
-    phase_file = os.getenv("SGLANG_BENCH_PHASE_FILE", "").strip()
-    if phase_file:
-        try:
-            with open(phase_file, "r", encoding="utf-8") as f:
-                phase = f.read().strip().lower()
-            if phase in {"ttft", "af", "both", "none"}:
-                return phase
-        except Exception:
-            pass
+    """Runtime phase: 'ttft', 'af', 'both', or 'none'.
+    Reads the JSON/plain-text phase file (also refreshes per-job config)."""
+    _refresh_bench_job_config()
+    if _bench_job_cfg_phase in {"ttft", "af", "both", "none"}:
+        return _bench_job_cfg_phase
     stage_on = os.getenv("SGLANG_SYNC_STAGE_BENCH", "0") == "1"
     internal_on = os.getenv("SGLANG_SYNC_INTERNAL_OP_BENCH", "0") == "1"
     if stage_on and internal_on:
@@ -241,10 +338,8 @@ def _bench_phase() -> str:
 
 
 def _ttft_window_match(input_ids: Optional[torch.Tensor]) -> bool:
-    # During TTFT runs, only count requests that match benchmark payload size.
-    # This filters out warmup/control requests (e.g. very short prefill probes).
-    expected_input_len = _env_int("SGLANG_BENCH_INPUT_LEN", 0)
-    expected_batch_size = _env_int("SGLANG_BENCH_BATCH_SIZE", 1)
+    expected_input_len = _bench_cfg_int("input_len", 0)
+    expected_batch_size = _bench_cfg_int("batch_size", 1)
     if expected_input_len <= 0:
         return True
     expected_tokens = expected_input_len * max(expected_batch_size, 1)
@@ -254,9 +349,8 @@ def _ttft_window_match(input_ids: Optional[torch.Tensor]) -> bool:
 
 
 def _af_window_match(forward_batch: Optional[ForwardBatch]) -> bool:
-    # For A/F, gate by prefill token count to filter warmup/control requests.
-    expected_input_len = _env_int("SGLANG_BENCH_INPUT_LEN", 0)
-    expected_batch_size = _env_int("SGLANG_BENCH_BATCH_SIZE", 1)
+    expected_input_len = _bench_cfg_int("input_len", 0)
+    expected_batch_size = _bench_cfg_int("batch_size", 1)
     if expected_input_len <= 0:
         return True
     expected_tokens = expected_input_len * max(expected_batch_size, 1)
@@ -287,7 +381,8 @@ def _record_latency(op: str, latency_us: float, energy_uj: Optional[float] = Non
 def _dump_latency_csv() -> None:
     if not _latency_csv_enabled():
         return
-    path = _latency_csv_path()
+    cfg_csv = _bench_cfg_str("csv_path", "").strip()
+    path = cfg_csv if cfg_csv else _latency_csv_path()
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with _latency_lock:
@@ -297,10 +392,10 @@ def _dump_latency_csv() -> None:
             a_energy_arr = list(_energy_values_uj["A"])
             f_energy_arr = list(_energy_values_uj["F"])
         base_meta = {
-            "tp": os.getenv("SGLANG_BENCH_TP", ""),
-            "input_len": os.getenv("SGLANG_BENCH_INPUT_LEN", ""),
-            "gpu_clock": os.getenv("SGLANG_BENCH_GPU_CLOCK", ""),
-            "batch_size": os.getenv("SGLANG_BENCH_BATCH_SIZE", ""),
+            "tp": _bench_cfg_str("tp"),
+            "input_len": _bench_cfg_str("input_len"),
+            "sm_clock": _bench_cfg_str("sm_clock"),
+            "batch_size": _bench_cfg_str("batch_size"),
         }
         row = {
             **base_meta,
@@ -325,7 +420,6 @@ def _dump_latency_csv() -> None:
             os.fsync(f.fileno())
         os.replace(tmp, path)
 
-        # Write per-sample details for TTFT/A/F into a sibling CSV.
         samples_path = (
             path[:-4] + "_samples.csv" if path.lower().endswith(".csv") else path + "_samples.csv"
         )
@@ -334,7 +428,7 @@ def _dump_latency_csv() -> None:
             fieldnames = [
                 "tp",
                 "input_len",
-                "gpu_clock",
+                "sm_clock",
                 "batch_size",
                 "op",
                 "sample_idx",
@@ -737,11 +831,11 @@ class Qwen3DecoderLayer(nn.Module):
                     post_residual_addition=post_residual_addition,
                 )
 
-            a_lat_us, a_energy_uj = _profile_one_like_prefill(_a_once, n_warmup, n_repeat)
+            a_lat_us, a_energy_uj, a_actual_repeat = _profile_one_like_prefill(_a_once, n_warmup, n_repeat)
             e_str = f"{a_energy_uj:.2f}" if a_energy_uj is not None else "NA"
             print(
                 f"[sync-op-bench] A_l{self.layer_id} avg_us={a_lat_us:.2f} "
-                f"energy_uj={e_str} (warmup={n_warmup}, repeat={n_repeat})"
+                f"energy_uj={e_str} (warmup={n_warmup}, repeat={a_actual_repeat})"
             )
             _record_latency("A", a_lat_us, a_energy_uj)
             hidden_states, residual = self._run_a_block(
@@ -778,11 +872,11 @@ class Qwen3DecoderLayer(nn.Module):
                     residual=residual,
                 )
 
-            f_lat_us, f_energy_uj = _profile_one_like_prefill(_f_once, n_warmup, n_repeat)
+            f_lat_us, f_energy_uj, f_actual_repeat = _profile_one_like_prefill(_f_once, n_warmup, n_repeat)
             e_str = f"{f_energy_uj:.2f}" if f_energy_uj is not None else "NA"
             print(
                 f"[sync-op-bench] F_l{self.layer_id} avg_us={f_lat_us:.2f} "
-                f"energy_uj={e_str} (warmup={n_warmup}, repeat={n_repeat})"
+                f"energy_uj={e_str} (warmup={n_warmup}, repeat={f_actual_repeat})"
             )
             _record_latency("F", f_lat_us, f_energy_uj)
             hidden_states, residual = self._run_f_block(

@@ -32,7 +32,7 @@ def _apply_json_config(args: argparse.Namespace) -> Optional[dict]:
         "tp_list",
         "input_lens",
         "output_lens",
-        "gpu_clocks",
+        "sm_clocks",
         "batch_size",
         "gpus",
     }
@@ -55,7 +55,7 @@ def _to_int_list(v) -> List[int]:
 class JobSpec:
     tp: int
     input_len: int
-    gpu_clock: int
+    sm_clock: int
     output_len_max: int
     batch_size: int
 
@@ -268,7 +268,7 @@ def _aggregate_one_run(
     combined_csv_path: str,
     tp: int,
     input_len: int,
-    gpu_clock: int,
+    sm_clock: int,
     batch_size: int,
     output_lens: List[int],
 ) -> List[Dict[str, object]]:
@@ -290,7 +290,7 @@ def _aggregate_one_run(
                             "tp": tp,
                             "input_len": input_len,
                             "output_len": out_len,
-                            "gpu_clock": gpu_clock,
+                            "sm_clock": sm_clock,
                             "batch_size": batch_size,
                             "stage": "P",
                             "op_name": op_name,
@@ -309,7 +309,7 @@ def _aggregate_one_run(
                             "tp": tp,
                             "input_len": input_len,
                             "output_len": out_len,
-                            "gpu_clock": gpu_clock,
+                            "sm_clock": sm_clock,
                             "batch_size": batch_size,
                             "stage": "D",
                             "op_name": op_name,
@@ -338,7 +338,7 @@ def _merge_existing_results(
         raise RuntimeError(f"No per-run processed dirs found under: {work_dir}")
 
     combined_paths: List[Tuple[str, int, int, int, int]] = []
-    # (combined_csv_path, tp, input_len, gpu_clock, batch_size)
+    # (combined_csv_path, tp, input_len, sm_clock, batch_size)
 
     for processed_dir in processed_dirs:
         combined_csv_path = os.path.join(processed_dir, "nvtx_PD_combined_stats.csv")
@@ -353,18 +353,18 @@ def _merge_existing_results(
             raise RuntimeError(f"Cannot parse run metadata from dir: {base}")
         tp = int(parts[0].replace("tp", ""))
         input_len = int(parts[1].replace("in", ""))
-        gpu_clock = int(parts[2].replace("clk", ""))
+        sm_clock = int(parts[2].replace("clk", ""))
         batch_size = 1
         for part in parts[3:]:
             if part.startswith("bs"):
                 batch_size = int(part.replace("bs", ""))
                 break
-        combined_paths.append((combined_csv_path, tp, input_len, gpu_clock, batch_size))
+        combined_paths.append((combined_csv_path, tp, input_len, sm_clock, batch_size))
 
     if not combined_paths:
         raise RuntimeError(f"No per-run combined CSVs found under: {work_dir}")
 
-    for combined_csv_path, tp, input_len, gpu_clock, batch_size in sorted(
+    for combined_csv_path, tp, input_len, sm_clock, batch_size in sorted(
         combined_paths, key=lambda x: (x[1], x[2], x[3], x[4])
     ):
         out_rows.extend(
@@ -372,7 +372,7 @@ def _merge_existing_results(
                 combined_csv_path,
                 tp=tp,
                 input_len=input_len,
-                gpu_clock=gpu_clock,
+                sm_clock=sm_clock,
                 batch_size=batch_size,
                 output_lens=output_lens,
             )
@@ -385,7 +385,7 @@ def _merge_existing_results(
             "tp",
             "input_len",
             "output_len",
-            "gpu_clock",
+            "sm_clock",
             "batch_size",
             "stage",
             "op_name",
@@ -489,9 +489,42 @@ def _run_pivot_wide(final_csv_path: str, bench_stage: str = "P") -> str:
     return pivot_out_dir
 
 
+def _write_bench_config(
+    config_file: str,
+    *,
+    phase: str,
+    tp: int,
+    input_len: int,
+    sm_clock: int,
+    batch_size: int,
+    csv_path: str,
+) -> None:
+    """Write JSON bench config to the phase/config file.
+
+    The server-side qwen3.py reads this on each forward pass (mtime-triggered)
+    and uses it for window matching, metadata tagging, and CSV output path.
+    On change it also resets latency/energy accumulators automatically.
+    """
+    config = {
+        "phase": phase,
+        "tp": tp,
+        "input_len": input_len,
+        "sm_clock": sm_clock,
+        "batch_size": batch_size,
+        "csv_path": csv_path,
+    }
+    os.makedirs(os.path.dirname(config_file), exist_ok=True)
+    tmp = config_file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(config, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, config_file)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Batch PD NVTX profiling for different TP/input_len/gpu_clock. Output_len is extracted via NVTX D-pick positions."
+        description="Batch PD NVTX profiling for different TP/input_len/sm_clock. Output_len is extracted via NVTX D-pick positions."
     )
     parser.add_argument(
         "--config",
@@ -527,10 +560,10 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--gpu-clocks",
+        "--sm-clocks",
         type=str,
         default="210,540,870,1200",
-        help="GPU clocks to test (graphics/mem policy handled by bench_sglang.py).",
+        help="SM clock frequencies to test (MHz).",
     )
     parser.add_argument(
         "--model-path",
@@ -569,12 +602,6 @@ def main() -> None:
         type=str,
         default=os.path.join(_CACHE_ROOT, "pd_latency_big_table.csv"),
         help="Final big table CSV path.",
-    )
-    parser.add_argument(
-        "--mem-clock",
-        type=int,
-        default=1593,
-        help="mem_clock (MHz) passed to bench_sglang.py.",
     )
     parser.add_argument(
         "--num-seqs",
@@ -719,7 +746,7 @@ def main() -> None:
     tp_list = [int(x) for x in args.tp_list.split(",") if x.strip()]
     input_lens = [int(x) for x in args.input_lens.split(",") if x.strip()]
     output_lens = [int(x) for x in args.output_lens.split(",") if x.strip()]
-    gpu_clocks = [int(x) for x in args.gpu_clocks.split(",") if x.strip()]
+    sm_clocks = [int(x) for x in args.sm_clocks.split(",") if x.strip()]
     batch_sizes = [int(x) for x in args.batch_size.split(",") if x.strip()]
     # D stage uses one prefill boundary token (+1).
     # P stage runs prefill-only with no decode token.
@@ -780,23 +807,23 @@ def main() -> None:
     if cfg and isinstance(cfg.get("runs"), list):
         defaults = cfg.get("defaults") or {}
         default_input = _to_int_list(defaults.get("input_len", input_lens))
-        default_clock = _to_int_list(defaults.get("gpu_clock", gpu_clocks))
+        default_clock = _to_int_list(defaults.get("sm_clock", sm_clocks))
         default_bs = _to_int_list(defaults.get("batch_size", batch_sizes))
         for i, run in enumerate(cfg["runs"]):
             if not isinstance(run, dict) or "tp" not in run:
                 raise ValueError(f"config runs[{i}] must be object and include tp")
             tp = int(run["tp"])
             run_inputs = _to_int_list(run.get("input_len", default_input))
-            run_clocks = _to_int_list(run.get("gpu_clock", default_clock))
+            run_clocks = _to_int_list(run.get("sm_clock", default_clock))
             run_bs = _to_int_list(run.get("batch_size", default_bs))
             for input_len in run_inputs:
-                for gpu_clock in run_clocks:
+                for sm_clock in run_clocks:
                     for batch_size in run_bs:
                         jobs.append(
                             JobSpec(
                                 tp=tp,
                                 input_len=input_len,
-                                gpu_clock=gpu_clock,
+                                sm_clock=sm_clock,
                                 output_len_max=output_len_max,
                                 batch_size=batch_size,
                             )
@@ -805,13 +832,13 @@ def main() -> None:
         # CLI Cartesian order: TP -> input_len -> GPU-clock.
         for tp in tp_list:
             for input_len in input_lens:
-                for gpu_clock in gpu_clocks:
+                for sm_clock in sm_clocks:
                     for batch_size in batch_sizes:
                         jobs.append(
                             JobSpec(
                                 tp=tp,
                                 input_len=input_len,
-                                gpu_clock=gpu_clock,
+                                sm_clock=sm_clock,
                                 output_len_max=output_len_max,
                                 batch_size=batch_size,
                             )
@@ -823,69 +850,82 @@ def main() -> None:
     next_port = args.port_base
     port_step = 1
 
-    # Background processing workers.
-    background_executor = ThreadPoolExecutor(max_workers=args.max_background_jobs)
-    background_futures = []
-    # Nsight Systems can misbehave when multiple profile sessions finalize/export .nsys-rep concurrently.
-    nsys_finalize_lock = threading.Lock()
+    def _tp_group_worker(
+        tp: int,
+        group_jobs: List[JobSpec],
+        assigned_gpus: List[int],
+        port: int,
+    ) -> None:
+        """Handle all jobs for one TP on one GPU group using a single server.
 
-    def job_worker(job_idx: int, job: JobSpec, assigned_gpus: List[int], port: int) -> None:
-        tp, input_len, gpu_clock, batch_size = (
-            job.tp,
-            job.input_len,
-            job.gpu_clock,
-            job.batch_size,
-        )
-        run_id = f"tp{tp}_in{input_len}_clk{gpu_clock}_bs{batch_size}"
-        run_dir = os.path.join(work_dir, run_id)
-        os.makedirs(run_dir, exist_ok=True)
-        stdout_path = os.path.join(run_dir, "server_stdout.log")
-        stderr_path = os.path.join(run_dir, "server_stderr.log")
-        bench_stdout = os.path.join(run_dir, "bench_stdout.log")
-        bench_stderr = os.path.join(run_dir, "bench_stderr.log")
-        # Nsight Systems often writes sidecars (e.g. *.sqlite) using the output *basename* relative
-        # to the process cwd. Using a fixed name like "sglang.out" across runs causes collisions when
-        # cwd is shared (e.g. repo root). Use a unique basename + run nsys from run_dir.
-        unique_tag = f"{run_id}_port{port}_{uuid.uuid4().hex[:8]}"
-        profile_prefix = os.path.join(run_dir, unique_tag)
-        rep_file = profile_prefix + ".nsys-rep"
-        processed_dir = os.path.join(run_dir, "processed")
-        os.makedirs(processed_dir, exist_ok=True)
+        The server is started once and kept alive; between jobs we flush
+        KV-cache and write an updated JSON bench-config file so that the
+        server-side qwen3.py picks up the new parameters automatically.
+        """
+        group_tag = f"tp{tp}_gpus{'-'.join(map(str, assigned_gpus))}"
+        server_dir = os.path.join(work_dir, f".server_{group_tag}")
+        os.makedirs(server_dir, exist_ok=True)
 
-        # Merge key outputs into a stable per-run log file so we can delete work_dir afterwards.
-        merged_log_path = os.path.join(log_dir, f"{run_id}.log")
-        merged_log_f = open(merged_log_path, "w", encoding="utf-8")
-        merged_log_f.write(
-            f"[pd-batch] run_id={run_id} assigned_gpus={assigned_gpus} port={port}\n"
-        )
-        merged_log_f.write(
-            f"[pd-batch] input_len={input_len} output_len_max={job.output_len_max} tp={tp} gpu_clock={gpu_clock} batch_size={batch_size}\n"
-        )
-        merged_log_f.write(f"[pd-batch] model_path={args.model_path}\n")
-        merged_log_f.write(f"[pd-batch] mode={args.mode}\n")
-        merged_log_f.write(f"[pd-batch] nsys -o prefix (unique): {profile_prefix}\n")
-        merged_log_f.flush()
+        stdout_path = os.path.join(server_dir, "server_stdout.log")
+        stderr_path = os.path.join(server_dir, "server_stderr.log")
+        config_file = os.path.join(server_dir, "bench_config.json")
+        merged_log_path = os.path.join(log_dir, f"{group_tag}_server.log")
 
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(x) for x in assigned_gpus)
-        variant_defs = []
-        if args.mode == "TTFT":
-            variant_defs = [("ttft", "1", "0")]
-        elif args.mode == "AF":
-            variant_defs = [("af", "0", "1")]
-        elif args.mode == "both":
-            # Two separate runs: stage-only then AF-only.
-            variant_defs = [("ttft", "1", "0"), ("af", "0", "1")]
-        else:
-            raise ValueError(f"Unsupported mode: {args.mode}")
-        # Ensure `python -m sglang.launch_server` resolves when nsys cwd is run_dir.
         py_path = os.path.join(_REPO_ROOT, "python")
         if env.get("PYTHONPATH"):
             env["PYTHONPATH"] = f"{py_path}{os.pathsep}{env['PYTHONPATH']}"
         else:
             env["PYTHONPATH"] = py_path
 
-        # Start server directly (sync-op-bench dumps from llama.py).
+        env_server = env.copy()
+        if args.mode == "TTFT":
+            env_server["SGLANG_SYNC_STAGE_BENCH"] = "1"
+            env_server["SGLANG_SYNC_INTERNAL_OP_BENCH"] = "0"
+        elif args.mode == "AF":
+            env_server["SGLANG_SYNC_STAGE_BENCH"] = "0"
+            env_server["SGLANG_SYNC_INTERNAL_OP_BENCH"] = "1"
+        else:
+            env_server["SGLANG_SYNC_STAGE_BENCH"] = "1"
+            env_server["SGLANG_SYNC_INTERNAL_OP_BENCH"] = "1"
+        env_server["SGLANG_SYNC_BENCH_REQUIRE_PROFILE_WINDOW"] = "0"
+        env_server["SGLANG_SYNC_BENCH_NUM_ITERS"] = str(args.sync_bench_num_iters)
+        env_server["SGLANG_SYNC_BENCH_WARMUP_ITERS"] = str(args.sync_bench_warmup_iters)
+        env_server["SGLANG_BENCH_ENERGY"] = (
+            "1" if bool(getattr(args, "bench_energy", True)) else "0"
+        )
+        env_server["SGLANG_TTFT_AF_CSV_ENABLE"] = "1"
+        env_server["SGLANG_BENCH_TP"] = str(tp)
+        env_server["SGLANG_BENCH_PHASE_FILE"] = config_file
+
+        variant_defs: List[Tuple[str, str, str]] = []
+        if args.mode == "TTFT":
+            variant_defs = [("ttft", "1", "0")]
+        elif args.mode == "AF":
+            variant_defs = [("af", "0", "1")]
+        elif args.mode == "both":
+            variant_defs = [("ttft", "1", "0"), ("af", "0", "1")]
+
+        first_job = group_jobs[0]
+        first_run_id = (
+            f"tp{tp}_in{first_job.input_len}_clk{first_job.sm_clock}"
+            f"_bs{first_job.batch_size}"
+        )
+        first_processed = os.path.join(work_dir, first_run_id, "processed")
+        os.makedirs(first_processed, exist_ok=True)
+        _write_bench_config(
+            config_file,
+            phase=variant_defs[0][0],
+            tp=tp,
+            input_len=first_job.input_len,
+            sm_clock=first_job.sm_clock,
+            batch_size=first_job.batch_size,
+            csv_path=os.path.join(
+                first_processed, f"{first_run_id}_{variant_defs[0][0]}_ttft_af.csv"
+            ),
+        )
+
         server_cmd = [
             sys.executable,
             "-m",
@@ -903,241 +943,220 @@ def main() -> None:
             "--mem-fraction-static",
             "0.9",
         ]
-        dump_glob = os.path.join(processed_dir, "*_rank*.json")
+
+        merged_log_f = open(merged_log_path, "w", encoding="utf-8")
+        merged_log_f.write(
+            f"[pd-batch] group={group_tag} gpus={assigned_gpus} port={port}\n"
+        )
+        merged_log_f.write(
+            f"[pd-batch] total_jobs={len(group_jobs)} model={args.model_path}\n"
+        )
+        merged_log_f.flush()
+
         proc = None
         print(
-            f"[run] start server variants: {run_id} on GPUs={assigned_gpus}, port={port}"
+            f"[run] starting server tp={tp} GPUs={assigned_gpus} port={port} "
+            f"({len(group_jobs)} jobs)"
         )
 
         try:
-            # Shared-server mode: start once, run TTFT/AF sequentially.
-            env_server = env.copy()
-            if args.mode == "TTFT":
-                env_server["SGLANG_SYNC_STAGE_BENCH"] = "1"
-                env_server["SGLANG_SYNC_INTERNAL_OP_BENCH"] = "0"
-            elif args.mode == "AF":
-                env_server["SGLANG_SYNC_STAGE_BENCH"] = "0"
-                env_server["SGLANG_SYNC_INTERNAL_OP_BENCH"] = "1"
-            else:
-                env_server["SGLANG_SYNC_STAGE_BENCH"] = "1"
-                env_server["SGLANG_SYNC_INTERNAL_OP_BENCH"] = "1"
-            env_server["SGLANG_SYNC_BENCH_REQUIRE_PROFILE_WINDOW"] = "0"
-            env_server["SGLANG_SYNC_BENCH_NUM_ITERS"] = str(args.sync_bench_num_iters)
-            env_server["SGLANG_SYNC_BENCH_WARMUP_ITERS"] = str(args.sync_bench_warmup_iters)
-            env_server["SGLANG_BENCH_ENERGY"] = (
-                "1" if bool(getattr(args, "bench_energy", True)) else "0"
-            )
-            env_server["SGLANG_TTFT_AF_CSV_ENABLE"] = "1"
-            env_server["SGLANG_TTFT_AF_CSV_PATH"] = os.path.join(
-                processed_dir, f"{unique_tag}_both_ttft_af.csv"
-            )
-            env_server["SGLANG_BENCH_TP"] = str(tp)
-            env_server["SGLANG_BENCH_INPUT_LEN"] = str(input_len)
-            env_server["SGLANG_BENCH_GPU_CLOCK"] = str(gpu_clock)
-            env_server["SGLANG_BENCH_BATCH_SIZE"] = str(batch_size)
-            env_server["SGLANG_OP_BENCH_DUMP_DIR"] = processed_dir
-            phase_file = os.path.join(processed_dir, f"{unique_tag}_bench_phase.txt")
-            env_server["SGLANG_BENCH_PHASE_FILE"] = phase_file
-
-            # Boot with first variant phase.
-            with open(phase_file, "w", encoding="utf-8") as f:
-                f.write(variant_defs[0][0])
-
             proc = _run_cmd(
                 server_cmd,
                 env=env_server,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
-                cwd=run_dir,
+                cwd=server_dir,
                 preexec_fn=os.setsid,
             )
             _wait_for_http_ok(
                 f"http://127.0.0.1:{port}/model_info",
                 timeout_s=args.server_start_timeout_s,
             )
-            merged_log_f.write(f"[pd-batch] server ready at port={port}\n")
+            merged_log_f.write(f"[pd-batch] server ready port={port}\n")
             merged_log_f.flush()
 
-            for variant_idx, (variant_name, stage_bench, internal_op_bench) in enumerate(
-                variant_defs
-            ):
-                with open(phase_file, "w", encoding="utf-8") as f:
-                    f.write(variant_name)
-                env_bench = env.copy()
-                env_bench["CUDA_VISIBLE_DEVICES"] = env["CUDA_VISIBLE_DEVICES"]
-                env_bench["SGLANG_BENCH_TP"] = str(tp)
-                env_bench["SGLANG_BENCH_INPUT_LEN"] = str(input_len)
-                env_bench["SGLANG_BENCH_GPU_CLOCK"] = str(gpu_clock)
-                env_bench["SGLANG_BENCH_BATCH_SIZE"] = str(batch_size)
-                env_bench["SGLANG_SYNC_STAGE_BENCH"] = stage_bench
-                env_bench["SGLANG_SYNC_INTERNAL_OP_BENCH"] = internal_op_bench
+            for job_i, job in enumerate(group_jobs):
+                input_len = job.input_len
+                sm_clock = job.sm_clock
+                batch_size = job.batch_size
+                run_id = f"tp{tp}_in{input_len}_clk{sm_clock}_bs{batch_size}"
+                run_dir = os.path.join(work_dir, run_id)
+                os.makedirs(run_dir, exist_ok=True)
+                processed_dir = os.path.join(run_dir, "processed")
+                os.makedirs(processed_dir, exist_ok=True)
+                bench_stdout = os.path.join(run_dir, "bench_stdout.log")
+                bench_stderr = os.path.join(run_dir, "bench_stderr.log")
 
+                print(
+                    f"[run] job {job_i + 1}/{len(group_jobs)}: {run_id}"
+                )
                 merged_log_f.write(
-                    f"[pd-batch] start variant={variant_name} stage_bench={stage_bench} internal_op_bench={internal_op_bench}\n"
+                    f"[pd-batch] === job {job_i + 1}/{len(group_jobs)}: {run_id} ===\n"
                 )
                 merged_log_f.flush()
 
-                bench_cmd = [
-                    sys.executable,
-                    "bash-test/bench_sglang.py",
-                    "--server-url",
-                    f"http://127.0.0.1:{port}",
-                ]
-                if args.num_seqs is not None:
-                    bench_cmd += ["--num_seqs", str(args.num_seqs)]
-                bench_cmd += [
-                    "--batch_size",
-                    str(batch_size),
-                    "--input_len",
-                    str(input_len),
-                    "--output_len",
-                    str(job.output_len_max),
-                    "--gpu_clock",
-                    str(gpu_clock),
-                    "--mem_clock",
-                    str(args.mem_clock),
-                    "--ignore_eos",
-                ]
-                with open(bench_stdout, "w", encoding="utf-8") as out_f, open(
-                    bench_stderr, "w", encoding="utf-8"
-                ) as err_f:
-                    bench_proc = subprocess.Popen(
-                        bench_cmd,
-                        env=env_bench,
-                        cwd="/workspace/benchmark/sglang-main",
-                        stdout=out_f,
-                        stderr=err_f,
-                        preexec_fn=os.setsid,
+                for variant_idx, (variant_name, stage_bench, internal_op_bench) in enumerate(
+                    variant_defs
+                ):
+                    csv_path = os.path.join(
+                        processed_dir, f"{run_id}_{variant_name}_ttft_af.csv"
                     )
-                    try:
-                        bench_proc.wait(timeout=args.bench_timeout_s)
-                    except subprocess.TimeoutExpired:
-                        _kill_process_group(bench_proc, timeout_s=10.0)
-                        raise TimeoutError(f"bench timeout: {run_id}")
+                    _write_bench_config(
+                        config_file,
+                        phase=variant_name,
+                        tp=tp,
+                        input_len=input_len,
+                        sm_clock=sm_clock,
+                        batch_size=batch_size,
+                        csv_path=csv_path,
+                    )
 
-                merged_log_f.write(
-                    f"[pd-batch] bench finished successfully variant={variant_name}\n"
-                )
-                merged_log_f.flush()
-
-                # Between TTFT and AF in shared-server mode, clear KV cache.
-                if variant_name == "ttft" and variant_idx + 1 < len(variant_defs):
-                    ok = _http_post_best_effort(f"http://127.0.0.1:{port}/flush_cache")
+                    ok = _http_post_best_effort(
+                        f"http://127.0.0.1:{port}/flush_cache"
+                    )
                     merged_log_f.write(
-                        f"[pd-batch] flush_cache after ttft: {'ok' if ok else 'failed'}\n"
+                        f"[pd-batch] flush_cache: {'ok' if ok else 'failed'}\n"
+                    )
+                    merged_log_f.flush()
+                    time.sleep(1)
+
+                    merged_log_f.write(
+                        f"[pd-batch] variant={variant_name} "
+                        f"stage={stage_bench} op={internal_op_bench}\n"
                     )
                     merged_log_f.flush()
 
-            merged_log_f.write("[pd-batch] stopping server, wait for json...\n")
+                    bench_cmd = [
+                        sys.executable,
+                        "bash-test/bench_sglang.py",
+                        "--server-url",
+                        f"http://127.0.0.1:{port}",
+                    ]
+                    if args.num_seqs is not None:
+                        bench_cmd += ["--num_seqs", str(args.num_seqs)]
+                    bench_cmd += [
+                        "--batch_size",
+                        str(batch_size),
+                        "--input_len",
+                        str(input_len),
+                        "--output_len",
+                        str(job.output_len_max),
+                        "--sm_clock",
+                        str(sm_clock),
+                        "--ignore_eos",
+                    ]
+
+                    env_bench = env.copy()
+                    with open(bench_stdout, "w", encoding="utf-8") as out_f, \
+                         open(bench_stderr, "w", encoding="utf-8") as err_f:
+                        bench_proc = subprocess.Popen(
+                            bench_cmd,
+                            env=env_bench,
+                            cwd="/workspace/benchmark/sglang-main",
+                            stdout=out_f,
+                            stderr=err_f,
+                            preexec_fn=os.setsid,
+                        )
+                        try:
+                            bench_proc.wait(timeout=args.bench_timeout_s)
+                        except subprocess.TimeoutExpired:
+                            _kill_process_group(bench_proc, timeout_s=10.0)
+                            raise TimeoutError(f"bench timeout: {run_id}")
+
+                    merged_log_f.write(
+                        f"[pd-batch] bench done: {run_id} variant={variant_name}\n"
+                    )
+                    merged_log_f.flush()
+
+                for src_path, tag in [
+                    (bench_stdout, "bench_stdout"),
+                    (bench_stderr, "bench_stderr"),
+                ]:
+                    if not os.path.exists(src_path):
+                        continue
+                    try:
+                        with open(merged_log_path, "ab") as out_b:
+                            out_b.write(
+                                f"\n===== {tag}: {run_id} =====\n".encode("utf-8")
+                            )
+                            with open(src_path, "rb") as in_b:
+                                shutil.copyfileobj(in_b, out_b)
+                    except Exception:
+                        pass
+
+                print(f"[run] job done: {run_id}")
+
+            merged_log_f.write("[pd-batch] all jobs done, stopping server\n")
             merged_log_f.flush()
             _request_terminate_process_group(
                 proc,
                 timeout_s=args.server_shutdown_timeout_s,
                 last_resort_force_kill=True,
             )
-            t0 = time.time()
-            expected_dump_files = tp
-            while time.time() - t0 < 60.0:
-                if len(glob.glob(dump_glob)) >= expected_dump_files:
-                    break
-                time.sleep(0.5)
-            dump_count = len(glob.glob(dump_glob))
-            merged_log_f.write(
-                f"[pd-batch] dump json ready: {dump_count} files (expected>={expected_dump_files})\n"
-            )
-            merged_log_f.flush()
             proc = None
 
         finally:
-            # In case something went wrong, try to stop server process group.
             if proc is not None:
                 _request_terminate_process_group(
-                    proc,
-                    timeout_s=10.0,
-                    last_resort_force_kill=True,
+                    proc, timeout_s=10.0, last_resort_force_kill=True
                 )
-            merged_log_f.write("[pd-batch] job_worker exiting (cleanup)\n")
+            merged_log_f.write("[pd-batch] tp_group_worker exiting\n")
             merged_log_f.flush()
             try:
                 merged_log_f.close()
             except Exception:
                 pass
+            for src_path, tag in [
+                (stdout_path, "server_stdout"),
+                (stderr_path, "server_stderr"),
+            ]:
+                if os.path.exists(src_path):
+                    try:
+                        with open(merged_log_path, "ab") as out_b:
+                            out_b.write(
+                                f"\n\n===== {tag} =====\n".encode("utf-8")
+                            )
+                            with open(src_path, "rb") as in_b:
+                                shutil.copyfileobj(in_b, out_b)
+                    except Exception:
+                        pass
 
-        # Append detailed stdout/stderr logs into merged log.
-        # Note: run_dir may be deleted later; this ensures logs are preserved.
-        for src_path, tag in [
-            (stdout_path, "server_stdout"),
-            (stderr_path, "server_stderr"),
-            (bench_stdout, "bench_stdout"),
-            (bench_stderr, "bench_stderr"),
-        ]:
-            if not os.path.exists(src_path):
-                continue
-            try:
-                with open(merged_log_path, "ab") as out_b:
-                    out_b.write(f"\n\n===== {tag}: {src_path} =====\n".encode("utf-8"))
-                    with open(src_path, "rb") as in_b:
-                        shutil.copyfileobj(in_b, out_b)
-            except Exception:
-                # Best-effort append; merged log header still exists.
-                pass
+        print(f"[run] tp_group_worker done: {group_tag}")
 
-        print(f"[run] sync-op dump finished: {run_id}")
-
-    # Run in TP outer order; for each TP we partition GPUs into disjoint groups,
-    # enabling parallel jobs within the same TP without dynamic GPU contention.
     for tp in tp_list:
         tp_jobs = [j for j in jobs if j.tp == tp]
         if not tp_jobs:
             continue
 
         if len(free_gpus) < tp:
-            raise RuntimeError(f"Not enough GPUs for tp={tp}. need>={tp}, got={len(free_gpus)}")
+            raise RuntimeError(
+                f"Not enough GPUs for tp={tp}. need>={tp}, got={len(free_gpus)}"
+            )
 
-        num_groups = len(free_gpus) // tp
-        groups = [free_gpus[i * tp : (i + 1) * tp] for i in range(num_groups)]
-        if not groups:
-            raise RuntimeError(f"No GPU groups created for tp={tp}")
+        # Use a single GPU group so all parameter combinations (sm_clock,
+        # input_len, batch_size) run sequentially on the same hardware for
+        # fair comparison.  The server is started once and reused.
+        groups = [free_gpus[:tp]]
+        group_job_lists = [tp_jobs]
 
-        group_queue: "Queue[List[int]]" = Queue()
-        for g in groups:
-            group_queue.put(g)
-
-        print(f"[info] tp={tp}: groups={groups}")
-        with ThreadPoolExecutor(max_workers=len(groups)) as tp_executor:
+        print(
+            f"[info] tp={tp}: GPUs={groups[0]}, "
+            f"{len(tp_jobs)} jobs (sequential on one server)"
+        )
+        with ThreadPoolExecutor(max_workers=1) as tp_executor:
             tp_futures = []
-            for tp_job in tp_jobs:
+            for gpu_group, gj_list in zip(groups, group_job_lists):
+                if not gj_list:
+                    continue
                 port = next_port
                 next_port += port_step
-
-                # Preserve loop order inside this TP: input_len -> gpu_clock (as built).
-                def _wrap(job_idx: int, job: JobSpec, port: int):
-                    assigned_gpus = group_queue.get()
-                    try:
-                        job_worker(job_idx, job, assigned_gpus, port)
-                    finally:
-                        group_queue.put(assigned_gpus)
-
-                # job_idx is the index in jobs list; used only for run logs.
-                # We'll find it by reconstruction order.
-                # This is safe as we only use it for uniqueness in log folder names.
-                job_idx = jobs.index(tp_job)
-                tp_futures.append(tp_executor.submit(_wrap, job_idx, tp_job, port))
-
-            # Ensure all jobs for this TP complete (background processing may still be running).
+                tp_futures.append(
+                    tp_executor.submit(
+                        _tp_group_worker, tp, gj_list, gpu_group, port
+                    )
+                )
             for fut in tp_futures:
                 fut.result()
-
-    # Wait for all background futures.
-    print(f"[info] waiting background postprocess jobs: {len(background_futures)}")
-    bg_errors = []
-    for run_id, fut, _ in background_futures:
-        try:
-            fut.result()
-        except Exception as e:
-            bg_errors.append((run_id, str(e)))
-    if bg_errors:
-        raise RuntimeError(f"Background postprocess failed: {bg_errors[:5]} ... total={len(bg_errors)}")
 
     # Build big table from llama.py sync-op dumps.
     print("[info] building big table from sync-op dumps...")
