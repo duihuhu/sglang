@@ -744,7 +744,10 @@ class PrefillAdder:
         if total_tokens >= self.rem_total_tokens:
             return AddReqResult.NO_TOKEN
 
-        if real_input_tokens >= self.rem_input_tokens and len(self.can_run_list) != 0:
+        # Allow the batch to exactly consume the remaining prefill input budget.
+        # This avoids splitting requests like 4x4096 into 3+1 when
+        # max_prefill_tokens is 16384.
+        if real_input_tokens > self.rem_input_tokens and len(self.can_run_list) != 0:
             return AddReqResult.OTHER
 
         with self._lock_node(req.last_node):
@@ -763,7 +766,9 @@ class PrefillAdder:
 
             input_tokens = self.ceil_paged_tokens(req.extend_input_len)
 
-            if input_tokens >= self.rem_input_tokens and len(self.can_run_list) != 0:
+            # Keep behavior consistent after lock acquisition: only reject when
+            # the next request would exceed the remaining budget.
+            if input_tokens > self.rem_input_tokens and len(self.can_run_list) != 0:
                 return AddReqResult.OTHER
 
             if (self.prefill_delayer_single_pass is not None) and (

@@ -56,9 +56,8 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python bash-test/bench_sglang.py \
   --batch_size 32 \
   --input_len 1024 \
   --output_len 512 \
-  --ignore_eos \
-  --use-server-profile-range \
-  --profile-activities CUDA_PROFILER
+  --sm_clock 1200 \
+  --ignore_eos
 
 
 python bash-test/nvtx_stats_from_rep.py sglang.out.nsys-rep \
@@ -156,3 +155,17 @@ python bench_prefill_af.py \
   --model-path /mnt/nvme1/models/Qwen/Qwen3-32B/ \
   --tp-size 1 \
   --output prefill_data_v1_tp2.txt
+
+python sync_op_bench_dump_to_big_table.py \
+  --work-dir pd_batch_work_d \
+  --bench-stage D \
+  --final-csv pd_latency_big_table_ut_both.csv
+
+echo 'export ANTHROPIC_AUTH_TOKEN="sk-Ebz8qMvfWYi8ZzMD7XvBooIMzebJCbto8p3LrtXjjvTzMmO3"' >> ~/.bashrc
+echo 'export ANTHROPIC_BASE_URL="https://api.aipaibox.com/"' >> ~/.bashrc
+source ~/.bashrc
+
+
+nohup bash bash-test/test.sh > bash-test/test_pd_driver.log 2>&1 &
+
+nohup bash bash-test/test_small.sh > bash-test/test_pd_driver_small.log 2>&1 &

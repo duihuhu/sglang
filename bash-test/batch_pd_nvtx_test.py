@@ -8,13 +8,10 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from queue import Queue
 import shutil
-import uuid
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # Repo root (for PYTHONPATH when nsys cwd is per-run directory).
@@ -32,7 +29,7 @@ def _apply_json_config(args: argparse.Namespace) -> Optional[dict]:
         "tp_list",
         "input_lens",
         "output_lens",
-        "sm_clocks",
+        "gpu_clocks",
         "batch_size",
         "gpus",
     }
@@ -50,14 +47,67 @@ def _to_int_list(v) -> List[int]:
     return [int(v)]
 
 
+def _load_done_keys_from_wide_csv(path: str) -> set[Tuple[int, int, int, int, int]]:
+    """Load finished (tp,input_len,output_len,gpu_clock,batch_size) keys from wide CSV."""
+    done: set[Tuple[int, int, int, int, int]] = set()
+    if not path or not os.path.exists(path):
+        return done
+    with open(path, "r", encoding="utf-8", newline="") as f:
+        r = csv.reader(f)
+        # wide csv convention: first line title, second line header
+        try:
+            next(r)
+            header = next(r)
+        except StopIteration:
+            return done
+        idx = {name.strip(): i for i, name in enumerate(header)}
+        need = ["tp", "input_len", "output_len", "gpu_clock", "batch_size"]
+        if not all(k in idx for k in need):
+            return done
+        for row in r:
+            if len(row) < len(header):
+                continue
+            try:
+                key = (
+                    int(float(row[idx["tp"]])),
+                    int(float(row[idx["input_len"]])),
+                    int(float(row[idx["output_len"]])),
+                    int(float(row[idx["gpu_clock"]])),
+                    int(float(row[idx["batch_size"]])),
+                )
+            except Exception:
+                continue
+            done.add(key)
+    return done
+
+
+def _job_key_for_skip(job: "JobSpec", bench_stage: str) -> Tuple[int, int, int, int, int]:
+    """Normalize one job to wide CSV key space."""
+    if str(bench_stage).upper() == "D":
+        # D jobs use proxy input_len = displayed_input_len + output_len - 1.
+        display_input_len = job.input_len - job.target_output_len + 1
+        output_len = job.target_output_len
+    else:
+        display_input_len = job.input_len
+        output_len = 1
+    return (
+        int(job.tp),
+        int(display_input_len),
+        int(output_len),
+        int(job.gpu_clock),
+        int(job.batch_size),
+    )
+
+
 
 @dataclass(frozen=True)
 class JobSpec:
     tp: int
     input_len: int
-    sm_clock: int
+    gpu_clock: int
     output_len_max: int
     batch_size: int
+    target_output_len: int = 1
 
 
 def _run_cmd(
@@ -268,7 +318,7 @@ def _aggregate_one_run(
     combined_csv_path: str,
     tp: int,
     input_len: int,
-    sm_clock: int,
+    gpu_clock: int,
     batch_size: int,
     output_lens: List[int],
 ) -> List[Dict[str, object]]:
@@ -290,7 +340,7 @@ def _aggregate_one_run(
                             "tp": tp,
                             "input_len": input_len,
                             "output_len": out_len,
-                            "sm_clock": sm_clock,
+                            "gpu_clock": gpu_clock,
                             "batch_size": batch_size,
                             "stage": "P",
                             "op_name": op_name,
@@ -309,7 +359,7 @@ def _aggregate_one_run(
                             "tp": tp,
                             "input_len": input_len,
                             "output_len": out_len,
-                            "sm_clock": sm_clock,
+                            "gpu_clock": gpu_clock,
                             "batch_size": batch_size,
                             "stage": "D",
                             "op_name": op_name,
@@ -338,7 +388,7 @@ def _merge_existing_results(
         raise RuntimeError(f"No per-run processed dirs found under: {work_dir}")
 
     combined_paths: List[Tuple[str, int, int, int, int]] = []
-    # (combined_csv_path, tp, input_len, sm_clock, batch_size)
+    # (combined_csv_path, tp, input_len, gpu_clock, batch_size)
 
     for processed_dir in processed_dirs:
         combined_csv_path = os.path.join(processed_dir, "nvtx_PD_combined_stats.csv")
@@ -353,18 +403,18 @@ def _merge_existing_results(
             raise RuntimeError(f"Cannot parse run metadata from dir: {base}")
         tp = int(parts[0].replace("tp", ""))
         input_len = int(parts[1].replace("in", ""))
-        sm_clock = int(parts[2].replace("clk", ""))
+        gpu_clock = int(parts[2].replace("clk", ""))
         batch_size = 1
         for part in parts[3:]:
             if part.startswith("bs"):
                 batch_size = int(part.replace("bs", ""))
                 break
-        combined_paths.append((combined_csv_path, tp, input_len, sm_clock, batch_size))
+        combined_paths.append((combined_csv_path, tp, input_len, gpu_clock, batch_size))
 
     if not combined_paths:
         raise RuntimeError(f"No per-run combined CSVs found under: {work_dir}")
 
-    for combined_csv_path, tp, input_len, sm_clock, batch_size in sorted(
+    for combined_csv_path, tp, input_len, gpu_clock, batch_size in sorted(
         combined_paths, key=lambda x: (x[1], x[2], x[3], x[4])
     ):
         out_rows.extend(
@@ -372,7 +422,7 @@ def _merge_existing_results(
                 combined_csv_path,
                 tp=tp,
                 input_len=input_len,
-                sm_clock=sm_clock,
+                gpu_clock=gpu_clock,
                 batch_size=batch_size,
                 output_lens=output_lens,
             )
@@ -385,7 +435,7 @@ def _merge_existing_results(
             "tp",
             "input_len",
             "output_len",
-            "sm_clock",
+            "gpu_clock",
             "batch_size",
             "stage",
             "op_name",
@@ -472,7 +522,7 @@ def _background_process_one_run(
         raise FileNotFoundError(f"Combined CSV not found after processing: {combined_csv}")
 
 
-def _run_pivot_wide(final_csv_path: str, bench_stage: str = "P") -> str:
+def _run_pivot_wide(final_csv_path: str) -> str:
     pivot_out_dir = os.path.join(os.path.dirname(os.path.abspath(final_csv_path)), "pivot_pd_ops_out")
     cmd = [
         sys.executable,
@@ -482,8 +532,6 @@ def _run_pivot_wide(final_csv_path: str, bench_stage: str = "P") -> str:
         "--out-dir",
         pivot_out_dir,
         "--drop-p-output-len",
-        "--stage",
-        str(bench_stage).strip().upper(),
     ]
     subprocess.run(cmd, cwd="/workspace/benchmark/sglang-main", check=True)
     return pivot_out_dir
@@ -499,12 +547,7 @@ def _write_bench_config(
     batch_size: int,
     csv_path: str,
 ) -> None:
-    """Write JSON bench config to the phase/config file.
-
-    The server-side qwen3.py reads this on each forward pass (mtime-triggered)
-    and uses it for window matching, metadata tagging, and CSV output path.
-    On change it also resets latency/energy accumulators automatically.
-    """
+    """Write JSON bench config for server-side qwen3 profiling hooks."""
     config = {
         "phase": phase,
         "tp": tp,
@@ -524,7 +567,7 @@ def _write_bench_config(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Batch PD NVTX profiling for different TP/input_len/sm_clock. Output_len is extracted via NVTX D-pick positions."
+        description="Batch PD NVTX profiling for different TP/input_len/gpu_clock. Output_len is extracted via NVTX D-pick positions."
     )
     parser.add_argument(
         "--config",
@@ -553,17 +596,17 @@ def main() -> None:
     parser.add_argument(
         "--output-lens",
         type=str,
-        default="64,256,512",
+        default="1",
         help=(
             "Decode lengths to extract from D. We will run bench with "
             "output_len=max(output-lens)+1 (prefill boundary produces one token)."
         ),
     )
     parser.add_argument(
-        "--sm-clocks",
+        "--gpu-clocks",
         type=str,
         default="210,540,870,1200",
-        help="SM clock frequencies to test (MHz).",
+        help="GPU SM clocks to test (passed to bench_sglang.py --sm_clock).",
     )
     parser.add_argument(
         "--model-path",
@@ -602,6 +645,12 @@ def main() -> None:
         type=str,
         default=os.path.join(_CACHE_ROOT, "pd_latency_big_table.csv"),
         help="Final big table CSV path.",
+    )
+    parser.add_argument(
+        "--mem-clock",
+        type=int,
+        default=1593,
+        help="Deprecated. bench_sglang.py only uses SM clock lock now.",
     )
     parser.add_argument(
         "--num-seqs",
@@ -697,30 +746,27 @@ def main() -> None:
         default="D",
         choices=["P", "D", "p", "d"],
         help=(
-            "P: prefill-only benchmark (max_new_tokens=0, no decode). "
-            "D: decode proxy benchmark (max output_len + 1)."
+            "P: prefill-only style benchmark (output_len fixed to 1, batch_size forced to 1). "
+            "D: decode single-point proxy benchmark using input_len + output_len - 1 with one-token decode."
         ),
+    )
+    parser.add_argument(
+        "--sync-bench-window-seconds",
+        type=float,
+        default=3.0,
+        help="Fixed per-op sampling window seconds for sync bench metrics.",
     )
     parser.add_argument(
         "--sync-bench-num-iters",
         type=int,
-        default=1,
-        help="Internal A/F benchmark repeat count (env: SGLANG_SYNC_BENCH_NUM_ITERS).",
+        default=100,
+        help="Qwen3 A/F loop bench: timed/energy measurement iterations (before/after delta / num_iters).",
     )
     parser.add_argument(
         "--sync-bench-warmup-iters",
         type=int,
-        default=0,
-        help="Internal A/F benchmark warmup count (env: SGLANG_SYNC_BENCH_WARMUP_ITERS).",
-    )
-    parser.add_argument(
-        "--bench-energy",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Enable NVML energy (uJ per A/F op) in server-side qwen3 profiling "
-            "(env: SGLANG_BENCH_ENERGY). JSON key: bench_energy."
-        ),
+        default=10,
+        help="Qwen3 A/F loop bench: warmup iterations before measurement (not timed).",
     )
     args = parser.parse_args()
     cfg = _apply_json_config(args)
@@ -737,22 +783,24 @@ def main() -> None:
     if stage_norm not in {"P", "D"}:
         raise ValueError(f"Unsupported bench stage: {args.bench_stage}")
     args.bench_stage = stage_norm
-    if args.sync_bench_num_iters < 1:
-        raise ValueError("--sync-bench-num-iters must be >= 1")
-    if args.sync_bench_warmup_iters < 0:
-        raise ValueError("--sync-bench-warmup-iters must be >= 0")
 
     # Parse lists.
     tp_list = [int(x) for x in args.tp_list.split(",") if x.strip()]
     input_lens = [int(x) for x in args.input_lens.split(",") if x.strip()]
     output_lens = [int(x) for x in args.output_lens.split(",") if x.strip()]
-    sm_clocks = [int(x) for x in args.sm_clocks.split(",") if x.strip()]
+    gpu_clocks = [int(x) for x in args.gpu_clocks.split(",") if x.strip()]
     batch_sizes = [int(x) for x in args.batch_size.split(",") if x.strip()]
-    # D stage uses one prefill boundary token (+1).
-    # P stage runs prefill-only with no decode token.
-    output_len_max = max(output_lens) + 1 if args.bench_stage == "D" else 0
+    # For single-point proxy decode mode we always need one decode token after prefill boundary.
+    # For P mode we still keep output_len=1 (one-token generation request).
+    output_len_max = 2 if args.bench_stage == "D" else 1
     if args.num_seqs is not None and args.num_seqs <= 0:
         raise ValueError("--num-seqs must be >= 1 when provided")
+    if args.sync_bench_window_seconds <= 0:
+        raise ValueError("--sync-bench-window-seconds must be > 0")
+    if args.sync_bench_num_iters < 1:
+        raise ValueError("--sync-bench-num-iters must be >= 1")
+    if args.sync_bench_warmup_iters < 0:
+        raise ValueError("--sync-bench-warmup-iters must be >= 0")
 
     work_dir = os.path.abspath(args.work_dir)
     os.makedirs(work_dir, exist_ok=True)
@@ -768,7 +816,7 @@ def main() -> None:
         )
         print(f"[saved] big table: {out_csv_path}")
         print("[info] converting big table to wide pivot csv...")
-        pivot_out_dir = _run_pivot_wide(out_csv_path, args.bench_stage)
+        pivot_out_dir = _run_pivot_wide(out_csv_path)
         print(f"[saved] pivot dir: {pivot_out_dir}")
         return
 
@@ -807,42 +855,98 @@ def main() -> None:
     if cfg and isinstance(cfg.get("runs"), list):
         defaults = cfg.get("defaults") or {}
         default_input = _to_int_list(defaults.get("input_len", input_lens))
-        default_clock = _to_int_list(defaults.get("sm_clock", sm_clocks))
+        default_clock = _to_int_list(defaults.get("gpu_clock", gpu_clocks))
         default_bs = _to_int_list(defaults.get("batch_size", batch_sizes))
         for i, run in enumerate(cfg["runs"]):
             if not isinstance(run, dict) or "tp" not in run:
                 raise ValueError(f"config runs[{i}] must be object and include tp")
             tp = int(run["tp"])
             run_inputs = _to_int_list(run.get("input_len", default_input))
-            run_clocks = _to_int_list(run.get("sm_clock", default_clock))
+            run_clocks = _to_int_list(run.get("gpu_clock", default_clock))
             run_bs = _to_int_list(run.get("batch_size", default_bs))
+            if args.bench_stage == "P":
+                run_bs = [1]
             for input_len in run_inputs:
-                for sm_clock in run_clocks:
-                    for batch_size in run_bs:
+                for gpu_clock in run_clocks:
+                    if args.bench_stage == "P":
                         jobs.append(
                             JobSpec(
                                 tp=tp,
                                 input_len=input_len,
-                                sm_clock=sm_clock,
+                                gpu_clock=gpu_clock,
                                 output_len_max=output_len_max,
-                                batch_size=batch_size,
+                                batch_size=1,
+                                target_output_len=1,
                             )
                         )
+                    else:
+                        for target_output_len in output_lens:
+                            proxy_input_len = input_len + target_output_len - 1
+                            for batch_size in run_bs:
+                                jobs.append(
+                                    JobSpec(
+                                        tp=tp,
+                                        input_len=proxy_input_len,
+                                        gpu_clock=gpu_clock,
+                                        output_len_max=output_len_max,
+                                        batch_size=batch_size,
+                                        target_output_len=target_output_len,
+                                    )
+                                )
     else:
         # CLI Cartesian order: TP -> input_len -> GPU-clock.
         for tp in tp_list:
             for input_len in input_lens:
-                for sm_clock in sm_clocks:
-                    for batch_size in batch_sizes:
+                for gpu_clock in gpu_clocks:
+                    if args.bench_stage == "P":
                         jobs.append(
                             JobSpec(
                                 tp=tp,
                                 input_len=input_len,
-                                sm_clock=sm_clock,
+                                gpu_clock=gpu_clock,
                                 output_len_max=output_len_max,
-                                batch_size=batch_size,
+                                batch_size=1,
+                                target_output_len=1,
                             )
                         )
+                    else:
+                        for target_output_len in output_lens:
+                            proxy_input_len = input_len + target_output_len - 1
+                            for batch_size in batch_sizes:
+                                jobs.append(
+                                    JobSpec(
+                                        tp=tp,
+                                        input_len=proxy_input_len,
+                                        gpu_clock=gpu_clock,
+                                        output_len_max=output_len_max,
+                                        batch_size=batch_size,
+                                        target_output_len=target_output_len,
+                                    )
+                                )
+
+    skip_done_wide_csv = ""
+    if cfg and isinstance(cfg, dict):
+        skip_done_wide_csv = str(cfg.get("skip_done_wide_csv", "") or "").strip()
+    if skip_done_wide_csv:
+        skip_csv_path = os.path.abspath(skip_done_wide_csv)
+        done_keys = _load_done_keys_from_wide_csv(skip_csv_path)
+        if done_keys:
+            before = len(jobs)
+            jobs = [
+                j
+                for j in jobs
+                if _job_key_for_skip(j, args.bench_stage) not in done_keys
+            ]
+            skipped = before - len(jobs)
+            print(
+                f"[info] skip_done_wide_csv={skip_csv_path}, "
+                f"done_keys={len(done_keys)}, skipped_jobs={skipped}"
+            )
+        else:
+            print(
+                f"[warn] skip_done_wide_csv has no valid keys or file missing columns: "
+                f"{skip_csv_path}"
+            )
 
     print(f"[info] discovered GPUs: {free_gpus}")
     print(f"[info] total jobs: {len(jobs)}")
@@ -856,12 +960,7 @@ def main() -> None:
         assigned_gpus: List[int],
         port: int,
     ) -> None:
-        """Handle all jobs for one TP on one GPU group using a single server.
-
-        The server is started once and kept alive; between jobs we flush
-        KV-cache and write an updated JSON bench-config file so that the
-        server-side qwen3.py picks up the new parameters automatically.
-        """
+        """Handle all jobs for one TP on one GPU group using a single server."""
         group_tag = f"tp{tp}_gpus{'-'.join(map(str, assigned_gpus))}"
         server_dir = os.path.join(work_dir, f".server_{group_tag}")
         os.makedirs(server_dir, exist_ok=True)
@@ -892,9 +991,6 @@ def main() -> None:
         env_server["SGLANG_SYNC_BENCH_REQUIRE_PROFILE_WINDOW"] = "0"
         env_server["SGLANG_SYNC_BENCH_NUM_ITERS"] = str(args.sync_bench_num_iters)
         env_server["SGLANG_SYNC_BENCH_WARMUP_ITERS"] = str(args.sync_bench_warmup_iters)
-        env_server["SGLANG_BENCH_ENERGY"] = (
-            "1" if bool(getattr(args, "bench_energy", True)) else "0"
-        )
         env_server["SGLANG_TTFT_AF_CSV_ENABLE"] = "1"
         env_server["SGLANG_BENCH_TP"] = str(tp)
         env_server["SGLANG_BENCH_PHASE_FILE"] = config_file
@@ -909,8 +1005,8 @@ def main() -> None:
 
         first_job = group_jobs[0]
         first_run_id = (
-            f"tp{tp}_in{first_job.input_len}_clk{first_job.sm_clock}"
-            f"_bs{first_job.batch_size}"
+            f"tp{tp}_in{first_job.input_len}_clk{first_job.gpu_clock}"
+            f"_bs{first_job.batch_size}_ol{first_job.target_output_len}"
         )
         first_processed = os.path.join(work_dir, first_run_id, "processed")
         os.makedirs(first_processed, exist_ok=True)
@@ -919,7 +1015,7 @@ def main() -> None:
             phase=variant_defs[0][0],
             tp=tp,
             input_len=first_job.input_len,
-            sm_clock=first_job.sm_clock,
+            sm_clock=first_job.gpu_clock,
             batch_size=first_job.batch_size,
             csv_path=os.path.join(
                 first_processed, f"{first_run_id}_{variant_defs[0][0]}_ttft_af.csv"
@@ -977,9 +1073,12 @@ def main() -> None:
 
             for job_i, job in enumerate(group_jobs):
                 input_len = job.input_len
-                sm_clock = job.sm_clock
+                gpu_clock = job.gpu_clock
                 batch_size = job.batch_size
-                run_id = f"tp{tp}_in{input_len}_clk{sm_clock}_bs{batch_size}"
+                run_id = (
+                    f"tp{tp}_in{input_len}_clk{gpu_clock}_bs{batch_size}"
+                    f"_ol{job.target_output_len}"
+                )
                 run_dir = os.path.join(work_dir, run_id)
                 os.makedirs(run_dir, exist_ok=True)
                 processed_dir = os.path.join(run_dir, "processed")
@@ -987,9 +1086,7 @@ def main() -> None:
                 bench_stdout = os.path.join(run_dir, "bench_stdout.log")
                 bench_stderr = os.path.join(run_dir, "bench_stderr.log")
 
-                print(
-                    f"[run] job {job_i + 1}/{len(group_jobs)}: {run_id}"
-                )
+                print(f"[run] job {job_i + 1}/{len(group_jobs)}: {run_id}")
                 merged_log_f.write(
                     f"[pd-batch] === job {job_i + 1}/{len(group_jobs)}: {run_id} ===\n"
                 )
@@ -1006,7 +1103,7 @@ def main() -> None:
                         phase=variant_name,
                         tp=tp,
                         input_len=input_len,
-                        sm_clock=sm_clock,
+                        sm_clock=gpu_clock,
                         batch_size=batch_size,
                         csv_path=csv_path,
                     )
@@ -1042,13 +1139,14 @@ def main() -> None:
                         "--output_len",
                         str(job.output_len_max),
                         "--sm_clock",
-                        str(sm_clock),
+                        str(gpu_clock),
                         "--ignore_eos",
                     ]
 
                     env_bench = env.copy()
-                    with open(bench_stdout, "w", encoding="utf-8") as out_f, \
-                         open(bench_stderr, "w", encoding="utf-8") as err_f:
+                    with open(bench_stdout, "w", encoding="utf-8") as out_f, open(
+                        bench_stderr, "w", encoding="utf-8"
+                    ) as err_f:
                         bench_proc = subprocess.Popen(
                             bench_cmd,
                             env=env_bench,
@@ -1133,9 +1231,8 @@ def main() -> None:
                 f"Not enough GPUs for tp={tp}. need>={tp}, got={len(free_gpus)}"
             )
 
-        # Use a single GPU group so all parameter combinations (sm_clock,
-        # input_len, batch_size) run sequentially on the same hardware for
-        # fair comparison.  The server is started once and reused.
+        # Use a single GPU group so all parameter combinations run on one
+        # warmed server process for this TP.
         groups = [free_gpus[:tp]]
         group_job_lists = [tp_jobs]
 
@@ -1169,14 +1266,14 @@ def main() -> None:
         "--bench-stage",
         args.bench_stage,
         "--output-lens",
-        args.output_lens,
+        ("1" if args.bench_stage == "D" else "1"),
         "--final-csv",
         out_csv_path,
     ]
     subprocess.run(cmd, cwd="/workspace/benchmark/sglang-main", check=True)
     print(f"[saved] big table: {out_csv_path}")
     print("[info] converting big table to wide pivot csv...")
-    pivot_out_dir = _run_pivot_wide(out_csv_path, args.bench_stage)
+    pivot_out_dir = _run_pivot_wide(out_csv_path)
     print(f"[saved] pivot dir: {pivot_out_dir}")
 
     # Cleanup run dirs except final outputs.

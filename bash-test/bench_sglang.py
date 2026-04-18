@@ -1,5 +1,4 @@
 import argparse
-import concurrent.futures
 import copy
 import os
 import random
@@ -67,6 +66,30 @@ def extract_completion_tokens(resp_json: Dict[str, Any]) -> Optional[int]:
     return None
 
 
+def completion_tokens_from_generate_response(resp_json: Any) -> tuple[int, int]:
+    """Parse non-streaming /generate JSON: single dict or batch list. Returns (sum_tokens, n_subresponses)."""
+    if isinstance(resp_json, list):
+        total = 0
+        for item in resp_json:
+            if not isinstance(item, dict):
+                raise RuntimeError(f"Unexpected batch response element type: {type(item)}")
+            ct = extract_completion_tokens(item)
+            if ct is None:
+                raise RuntimeError(
+                    f"Cannot extract completion_tokens from response item: {item!r}"
+                )
+            total += ct
+        return total, len(resp_json)
+    if not isinstance(resp_json, dict):
+        raise RuntimeError(f"Unexpected /generate response type: {type(resp_json)}")
+    ct = extract_completion_tokens(resp_json)
+    if ct is None:
+        raise RuntimeError(
+            f"Cannot extract completion_tokens from response: {resp_json!r}"
+        )
+    return ct, 1
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Benchmark SGLang with batched /generate requests"
@@ -82,7 +105,10 @@ def main():
         "--batch_size",
         type=int,                                                                                                                                         
         default=1,
-        help="Number of /generate requests to run concurrently in one batch.",
+        help=(
+            "Sequences per measurement round. For batch_size>1, uses one HTTP POST "
+            "with input_ids as list-of-lists so the server runs a single batched prefill."
+        ),
     )
     parser.add_argument("--input_len", type=int, default=32, help="Input token length (pre-tokenized input_ids)")
     parser.add_argument("--output_len", type=int, default=32, help="max_new_tokens per request")
@@ -159,10 +185,27 @@ def main():
                 batch_end = min(batch_start + args.batch_size, args.num_seqs)
                 batch_indexes = list(range(batch_start, batch_end))
                 print(f"start batch [{batch_start}, {batch_end})")
-                batch_tokens = 0
-                batch_completed = 0
 
-                def _run_one(req_idx: int) -> int:
+                if len(batch_indexes) > 1:
+                    # Concurrent single-seq POSTs are often scheduled as separate forwards;
+                    # PD bench window matching expects one extend with seq_lens_sum=input_len*batch_size.
+                    payload = {
+                        "input_ids": [prompts[i] for i in batch_indexes],
+                        "sampling_params": copy.deepcopy(sampling_params),
+                    }
+                    with requests.Session() as worker_session:
+                        resp_json = post_json(
+                            worker_session, generate_url, payload, timeout_s=args.timeout_s
+                        )
+                    batch_tokens, batch_completed = completion_tokens_from_generate_response(
+                        resp_json
+                    )
+                    print(
+                        f"end batched POST [{batch_start}, {batch_end}): "
+                        f"subresponses={batch_completed}, completion_tokens_sum={batch_tokens}"
+                    )
+                else:
+                    req_idx = batch_indexes[0]
                     payload = {
                         "input_ids": prompts[req_idx],
                         "sampling_params": copy.deepcopy(sampling_params),
@@ -171,25 +214,11 @@ def main():
                         resp_json = post_json(
                             worker_session, generate_url, payload, timeout_s=args.timeout_s
                         )
-                    ct = extract_completion_tokens(resp_json)
-                    if ct is None:
-                        raise RuntimeError(
-                            f"Cannot extract completion_tokens from response: {resp_json}"
-                        )
-                    return ct
+                    batch_tokens, batch_completed = completion_tokens_from_generate_response(
+                        resp_json
+                    )
+                    print(f"end {req_idx} (completion_tokens={batch_tokens})")
 
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=len(batch_indexes)
-                ) as executor:
-                    future_to_idx = {
-                        executor.submit(_run_one, req_idx): req_idx for req_idx in batch_indexes
-                    }
-                    for fut in concurrent.futures.as_completed(future_to_idx):
-                        req_idx = future_to_idx[fut]
-                        ct = fut.result()
-                        batch_tokens += ct
-                        batch_completed += 1
-                        print(f"end {req_idx} (completion_tokens={ct})")
                 print(f"end batch [{batch_start}, {batch_end})")
                 garbage_collection()
                 return batch_tokens, batch_completed

@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 _is_cuda = is_cuda()
 _is_npu = is_npu()
 _latency_lock = Lock()
-_latency_values: Dict[str, List[float]] = {"TTFT": [], "A": [], "F": []}
+_latency_values: Dict[str, List[float]] = {"TTFT": [], "TPOT": [], "A": [], "F": []}
 _energy_values_uj: Dict[str, List[float]] = {"A": [], "F": []}
 _nvml_lock = Lock()
 
@@ -58,13 +58,14 @@ _nvml_lock = Lock()
 _bench_job_cfg: Dict[str, object] = {}
 _bench_job_cfg_phase: str = ""
 _bench_job_cfg_file_mtime: float = 0.0
+_tpot_decode_step: int = 0
 
 
 def _refresh_bench_job_config() -> None:
     """Read the phase/config file.  If JSON, update per-job config and phase.
     If plain text, update phase only (backward compat).
     On config change, reset latency/energy accumulators."""
-    global _bench_job_cfg, _bench_job_cfg_phase, _bench_job_cfg_file_mtime
+    global _bench_job_cfg, _bench_job_cfg_phase, _bench_job_cfg_file_mtime, _tpot_decode_step
 
     phase_file = os.getenv("SGLANG_BENCH_PHASE_FILE", "").strip()
     if not phase_file:
@@ -91,6 +92,7 @@ def _refresh_bench_job_config() -> None:
         if isinstance(data, dict):
             _bench_job_cfg = data
             _bench_job_cfg_phase = str(data.get("phase", "none")).strip().lower()
+            _tpot_decode_step = 0
             with _latency_lock:
                 for arr in _latency_values.values():
                     arr.clear()
@@ -337,6 +339,11 @@ def _bench_phase() -> str:
     return "none"
 
 
+def _bench_stage() -> str:
+    """Return the bench stage from per-job config: 'P' or 'D'."""
+    return str(_bench_job_cfg.get("bench_stage", "P")).strip().upper()
+
+
 def _ttft_window_match(input_ids: Optional[torch.Tensor]) -> bool:
     expected_input_len = _bench_cfg_int("input_len", 0)
     expected_batch_size = _bench_cfg_int("batch_size", 1)
@@ -387,6 +394,7 @@ def _dump_latency_csv() -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with _latency_lock:
             ttft_arr = list(_latency_values["TTFT"])
+            tpot_arr = list(_latency_values["TPOT"])
             a_arr = list(_latency_values["A"])
             f_arr = list(_latency_values["F"])
             a_energy_arr = list(_energy_values_uj["A"])
@@ -400,11 +408,13 @@ def _dump_latency_csv() -> None:
         row = {
             **base_meta,
             "ttft_avg_us": (sum(ttft_arr) / len(ttft_arr) if ttft_arr else ""),
+            "tpot_avg_us": (sum(tpot_arr) / len(tpot_arr) if tpot_arr else ""),
             "a_avg_us": (sum(a_arr) / len(a_arr) if a_arr else ""),
             "f_avg_us": (sum(f_arr) / len(f_arr) if f_arr else ""),
             "a_avg_energy_uj": (sum(a_energy_arr) / len(a_energy_arr) if a_energy_arr else ""),
             "f_avg_energy_uj": (sum(f_energy_arr) / len(f_energy_arr) if f_energy_arr else ""),
             "ttft_count": len(ttft_arr),
+            "tpot_count": len(tpot_arr),
             "a_count": len(a_arr),
             "f_count": len(f_arr),
             "a_energy_count": len(a_energy_arr),
@@ -439,6 +449,7 @@ def _dump_latency_csv() -> None:
             w.writeheader()
             for op_name, arr, earr in (
                 ("TTFT", ttft_arr, []),
+                ("TPOT", tpot_arr, []),
                 ("A", a_arr, a_energy_arr),
                 ("F", f_arr, f_energy_arr),
             ):
@@ -785,12 +796,15 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         _phase = _bench_phase()
         _ttft_mode = _phase == "ttft"
+        _is_d_stage = _bench_stage() == "D"
         _internal_bench = (
             (os.getenv("SGLANG_SYNC_INTERNAL_OP_BENCH", "0") == "1")
             and (not _ttft_mode)
             and (_phase in {"af", "both"})
-            and forward_batch.forward_mode.is_extend()
-            and _af_window_match(forward_batch)
+            and (
+                (not _is_d_stage and forward_batch.forward_mode.is_extend() and _af_window_match(forward_batch))
+                or (_is_d_stage and forward_batch.forward_mode.is_decode())
+            )
         )
         if _internal_bench and self.layer_id > 0:
             # AF-only benchmark mode: only run layer0 and skip following layers.
@@ -997,13 +1011,29 @@ class Qwen3ForCausalLM(nn.Module):
             input_embeds_shape,
         )
 
+        _is_d_stage = _bench_stage() == "D"
         collect_ttft = (
             (_bench_phase() in {"ttft", "both"})
             and (os.getenv("SGLANG_SYNC_STAGE_BENCH", "0") == "1")
+            and (not _is_d_stage)
             and forward_batch.forward_mode.is_extend()
             and _ttft_window_match(input_ids)
         )
-        if collect_ttft:
+        collect_tpot = (
+            (_bench_phase() in {"ttft", "both"})
+            and (os.getenv("SGLANG_SYNC_STAGE_BENCH", "0") == "1")
+            and _is_d_stage
+            and forward_batch.forward_mode.is_decode()
+        )
+
+        global _tpot_decode_step
+        if collect_tpot:
+            _tpot_decode_step += 1
+        _tpot_past_warmup = collect_tpot and (
+            _tpot_decode_step > _get_af_profile_warmup()
+        )
+
+        if collect_ttft or _tpot_past_warmup:
             torch.cuda.synchronize()
             _t0 = time.perf_counter()
 
@@ -1037,6 +1067,10 @@ class Qwen3ForCausalLM(nn.Module):
             torch.cuda.synchronize()
             _ttft_us = (time.perf_counter() - _t0) * 1e6
             _record_latency("TTFT", _ttft_us)
+        elif _tpot_past_warmup:
+            torch.cuda.synchronize()
+            _tpot_us = (time.perf_counter() - _t0) * 1e6
+            _record_latency("TPOT", _tpot_us)
 
         return out
 

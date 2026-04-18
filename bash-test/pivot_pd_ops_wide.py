@@ -16,22 +16,27 @@ A_OPS = {"A", "PA", "DA", "input_layernorm", "qkv_proj", "rotary_emb", "attn", "
 def _calc_a_f(op_map: Dict[str, float]) -> Tuple[float, float]:
     a_sum = 0.0
     f_sum = 0.0
-    # TTFT/TPOT are stage-level timings (not per-op). Keep them as standalone columns,
-    # but do not include them in A/F breakdown.
+    has_err = False
     exclude_from_a_f = {"TTFT", "TPOT"}
     for op_name, latency_us in op_map.items():
         if op_name in exclude_from_a_f:
+            continue
+        if latency_us < 0:
+            has_err = True
             continue
         if op_name in A_OPS or op_name.startswith("A"):
             a_sum += latency_us
         else:
             f_sum += latency_us
+    if has_err and a_sum == 0.0 and f_sum == 0.0:
+        return -1.0, -1.0
     return a_sum, f_sum
 
 
 def _calc_a_f_energy(metric_map: Dict[str, float], op_map: Dict[str, float]) -> Tuple[float, float]:
     a_sum = 0.0
     f_sum = 0.0
+    has_err = False
     exclude = {"TTFT", "TPOT"}
     for op_name in op_map.keys():
         if op_name in exclude:
@@ -39,18 +44,64 @@ def _calc_a_f_energy(metric_map: Dict[str, float], op_map: Dict[str, float]) -> 
         val = metric_map.get(op_name)
         if val is None:
             continue
+        if val < 0:
+            has_err = True
+            continue
         if op_name in A_OPS or op_name.startswith("A"):
             a_sum += val
         else:
             f_sum += val
+    if has_err and a_sum == 0.0 and f_sum == 0.0:
+        return -1.0, -1.0
     return a_sum, f_sum
 
 
-def _display_op_value(op_name: str, latency_us: float) -> float:
-    # Keep most ops in us; TTFT is displayed in ms per request.
-    if op_name == "TTFT":
+def _display_op_value(op_name: str, latency_us: float) -> object:
+    if latency_us < 0:
+        return "ERR"
+    if op_name in ("TTFT", "TPOT"):
         return latency_us / 1000.0
     return latency_us
+
+
+def _fmt(val: float, divisor: float = 1.0) -> str:
+    """Format a numeric value; return 'ERR' for negative sentinel values."""
+    if val < 0:
+        return "ERR"
+    return f"{val / divisor:.2f}"
+
+
+def _build_row_metrics(
+    op_names: List[str],
+    op_map: Dict[str, float],
+    energy_map: Dict[str, float],
+) -> Tuple[List[str], str, str, str, bool]:
+    """
+    Build display values for one output row.
+    Returns (op_columns, af_ms, a_energy_mj, f_energy_mj, has_err).
+    """
+    row_vals = ["" for _ in op_names]
+    has_err = False
+    for i, op in enumerate(op_names):
+        op_lookup = "TTFT" if op == "TTFT_ms" else ("TPOT" if op == "TPOT_ms" else op)
+        if op_lookup in op_map:
+            dv = _display_op_value(op_lookup, op_map[op_lookup])
+            if dv == "ERR":
+                row_vals[i] = "ERR"
+                has_err = True
+            else:
+                row_vals[i] = f"{dv:.2f}"
+
+    a_val, f_val = _calc_a_f(op_map)
+    af_64_us = (a_val + f_val) * 64
+    a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
+    af_ms = _fmt(af_64_us, 1000.0)
+    a_energy_mj = _fmt(a_eu, 1000.0)
+    f_energy_mj = _fmt(f_eu, 1000.0)
+    if af_ms == "ERR" or a_energy_mj == "ERR" or f_energy_mj == "ERR":
+        has_err = True
+
+    return row_vals, af_ms, a_energy_mj, f_energy_mj, has_err
 
 
 def _write_wide_block(
@@ -88,16 +139,13 @@ def _write_wide_block(
             ]
         )
         for (tp, input_len, gpu_clock, batch_size) in rows:  # type: ignore[misc]
-            row_vals = ["" for _ in op_names]
             op_map = data_by_stage[stage][(tp, input_len, gpu_clock, batch_size)]  # type: ignore[index]
             energy_map = energy_by_stage[stage][(tp, input_len, gpu_clock, batch_size)]  # type: ignore[index]
-            for i, op in enumerate(op_names):
-                op_lookup = "TTFT" if op == "TTFT_ms" else op
-                if op_lookup in op_map:
-                    row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
-            a_val, f_val = _calc_a_f(op_map)
-            af_64_ms = (a_val + f_val) * 64 / 1000.0
-            a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
+            row_vals, af_ms, a_energy_mj, f_energy_mj, has_err = _build_row_metrics(
+                op_names, op_map, energy_map
+            )
+            if has_err:
+                continue
             w.writerow(
                 [
                     tp,
@@ -105,9 +153,9 @@ def _write_wide_block(
                     gpu_clock,
                     batch_size,
                     *row_vals,
-                    f"{af_64_ms:.2f}",
-                    f"{a_eu / 1000.0:.2f}",
-                    f"{f_eu / 1000.0:.2f}",
+                    af_ms,
+                    a_energy_mj,
+                    f_energy_mj,
                 ]
             )
         return
@@ -126,20 +174,17 @@ def _write_wide_block(
         ]
     )
     for (tp, input_len, output_len, gpu_clock, batch_size) in rows:
-        row_vals = ["" for _ in op_names]
         op_map = data_by_stage[stage][
             (tp, input_len, output_len, gpu_clock, batch_size)
         ]
         energy_map = energy_by_stage[stage][
             (tp, input_len, output_len, gpu_clock, batch_size)
         ]
-        for i, op in enumerate(op_names):
-            op_lookup = "TTFT" if op == "TTFT_ms" else op
-            if op_lookup in op_map:
-                row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
-        a_val, f_val = _calc_a_f(op_map)
-        af_64_ms = (a_val + f_val) * 64 / 1000.0
-        a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
+        row_vals, af_ms, a_energy_mj, f_energy_mj, has_err = _build_row_metrics(
+            op_names, op_map, energy_map
+        )
+        if has_err:
+            continue
         w.writerow(
             [
                 tp,
@@ -148,9 +193,9 @@ def _write_wide_block(
                 gpu_clock,
                 batch_size,
                 *row_vals,
-                f"{af_64_ms:.2f}",
-                f"{a_eu / 1000.0:.2f}",
-                f"{f_eu / 1000.0:.2f}",
+                af_ms,
+                a_energy_mj,
+                f_energy_mj,
             ]
         )
 
@@ -300,10 +345,12 @@ def main() -> None:
                 if w_sum > 0:
                     energy_by_stage[stage][cfg_key][op_name] = e_sum / w_sum
 
-    # Rename TTFT column to indicate display unit in output tables.
+    # Rename stage-level timing columns to indicate display unit in output tables.
     for stage in ("P", "D"):
         op_names_by_stage[stage] = [
-            "TTFT_ms" if name == "TTFT" else name for name in op_names_by_stage[stage]
+            "TTFT_ms" if name == "TTFT"
+            else ("TPOT_ms" if name == "TPOT" else name)
+            for name in op_names_by_stage[stage]
         ]
 
     def write_wide_file(stage: str, path: str) -> None:
@@ -325,16 +372,13 @@ def main() -> None:
                 )
                 rows = sorted(data_by_stage[stage].keys(), key=lambda k: (k[0], k[1], k[2], k[3]))  # type: ignore[index]
                 for (tp, input_len, gpu_clock, batch_size) in rows:  # type: ignore[misc]
-                    row_vals = ["" for _ in op_names]
                     op_map = data_by_stage[stage][(tp, input_len, gpu_clock, batch_size)]  # type: ignore[index]
                     energy_map = energy_by_stage[stage][(tp, input_len, gpu_clock, batch_size)]  # type: ignore[index]
-                    for i, op in enumerate(op_names):
-                        op_lookup = "TTFT" if op == "TTFT_ms" else op
-                        if op_lookup in op_map:
-                            row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
-                    a_val, f_val = _calc_a_f(op_map)
-                    af_64_ms = (a_val + f_val) * 64 / 1000.0
-                    a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
+                    row_vals, af_ms, a_energy_mj, f_energy_mj, has_err = _build_row_metrics(
+                        op_names, op_map, energy_map
+                    )
+                    if has_err:
+                        continue
                     w.writerow(
                         [
                             tp,
@@ -342,9 +386,9 @@ def main() -> None:
                             gpu_clock,
                             batch_size,
                             *row_vals,
-                            f"{af_64_ms:.2f}",
-                            f"{a_eu / 1000.0:.2f}",
-                            f"{f_eu / 1000.0:.2f}",
+                            af_ms,
+                            a_energy_mj,
+                            f_energy_mj,
                         ]
                     )
                 return
@@ -364,20 +408,17 @@ def main() -> None:
                 ]
             )
             for (tp, input_len, output_len, gpu_clock, batch_size) in rows:  # type: ignore[misc]
-                row_vals = ["" for _ in op_names]
                 op_map = data_by_stage[stage][
                     (tp, input_len, output_len, gpu_clock, batch_size)
                 ]
                 energy_map = energy_by_stage[stage][
                     (tp, input_len, output_len, gpu_clock, batch_size)
                 ]
-                for i, op in enumerate(op_names):
-                    op_lookup = "TTFT" if op == "TTFT_ms" else op
-                    if op_lookup in op_map:
-                        row_vals[i] = f"{_display_op_value(op_lookup, op_map[op_lookup]):.2f}"
-                a_val, f_val = _calc_a_f(op_map)
-                af_64_ms = (a_val + f_val) * 64 / 1000.0
-                a_eu, f_eu = _calc_a_f_energy(energy_map, op_map)
+                row_vals, af_ms, a_energy_mj, f_energy_mj, has_err = _build_row_metrics(
+                    op_names, op_map, energy_map
+                )
+                if has_err:
+                    continue
                 w.writerow(
                     [
                         tp,
@@ -386,9 +427,9 @@ def main() -> None:
                         gpu_clock,
                         batch_size,
                         *row_vals,
-                        f"{af_64_ms:.2f}",
-                        f"{a_eu / 1000.0:.2f}",
-                        f"{f_eu / 1000.0:.2f}",
+                        af_ms,
+                        a_energy_mj,
+                        f_energy_mj,
                     ]
                 )
 
