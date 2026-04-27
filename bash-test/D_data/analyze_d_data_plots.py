@@ -5,7 +5,8 @@ Decode 阶段：从 D_data.csv 生成 figures/analysis_af/ 下的 A/F 分析图�
 - 图 1：batch_size 扫描时固定 output_len=BATCH_PLOT_OUTPUT_LEN（默认 4096）。
 - 图 3、6 等（除图 2、图 4、图 5）：使用 output_len=512 的行（FIXED_OUTPUT_LEN）。
 - 图 4（横轴 input_len）：使用 output_len=INPUT_LEN_PLOT_OUTPUT_LEN（默认 4096）。
-- 图 5（横轴 gpu_clock）：使用 output_len=GPU_CLOCK_PLOT_OUTPUT_LEN（默认 4096），并固定 batch_size=GPU_CLOCK_PLOT_BATCH_SIZE（默认 128）。
+- 图 5（横轴 gpu_clock）：使用 output_len=GPU_CLOCK_PLOT_OUTPUT_LEN（默认 64），并固定 batch_size=GPU_CLOCK_PLOT_BATCH_SIZE（默认 8）。
+- 图 5b：与图 5 相同子图坐标，facet 为 input_len（行）× output_len（列）；固定 tp=GPU_CLOCK_FACET_IO_TP、batch_size=GPU_CLOCK_FACET_IO_BS（默认 4 与 64）。
 - 图 2：横轴 output_len（全表 output_len 档位），facet tp×input_len，固定 gpu_clock 与 batch_size=OUTPUT_LEN_PLOT_BATCH_SIZE（默认 128）。
 - 图 1、3、4：固定 gpu_clock=210 MHz（数据中若无 210 则回退到中位频率）。
 - 图 5：横轴扫描数据中所有 gpu_clock，不固定单频。
@@ -45,10 +46,13 @@ BATCH_PLOT_OUTPUT_LEN = 4096
 # 图 4（A/F vs input_len）固定 output_len，与图 1 默认对齐
 INPUT_LEN_PLOT_OUTPUT_LEN = 4096
 # 图 5（A/F vs gpu_clock）固定 output_len 与 batch_size
-GPU_CLOCK_PLOT_OUTPUT_LEN = 4096
-GPU_CLOCK_PLOT_BATCH_SIZE = 128
+GPU_CLOCK_PLOT_OUTPUT_LEN = 64
+GPU_CLOCK_PLOT_BATCH_SIZE = 8
 # 图 2（A/F vs output_len）固定 batch_size
 OUTPUT_LEN_PLOT_BATCH_SIZE = 128
+# 图 5b：与图 5 相同子图坐标（x=gpu_clock；y=latency 或 A/F energy），facet 为 input_len（行）× output_len（列）；固定 tp 与 batch_size
+GPU_CLOCK_FACET_IO_TP = 4
+GPU_CLOCK_FACET_IO_BS = 64
 
 _FACET_INNER_HSPACE = 0.12
 _FACET_INNER_WSPACE = 0.10
@@ -559,6 +563,87 @@ def plot_by_gpu_clock(rows, out_dir):
         plt.close(fig)
 
 
+def plot_by_gpu_clock_facets_ilen_olen(rows, out_dir):
+    """Facet input_len×output_len；x=gpu_clock（全频率）；固定 tp、batch_size。两张 PNG：latency / energy。"""
+    fixed_tp = GPU_CLOCK_FACET_IO_TP
+    fixed_bs = GPU_CLOCK_FACET_IO_BS
+    sub_all = [r for r in rows if r["tp"] == fixed_tp and r["batch_size"] == fixed_bs]
+    if not sub_all:
+        print(
+            f"[warn] plot5b skipped: no rows with tp={fixed_tp}, batch_size={fixed_bs}"
+        )
+        return
+    ilens = sorted({r["input_len"] for r in sub_all})
+    olens = sorted({r["output_len"] for r in sub_all})
+    n_il, n_ol = len(ilens), len(olens)
+    fig_w = _FACET_CELL_W * n_ol + 0.5
+    fig_h = _FACET_CELL_H * n_il + 0.35
+    for want_energy, fname, sup in [
+        (
+            False,
+            "5b_latency_AF_vs_gpu_clock_tp4_bs64_ilen_x_olen.png",
+            f"(5b) [Decode] A/F vs gpu_clock — facet input_len×output_len, tp={fixed_tp}, batch_size={fixed_bs}",
+        ),
+        (
+            True,
+            "5b_energy_AF_vs_gpu_clock_tp4_bs64_ilen_x_olen.png",
+            f"(5b) A_energy & F_energy vs gpu_clock — same facet, tp={fixed_tp}, batch_size={fixed_bs}",
+        ),
+    ]:
+        fig = plt.figure(figsize=(fig_w, fig_h), constrained_layout=True)
+        inner = fig.add_gridspec(n_il, n_ol, hspace=_FACET_INNER_HSPACE, wspace=_FACET_INNER_WSPACE)
+        for i, ilen in enumerate(ilens):
+            for j, olen in enumerate(olens):
+                ax = fig.add_subplot(inner[i, j])
+                sub = sorted(
+                    [
+                        r
+                        for r in sub_all
+                        if r["input_len"] == ilen and r["output_len"] == olen
+                    ],
+                    key=lambda x: x["gpu_clock"],
+                )
+                if not sub:
+                    ax.set_axis_off()
+                    continue
+                xs = [r["gpu_clock"] for r in sub]
+                if want_energy:
+                    ax.plot(
+                        xs,
+                        [r["A_energy_mj"] for r in sub],
+                        "o-",
+                        color="#2ca02c",
+                        markersize=3,
+                        label="A_e",
+                    )
+                    ax.plot(
+                        xs,
+                        [r["F_energy_mj"] for r in sub],
+                        "s-",
+                        color="#d62728",
+                        markersize=3,
+                        label="F_e",
+                    )
+                else:
+                    ax.plot(xs, [r["A"] for r in sub], "o-", color="#1f77b4", markersize=3, label="A")
+                    ax.plot(xs, [r["F"] for r in sub], "s-", color="#ff7f0e", markersize=3, label="F")
+                ax.set_title(
+                    f"ilen={ilen}, ol={olen}, tp={fixed_tp}, bs={fixed_bs}",
+                    fontsize=7,
+                )
+                if i == n_il - 1:
+                    ax.set_xlabel("gpu_clock (MHz)", fontsize=8)
+                if j == 0:
+                    ax.set_ylabel("mJ" if want_energy else "A / F", fontsize=8)
+                ax.legend(fontsize=5, loc="upper right")
+                ax.grid(True, alpha=0.28)
+                _facet_sci_y(ax)
+                _facet_sci_x_if_linear_large(ax, xs)
+        fig.suptitle(sup, fontsize=11)
+        fig.savefig(os.path.join(out_dir, fname), dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+
 def _heatmap_color_norm(mat):
     v = mat[np.isfinite(mat)].astype(float).ravel()
     if v.size == 0:
@@ -925,6 +1010,7 @@ def main() -> None:
         print(
             f"[warn] plot5 skipped: no rows with output_len={GPU_CLOCK_PLOT_OUTPUT_LEN}"
         )
+    plot_by_gpu_clock_facets_ilen_olen(rows_base, OUT_DIR)
     heatmaps(rows, OUT_DIR)
     plot_iso_inputlen_batch_product(rows, OUT_DIR, product=16384)
     plot_F_freq_sensitivity_ratio_bs4(rows, OUT_DIR)
@@ -943,6 +1029,8 @@ def main() -> None:
             f"plot4: 4_* — gpu_clock={clk_trend} MHz, output_len={INPUT_LEN_PLOT_OUTPUT_LEN}; "
             f"plot5: 5_* — vs gpu_clock (all clocks in CSV), batch_size={GPU_CLOCK_PLOT_BATCH_SIZE}, "
             f"output_len={GPU_CLOCK_PLOT_OUTPUT_LEN}.\n"
+            f"plot5b: 5b_* — vs gpu_clock, facet input_len×output_len, tp={GPU_CLOCK_FACET_IO_TP}, "
+            f"batch_size={GPU_CLOCK_FACET_IO_BS}.\n"
         )
         f.write(f"D_data.csv: {CSV_PATH}\n")
         f.write(
