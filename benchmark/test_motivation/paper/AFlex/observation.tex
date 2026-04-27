@@ -1,0 +1,6 @@
+\section{Observations}
+\label{sec:observation}
+We begin by characterizing the energy-performance tradeoff of LLM serving under different GPU frequency settings. Our measurements show that operators within the same inference workflow can respond very differently to frequency scaling and that the most efficient frequency setting depends strongly on workload conditions. This suggests that a single unified frequency setting is too coarse for energy-efficient LLM serving and that effective GPU frequency control must account for both operator behavior and workload conditions.
+
+% Opening paragraph:
+% We profile DVFS behavior in LLM serving and identify observations that motivate AFlex.
