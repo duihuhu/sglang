@@ -33,8 +33,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # ═══════════════════════════════════════════════════════════════════════
 
 def load_prefill(path: str) -> pd.DataFrame:
-    """Load prefill profiling data."""
-    df = pd.read_csv(path, sep="\t")
+    """Load prefill profiling data (skip first comment line)."""
+    df = pd.read_csv(path, sep="\t", skiprows=1)
     df.columns = df.columns.str.strip()
     assert "A_energy_mj" in df.columns, f"Missing A_energy_mj in {df.columns.tolist()}"
     return df
