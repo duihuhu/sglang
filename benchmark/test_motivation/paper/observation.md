@@ -2,7 +2,7 @@
 
 ## Overview
 
-We conduct a systematic characterization of the energy-performance trade-offs in disaggregated LLM inference, where each transformer layer is split into an Attention operator (A) and an FFN operator (F) that can be independently frequency-scaled. Our profiling covers **7,530 Decode** and **906 Prefill** configurations on NVIDIA A100 GPUs, sweeping across 6 GPU frequencies (210–1410 MHz), 4 tensor parallelism degrees (TP=1/2/4/8), 5 batch sizes (BS=1–128), and multiple input/output lengths. We report five observations that progressively build the case for operator-level, phase-aware, runtime-adaptive frequency control.
+We conduct a systematic characterization of the energy-performance trade-offs in disaggregated LLM inference, where each transformer layer is split into an Attention operator (A) and an FFN operator (F) that can be independently frequency-scaled. Our profiling covers **7,530 Decode** and **906 Prefill** configurations on NVIDIA A800-80GB SXM GPUs, sweeping across 6 GPU frequencies (210–1410 MHz), 4 tensor parallelism degrees (TP=1/2/4/8), up to 9 batch sizes (BS=1–256), 6 input lengths (IL=128–4096 for Decode, 10 values up to 40000 for Prefill), and 7 output lengths (OL=64–4096 for Decode). We report five observations that progressively build the case for operator-level, phase-aware, runtime-adaptive frequency control.
 
 **逻辑链条：**
 ```
@@ -11,9 +11,11 @@ Obs 1 (现象)  →  Obs 2 (调制)  →  Obs 3 (后果)  →  Obs 4 (收益)  �
 ```
 
 **数据来源：**
-- `decode_data_v1.txt`：7,530 条 Decode 记录，字段包括 tp, input_len, output_len, gpu_clock, batch_size, A (latency), F (latency), A_energy_mj, F_energy_mj
-- `prefill_data_v1.txt`：906 条 Prefill 记录，字段包括 tp, input_len, gpu_clock, batch_size, A, F, A_energy_mj, F_energy_mj
-- 模型：LLaMA-2-7B，硬件：NVIDIA A100 80GB
+- `decode_data_v1.txt`：7,530 条 Decode 记录，字段包括 tp, input_len, output_len, gpu_clock, batch_size, A (latency), F (latency), TPOT_ms, (A+F)*64_ms, A_energy_mj, F_energy_mj
+  - il: {128,256,512,1024,2048,4096}, ol: {64,128,256,512,1024,2048,4096}, bs: {1..256} (tp=1 最大 128)
+- `prefill_data_v1.txt`：906 条 Prefill 记录，字段包括 tp, input_len, gpu_clock, batch_size, A, F, TTFT_ms, (A+F)*64_ms, A_energy_mj, F_energy_mj
+  - il: {128,256,512,1024,2048,4096,8192,16384,32000,40000} (tp=1 无 40000), bs: {1..128}
+- 模型：Qwen3-32B，硬件：NVIDIA A800-80GB SXM
 
 ---
 
@@ -54,7 +56,7 @@ Obs 1 (现象)  →  Obs 2 (调制)  →  Obs 3 (后果)  →  Obs 4 (收益)  �
 |------|------|
 | 布局 | 2×2 heatmap：上排 Decode (a) A ratio, (b) F ratio；下排 Prefill (c) A ratio, (d) F ratio |
 | X 轴 | TP = {1, 2, 4, 8} |
-| Y 轴 | Batch Size = {1, 4, 16, 64, 128} |
+| Y 轴 | Batch Size = {1, 4, 16, 64, 128, 256} |
 | 颜色 | ratio = lat@1410 / lat@210，红色 = 敏感（compute-bound），蓝色 = 不敏感（memory-bound） |
 | 固定配置 | Decode: il=1024, ol=64；Prefill: il=128 |
 
