@@ -1,0 +1,29 @@
+{
+  "bench_stage": "P",
+  "model_path": "/mnt/nvme1/models/Qwen/Qwen3-32B/",
+  "gpus": "0,1,2,3,4,5,6,7",
+  "output_lens": [1],
+  "work_dir": "bash-test/pd_batch_work_p_small",
+  "log_dir": "bash-test/pd_batch_logs_p_small",
+  "final_csv": "bash-test/pd_latency_big_table_p_small.csv",
+  "mode": "both",
+  "port_base": 30002,
+  "sync_bench_num_iters": 50,
+  "sync_bench_warmup_iters": 10,
+  "bench_energy": true,
+  "max_background_jobs": 1,
+  "keep_processed": true,
+  "skip_done_wide_csv": "bash-test/P_data/P_data.csv",
+  "defaults": {
+    "gpu_clock": [210, 450, 690, 930, 1170, 1410],
+    "input_len": [128, 256, 384, 512, 640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2304, 2560, 2816, 3072, 3328, 3584, 3840, 4096],
+    "batch_size": [1, 2, 4, 8, 16, 32, 64, 128, 256]
+  },
+  "tp_list": [8, 4, 2, 1],
+  "runs": [
+    { "tp": 8 },
+    { "tp": 4 },
+    { "tp": 2 },
+    { "tp": 1 }
+  ]
+}
