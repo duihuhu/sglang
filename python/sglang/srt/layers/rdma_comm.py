@@ -59,6 +59,8 @@ class _FifoTensorCommunicatorBase(ABC):
 
 logger = logging.getLogger(__name__)
 
+_EAGER_INIT = False
+
 
 # ---- Dtype mapping ----
 
@@ -441,6 +443,7 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
         self._bridge = _AsyncBridge()
         self._pool = _BufferPool()
         self._tp_group = None
+        self._skip_warmup = getattr(__import__(__name__), '_EAGER_INIT', False)
 
         self._p2p: Optional[_UcxP2PCommunicator] = None
         self._pending_num_tokens: deque = deque()
@@ -478,6 +481,9 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
 
     def _warmup_buffer_pool(self):
         """Pre-allocate recv buffers based on model config if available."""
+        if getattr(self, "_skip_warmup", False):
+            logger.info("UcxTensorCommunicator: skipping buffer pool warmup (eager init)")
+            return
         try:
             server_args = None
             try:

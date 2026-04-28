@@ -392,12 +392,28 @@ class SchedulerDisaggregationPrefillMixin:
         )
         SchedulerAFDMixin.afd_init_state(self)
 
+        # Eager-init UCX communicator: FFN listens, Attn connects.
+        # Both sides must init together for the handshake to succeed.
+        from sglang.srt.layers.afd import get_async_communicator
+        try:
+            get_async_communicator()
+            logger.info("event_loop_afd_disagg_prefill: UCX communicator ready")
+        except Exception as e:
+            logger.error("event_loop_afd_disagg_prefill: AF communicator init failed: %s", e)
+            raise RuntimeError(
+                f"AF communicator init failed — cannot run AFD disagg prefill without it: {e}"
+            ) from e
+
         while True:
             recv_reqs = self.recv_requests()
             extra_reqs = SchedulerAFDMixin.afd_recv_messages(self)
             if extra_reqs:
                 recv_reqs = recv_reqs + extra_reqs
-            if self.tp_size > 1 and not self.server_args.enable_dp_attention:
+
+            if recv_reqs:
+                logger.info("afd_disagg_prefill: recv %d reqs: %s",
+                            len(recv_reqs), [type(r).__name__ for r in recv_reqs])
+            if afd_is_ffn() and self.tp_size > 1 and not self.server_args.enable_dp_attention:
                 from sglang.srt.utils.common import broadcast_pyobj
 
                 recv_reqs = broadcast_pyobj(
@@ -407,27 +423,48 @@ class SchedulerDisaggregationPrefillMixin:
                     src=self.tp_group.ranks[0],
                 )
             SchedulerAFDMixin.afd_forward_work_requests(self, recv_reqs)
-            self.process_input_requests(recv_reqs)
-            self.waiting_queue.extend(
-                self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
-            )
+
+            # Filter out AFDReqInput before passing to process_input_requests
+            # (FFN side receives these from Attn via afd_recv_messages)
+            from sglang.srt.managers.io_struct import AFDReqInput as _AFDReqInput
+            for req in recv_reqs:
+                if isinstance(req, _AFDReqInput):
+                    pending = getattr(self, "_afd_pending_batch_infos", None)
+                    if pending is not None:
+                        pending.append(req)
+                    if self._afd_batchsize_attn is None:
+                        self._afd_batchsize_attn = req.batch_size
+                        self._afd_forward_mode = req.forward_mode
+                        self._afd_req_ids = req.req_ids
+            filtered_reqs = [r for r in recv_reqs if not isinstance(r, _AFDReqInput)]
+            self.process_input_requests(filtered_reqs)
+            if not afd_is_ffn():
+                bootstrapped = self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
+                if bootstrapped:
+                    logger.info("afd_disagg_prefill: %d reqs bootstrapped", len(bootstrapped))
+                self.waiting_queue.extend(bootstrapped)
 
             if SchedulerAFDMixin.afd_ffn_should_wait(self):
                 continue
 
             batch = self.get_next_disagg_prefill_batch_to_run()
+            if batch:
+                logger.info("afd_disagg_prefill: got batch bs=%d mode=%s",
+                            batch.batch_size(), batch.forward_mode)
             self.cur_batch = batch
 
             if batch:
                 SchedulerAFDMixin.afd_send_batch_info(self, batch)
                 SchedulerAFDMixin.afd_prepare_overlap(self, batch)
+                self._afd_dvfs_before_batch(batch)
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
                 SchedulerAFDMixin.afd_reset_state(self)
             else:
                 self.self_check_during_idle()
 
-            self.process_disagg_prefill_inflight_queue()
+            if not afd_is_ffn():
+                self.process_disagg_prefill_inflight_queue()
             self.last_batch = batch
 
     @torch.no_grad()
@@ -475,6 +512,7 @@ class SchedulerDisaggregationPrefillMixin:
         batch: ScheduleBatch,
         result: GenerationBatchResult,
     ) -> None:
+        from sglang.srt.layers.afd import afd_is_ffn as _is_ffn
         """
         Transfer kv for prefill completed requests and add it into disagg_prefill_inflight_queue
         Adapted from process_batch_result_prefill
@@ -518,7 +556,13 @@ class SchedulerDisaggregationPrefillMixin:
                 # There is no output_ids for prefill
                 req.output_ids.append(next_token_id)
                 self.tree_cache.cache_unfinished_req(req)  # update the tree and lock
-                self.disagg_prefill_inflight_queue.append(req)
+                # FFN side doesn't do KV transfer — skip inflight queue
+                if not _is_ffn():
+                    self.disagg_prefill_inflight_queue.append(req)
+                else:
+                    # FFN side: release KV cache and finish immediately
+                    release_kv_cache(req, self.tree_cache)
+                    req.finished_reason = FINISH_LENGTH(length=0)
                 if self.spec_algorithm.is_eagle() and batch.spec_info is not None:
                     req.output_topk_p = batch.spec_info.topk_p[i]
                     req.output_topk_index = batch.spec_info.topk_index[i]
@@ -542,8 +586,11 @@ class SchedulerDisaggregationPrefillMixin:
                         logits_output,
                     )
                     logprob_pt += num_input_logprobs
-                self.send_kv_chunk(req, last_chunk=True)
-                req.time_stats.set_prefill_transfer_queue_entry_time()
+                # FFN side doesn't do KV transfer — only Attn side sends KV.
+                from sglang.srt.layers.afd import afd_is_ffn as _is_ffn
+                if not _is_ffn():
+                    self.send_kv_chunk(req, last_chunk=True)
+                    req.time_stats.set_prefill_transfer_queue_entry_time()
 
                 if req.grammar is not None:
                     # FIXME: this try-except block is for handling unexpected xgrammar issue.
@@ -581,7 +628,8 @@ class SchedulerDisaggregationPrefillMixin:
                         logprob_pt += num_input_logprobs
 
                 if self.enable_overlap:
-                    self.send_kv_chunk(req, last_chunk=False, end_idx=req.tmp_end_idx)
+                    if not _is_ffn():
+                        self.send_kv_chunk(req, last_chunk=False, end_idx=req.tmp_end_idx)
                 req.time_stats.set_last_chunked_prefill_finish_time()
 
         can_run_cuda_graph = getattr(result, "can_run_cuda_graph", False)

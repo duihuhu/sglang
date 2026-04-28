@@ -1038,7 +1038,7 @@ class SchedulerDisaggregationDecodeMixin:
     @torch.no_grad()
     def event_loop_afd_disagg_decode(self: Scheduler):
         """Disagg decode event loop with AFD (Attention-FFN Disaggregation)."""
-        from sglang.srt.layers.afd import get_afd_perspective
+        from sglang.srt.layers.afd import afd_is_ffn, get_afd_perspective
         from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
 
         logger.info(
@@ -1046,12 +1046,25 @@ class SchedulerDisaggregationDecodeMixin:
         )
         SchedulerAFDMixin.afd_init_state(self)
 
+        # Eager-init UCX communicator so FFN listener is ready before
+        # Attn side attempts to connect during PD warmup.
+        # Both sides must init together: FFN listens, Attn connects.
+        from sglang.srt.layers.afd import get_async_communicator
+        try:
+            get_async_communicator()
+            logger.info("event_loop_afd_disagg_decode: UCX communicator ready")
+        except Exception as e:
+            logger.error("event_loop_afd_disagg_decode: AF communicator init failed: %s", e)
+            raise RuntimeError(
+                f"AF communicator init failed — cannot run AFD disagg decode without it: {e}"
+            ) from e
+
         while True:
             recv_reqs = self.recv_requests()
             extra_reqs = SchedulerAFDMixin.afd_recv_messages(self)
             if extra_reqs:
                 recv_reqs = recv_reqs + extra_reqs
-            if self.tp_size > 1 and not self.server_args.enable_dp_attention:
+            if afd_is_ffn() and self.tp_size > 1 and not self.server_args.enable_dp_attention:
                 from sglang.srt.utils.common import broadcast_pyobj
 
                 recv_reqs = broadcast_pyobj(
@@ -1061,7 +1074,20 @@ class SchedulerDisaggregationDecodeMixin:
                     src=self.tp_group.ranks[0],
                 )
             SchedulerAFDMixin.afd_forward_work_requests(self, recv_reqs)
-            self.process_input_requests(recv_reqs)
+
+            # Filter out AFDReqInput before passing to process_input_requests
+            from sglang.srt.managers.io_struct import AFDReqInput as _AFDReqInput
+            for req in recv_reqs:
+                if isinstance(req, _AFDReqInput):
+                    pending = getattr(self, "_afd_pending_batch_infos", None)
+                    if pending is not None:
+                        pending.append(req)
+                    if self._afd_batchsize_attn is None:
+                        self._afd_batchsize_attn = req.batch_size
+                        self._afd_forward_mode = req.forward_mode
+                        self._afd_req_ids = req.req_ids
+            filtered_reqs = [r for r in recv_reqs if not isinstance(r, _AFDReqInput)]
+            self.process_input_requests(filtered_reqs)
             self.process_decode_queue()
 
             if SchedulerAFDMixin.afd_ffn_should_wait(self):
@@ -1073,6 +1099,7 @@ class SchedulerDisaggregationDecodeMixin:
             if batch:
                 SchedulerAFDMixin.afd_send_batch_info(self, batch)
                 SchedulerAFDMixin.afd_prepare_overlap(self, batch)
+                self._afd_dvfs_before_batch(batch)
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
                 SchedulerAFDMixin.afd_reset_state(self)

@@ -950,6 +950,11 @@ class AFDReqInput(BaseReq):
     req_ids: Optional[List[str]] = None
     seq_lens: Optional[List[int]] = None
     extend_lens: Optional[List[int]] = None
+    max_input_len: Optional[int] = None
+    repr_output_len: Optional[int] = None
+    # For PD+AF decode: FFN needs the first output token from prefill
+    # so fill_ids matches Attn side (origin_input_ids + output_ids).
+    output_ids_per_req: Optional[List[List[int]]] = None
 
 
 @dataclass

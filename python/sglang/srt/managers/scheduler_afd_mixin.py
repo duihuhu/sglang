@@ -89,6 +89,14 @@ class SchedulerAFDMixin:
             extend_lens=(
                 batch.extend_lens if hasattr(batch, "extend_lens") else None
             ),
+            max_input_len=max(
+                (r.extend_input_len for r in batch.reqs), default=0
+            ),
+            repr_output_len=int(sum(
+                max(r.seqlen - len(r.origin_input_ids), 1) for r in batch.reqs
+            ) / max(len(batch.reqs), 1)) if batch.reqs else 1,
+            # PD+AF decode: FFN needs output_ids so fill_ids matches Attn side
+            output_ids_per_req=[list(r.output_ids) for r in batch.reqs],
         )
         send_socket.send_pyobj(afd_req)
 
@@ -118,6 +126,7 @@ class SchedulerAFDMixin:
         from sglang.srt.layers.afd import afd_is_attn
         from sglang.srt.managers.io_struct import (
             AFDReqInput,
+            BatchTokenizedGenerateReqInput,
             TokenizedEmbeddingReqInput,
             TokenizedGenerateReqInput,
         )
@@ -131,7 +140,10 @@ class SchedulerAFDMixin:
         for recv_req in recv_reqs:
             if isinstance(recv_req, AFDReqInput):
                 continue
-            if isinstance(
+            if isinstance(recv_req, BatchTokenizedGenerateReqInput):
+                for sub_req in recv_req:
+                    send_socket.send_pyobj(sub_req)
+            elif isinstance(
                 recv_req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)
             ):
                 send_socket.send_pyobj(recv_req)
@@ -139,4 +151,5 @@ class SchedulerAFDMixin:
     def afd_reset_state(self: "Scheduler"):
         """Reset per-iteration AFD state after processing a batch."""
         self._afd_batchsize_attn = None
+        self._afd_forward_mode = None
         self._afd_req_ids = None

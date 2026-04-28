@@ -19,6 +19,14 @@ def start_disagg_service(
     transfer_backend = TransferBackend(server_args.disaggregation_transfer_backend)
 
     if disagg_mode == DisaggregationMode.PREFILL:
+        # In AFD mode, only the Attn side starts the bootstrap server
+        # to avoid port conflicts between Attn and FFN processes.
+        afd_perspective = getattr(server_args, "afd_perspective", None)
+        if afd_perspective is not None:
+            from sglang.srt.layers.afd_type import AFDPerspective
+            if afd_perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
+                return None
+
         # only start bootstrap server on prefill tm
         kv_bootstrap_server_class = get_kv_class(
             transfer_backend, KVClassType.BOOTSTRAP_SERVER

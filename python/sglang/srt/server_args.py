@@ -638,6 +638,12 @@ class ServerArgs:
     afd_comm_backend: Optional[str] = None
     afd_enable_overlap_schedule: bool = False
 
+    # Energy-aware DVFS (Tier 2)
+    afd_energy_model_dir: Optional[str] = None
+    afd_dvfs_enabled: bool = False
+    afd_ttft_slo_ms: float = 5000.0
+    afd_tpot_slo_us: float = 50000.0
+
     enable_torch_compile: bool = False
     disable_piecewise_cuda_graph: bool = False
     enforce_piecewise_cuda_graph: bool = False
@@ -3232,12 +3238,29 @@ class ServerArgs:
                     "is incompatible with serial event_loop_afd). "
                     "Use --afd-enable-overlap-schedule to enable AFD-aware overlap."
                 )
+
+            if self.afd_dvfs_enabled:
+                if not self.afd_energy_model_dir:
+                    raise ValueError(
+                        "--afd-dvfs-enabled requires --afd-energy-model-dir."
+                    )
+                logger.info(
+                    "AFD DVFS enabled: energy model dir=%s, TTFT SLO=%.0f ms, TPOT SLO=%.0f us",
+                    self.afd_energy_model_dir,
+                    self.afd_ttft_slo_ms,
+                    self.afd_tpot_slo_us,
+                )
         else:
             if self.afd_enable_overlap_schedule:
                 logger.warning(
                     "--afd-enable-overlap-schedule requires --afd-perspective, ignoring."
                 )
                 self.afd_enable_overlap_schedule = False
+            if self.afd_dvfs_enabled:
+                logger.warning(
+                    "--afd-dvfs-enabled requires --afd-perspective, ignoring."
+                )
+                self.afd_dvfs_enabled = False
 
     def _validate_ib_devices(self, device_str: str) -> Optional[str]:
         """
@@ -5438,6 +5461,32 @@ class ServerArgs:
             help="Enable CPU/GPU overlap scheduling in AFD event loop. "
             "CPU scheduling runs in parallel with GPU batch execution for ~5-10%% throughput improvement. "
             "Requires --afd-perspective.",
+        )
+        parser.add_argument(
+            "--afd-energy-model-dir",
+            type=str,
+            default=ServerArgs.afd_energy_model_dir,
+            help="Directory containing energy model pkl files (from energy_model.py). "
+            "Required when --afd-dvfs-enabled is set.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-enabled",
+            action="store_true",
+            default=ServerArgs.afd_dvfs_enabled,
+            help="Enable Tier 2 energy-aware DVFS for AF-disaggregated serving. "
+            "Requires --afd-perspective and --afd-energy-model-dir.",
+        )
+        parser.add_argument(
+            "--afd-ttft-slo-ms",
+            type=float,
+            default=ServerArgs.afd_ttft_slo_ms,
+            help="TTFT SLO in milliseconds for Prefill DVFS. Default: 5000.",
+        )
+        parser.add_argument(
+            "--afd-tpot-slo-us",
+            type=float,
+            default=ServerArgs.afd_tpot_slo_us,
+            help="TPOT SLO in microseconds for Decode DVFS. Default: 50000.",
         )
 
         parser.add_argument(

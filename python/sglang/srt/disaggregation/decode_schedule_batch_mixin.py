@@ -24,6 +24,7 @@ class ScheduleBatchDisaggregationDecodeMixin:
         Prepare a prebuilt extend by populate metadata
         Adapted from .prepare_for_extend().
         """
+        from sglang.srt.layers.afd import afd_is_ffn
 
         self.forward_mode = ForwardMode.PREBUILT
         reqs = self.reqs
@@ -35,36 +36,66 @@ class ScheduleBatchDisaggregationDecodeMixin:
 
         # Pre-calculate total size
         total_size = sum(req.extend_input_len for req in reqs)
-        out_cache_loc = torch.empty(total_size, dtype=torch.int64, device=self.device)
+        is_ffn = afd_is_ffn()
 
-        # Fill the tensor in one pass
-        offset = 0
-        for i, req in enumerate(reqs):
-            req_pool_indices.append(req.req_pool_idx)
+        if is_ffn:
+            # FFN side: use alloc_for_extend so req_to_token gets valid
+            # KV-slot indices (init_forward_metadata reads them even though
+            # the proxy attention never touches KV data).
+            from sglang.srt.mem_cache.common import alloc_for_extend
 
-            chunk = self.req_to_token_pool.req_to_token[req.req_pool_idx][
-                : req.extend_input_len
-            ]
-            assert (
-                offset + req.extend_input_len <= total_size
-            ), f"Exceeds total size: offset={offset}, req.extend_input_len={req.extend_input_len}, total_size={total_size}"
-            out_cache_loc[offset : offset + req.extend_input_len] = chunk
-            offset += req.extend_input_len
+            for req in reqs:
+                pre_len = len(req.prefix_indices)
+                seq_len = len(req.origin_input_ids) + max(
+                    0, len(req.output_ids) - 1
+                )
+                seq_lens.append(seq_len)
+                pre_lens.append(pre_len)
+                req.extend_logprob_start_len = 0
 
-            pre_len = len(req.prefix_indices)
-            seq_len = len(req.origin_input_ids) + max(0, len(req.output_ids) - 1)
-            seq_lens.append(seq_len)
-            if len(req.output_ids) == 0:
+            # Populate batch fields needed by alloc_for_extend
+            self.prefix_lens = pre_lens
+            self.seq_lens = torch.tensor(seq_lens, dtype=torch.int64, device=self.device)
+            self.seq_lens_cpu = torch.tensor(seq_lens, dtype=torch.int64)
+            self.extend_lens = [req.extend_input_len for req in reqs]
+            self.extend_num_tokens = extend_num_tokens
+
+            out_cache_loc, _, req_pool_indices = alloc_for_extend(self)
+        else:
+            out_cache_loc = torch.empty(
+                total_size, dtype=torch.int64, device=self.device
+            )
+
+            # Fill the tensor in one pass
+            offset = 0
+            for i, req in enumerate(reqs):
+                req_pool_indices.append(req.req_pool_idx)
+
+                chunk = self.req_to_token_pool.req_to_token[req.req_pool_idx][
+                    : req.extend_input_len
+                ]
                 assert (
-                    seq_len - pre_len == req.extend_input_len
-                ), f"seq_len={seq_len}, pre_len={pre_len}, req.extend_input_len={req.extend_input_len}"
+                    offset + req.extend_input_len <= total_size
+                ), f"Exceeds total size: offset={offset}, req.extend_input_len={req.extend_input_len}, total_size={total_size}"
+                out_cache_loc[offset : offset + req.extend_input_len] = chunk
+                offset += req.extend_input_len
 
-            if not req.retracted_stain:
-                req.cached_tokens += pre_len - req.already_computed
-                req.already_computed = seq_len
-            req.is_retracted = False
-            pre_lens.append(pre_len)
-            req.extend_logprob_start_len = 0
+                pre_len = len(req.prefix_indices)
+                seq_len = len(req.origin_input_ids) + max(
+                    0, len(req.output_ids) - 1
+                )
+                seq_lens.append(seq_len)
+                if len(req.output_ids) == 0:
+                    assert (
+                        seq_len - pre_len == req.extend_input_len
+                    ), f"seq_len={seq_len}, pre_len={pre_len}, req.extend_input_len={req.extend_input_len}"
+
+                if not req.retracted_stain:
+                    req.cached_tokens += pre_len - req.already_computed
+                    req.already_computed = seq_len
+                req.is_retracted = False
+                pre_lens.append(pre_len)
+                req.extend_logprob_start_len = 0
 
         extend_input_logprob_token_ids = None
 

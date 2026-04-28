@@ -517,6 +517,14 @@ class Scheduler(
                     context, zmq.PULL, afd_ipc, True
                 )
 
+        # AFD DVFS (Tier 2 energy-aware frequency scaling)
+        self._af_dvfs_ctrl = None
+        self._dvfs_hw = None
+        self._cur_f_a = 1410
+        self._cur_f_f = 1410
+        if getattr(self.server_args, "afd_dvfs_enabled", False):
+            self._init_afd_dvfs(self.server_args)
+
     def init_tokenizer(self):
         server_args = self.server_args
         self.is_generation = self.model_config.is_generation
@@ -939,6 +947,16 @@ class Scheduler(
             self.server_args.disaggregation_transfer_backend
         )
 
+        # FFN side in AFD mode does not participate in KV cache transfer,
+        # but needs disagg queues for batch scheduling (prebuilt path).
+        # Skip KV manager creation (no bootstrap/ZMQ) but keep everything else.
+        from sglang.srt.layers.afd import afd_is_ffn as _afd_is_ffn_disagg
+        _is_ffn = _afd_is_ffn_disagg()
+
+        if _is_ffn:
+            self._init_disagg_ffn_stubs()
+            return
+
         if self.draft_worker is None or self.spec_algorithm.is_ngram():
             draft_token_to_kv_pool = None
         elif self.spec_algorithm.supports_spec_v2() and self.enable_overlap:
@@ -1062,6 +1080,37 @@ class Scheduler(
                 tp_group=self.tp_group,
                 scheduler=self,
             )
+
+    def _init_disagg_ffn_stubs(self):
+        """Set stub attributes for FFN side so metrics/stats code doesn't crash.
+
+        FFN does not participate in KV cache transfer, but shared code paths
+        (report_prefill_stats, self_check_during_idle, abort handling, etc.)
+        may reference these attributes.
+        """
+
+        class _StubQueue:
+            """Minimal stub that mimics queue-like attributes."""
+            queue = []
+            retracted_queue = []
+            num_tokens_pre_allocated = 0
+
+            @staticmethod
+            def pop_bootstrapped():
+                return []
+
+            @staticmethod
+            def add(*args, **kwargs):
+                pass
+
+            @staticmethod
+            def resume_retracted_reqs():
+                return []
+
+        self.disagg_prefill_bootstrap_queue = _StubQueue()
+        self.disagg_prefill_inflight_queue = []
+        self.disagg_decode_prealloc_queue = _StubQueue()
+        self.disagg_decode_transfer_queue = _StubQueue()
 
     def init_overlap(self):
         self.device_module = torch.get_device_module(self.device)
@@ -1307,16 +1356,33 @@ class Scheduler(
         )
         from sglang.srt.managers.io_struct import AFDReqInput
         from sglang.srt.model_executor.forward_batch_info import ForwardMode
+        from sglang.srt.disaggregation.utils import DisaggregationMode
+
+        disagg_mode = self.disaggregation_mode
 
         logger.info(
-            "event_loop_afd: role=%s m=%s",
+            "event_loop_afd: role=%s m=%s disagg=%s",
             get_afd_perspective(),
             get_afd_micro_batch(),
+            disagg_mode,
         )
 
         self._afd_batchsize_attn = None
         self._afd_forward_mode = None
         self._afd_req_ids = None
+
+        # Eager-init AF communicator (UCX/StepMesh) so FFN listener is
+        # ready before Attn attempts to connect.
+        from sglang.srt.layers.afd import get_async_communicator
+        try:
+            get_async_communicator()
+            logger.info("event_loop_afd: AF communicator ready (%s)",
+                        get_afd_perspective())
+        except Exception as e:
+            logger.error("event_loop_afd: AF communicator init failed: %s", e)
+            raise RuntimeError(
+                f"AF communicator init failed in event_loop_afd: {e}"
+            ) from e
 
         # S2: use Poller instead of busy-wait
         afd_poller = None
@@ -1404,7 +1470,7 @@ class Scheduler(
                     afd_poller.poll(timeout=10)
                 continue
 
-            batch = self.get_next_batch_to_run()
+            batch = self._afd_get_next_batch(disagg_mode)
             self.cur_batch = batch
             disable_overlap_for_batch = False
 
@@ -1425,9 +1491,16 @@ class Scheduler(
                         extend_lens=batch.extend_lens
                         if hasattr(batch, "extend_lens")
                         else None,
+                        max_input_len=max(
+                            (r.extend_input_len for r in batch.reqs), default=0
+                        ),
+                        repr_output_len=int(sum(
+                            max(r.seqlen - len(r.origin_input_ids), 1) for r in batch.reqs
+                        ) / max(len(batch.reqs), 1)) if batch.reqs else 1,
                     )
                     self.afd_send_to_ffn.send_pyobj(afd_req)
 
+                self._afd_dvfs_before_batch(batch)
                 _prepare_afd_overlap(batch)
                 batch_result = self.run_batch(batch)
 
@@ -1438,10 +1511,12 @@ class Scheduler(
 
                 # Reset AFD state for next iteration
                 self._afd_batchsize_attn = None
+                self._afd_forward_mode = None
                 self._afd_req_ids = None
             else:
                 batch_result = None
                 self._afd_batchsize_attn = None
+                self._afd_forward_mode = None
                 self._afd_req_ids = None
                 if afd_overlap:
                     self.cancel_bubble_timer()
@@ -1459,6 +1534,112 @@ class Scheduler(
                     self.launch_batch_sample_if_needed(batch_result)
 
             self.last_batch = batch
+
+    def _afd_get_next_batch(self, disagg_mode):
+        """Select the correct batch scheduling function based on disagg mode.
+
+        Both Attn and FFN sides must use the same disagg-specific batch
+        scheduling to keep forward_mode perfectly in sync:
+        - DECODE: get_next_disagg_decode_batch_to_run (prebuilt → decode).
+        - PREFILL: get_next_disagg_prefill_batch_to_run.
+        - NULL: standard get_next_batch_to_run.
+        """
+        from sglang.srt.disaggregation.utils import DisaggregationMode
+
+        if disagg_mode == DisaggregationMode.PREFILL:
+            return self.get_next_disagg_prefill_batch_to_run()
+        elif disagg_mode == DisaggregationMode.DECODE:
+            return self.get_next_disagg_decode_batch_to_run()
+        else:
+            return self.get_next_batch_to_run()
+
+    def _init_afd_dvfs(self, server_args):
+        """Initialize Tier 2 DVFS components (predictor + controller + HW)."""
+        try:
+            from sglang.srt.energy.af_profile_predictor import AFProfilePredictor
+            from sglang.srt.energy.af_dvfs_controller import AFDVFSController
+
+            predictor = AFProfilePredictor(server_args.afd_energy_model_dir)
+            self._af_dvfs_ctrl = AFDVFSController(
+                predictor=predictor,
+                num_layers=self.model_config.num_hidden_layers,
+                tp=server_args.tp_size,
+            )
+            logger.info("AFD DVFS controller initialized")
+        except Exception as e:
+            logger.warning("Failed to init AFD DVFS controller: %s", e)
+            self._af_dvfs_ctrl = None
+            return
+
+        try:
+            from sglang.srt.layers.dvfs import DVFSController
+            import torch
+            self._dvfs_hw = DVFSController(
+                device_index=torch.cuda.current_device()
+            )
+            logger.info("DVFS HW controller initialized on GPU %d", torch.cuda.current_device())
+        except Exception as e:
+            logger.warning("DVFS HW unavailable (libdvfs_ctrl.so missing?): %s. "
+                           "Frequency decisions will be logged but not applied.", e)
+            self._dvfs_hw = None
+
+    def _compute_prefill_slack(self, batch) -> float:
+        """Compute tightest TTFT slack (us) across all requests in batch."""
+        slo_us = self.server_args.afd_ttft_slo_ms * 1000
+        min_slack = slo_us
+        now = time.perf_counter()
+        for req in batch.reqs:
+            ts = getattr(req, "time_stats", None)
+            dispatch_t = getattr(ts, "api_server_dispatch_time", 0.0) if ts else 0.0
+            if dispatch_t > 0:
+                elapsed = (now - dispatch_t) * 1e6
+                min_slack = min(min_slack, slo_us - elapsed)
+        return max(min_slack, 0)
+
+    def _apply_freq(self, f_a: int, f_f: int):
+        """Apply frequency via NVML. Each process only controls its own GPU."""
+        from sglang.srt.layers.afd import afd_is_attn
+        target_f = f_a if afd_is_attn() else f_f
+        if self._dvfs_hw is not None:
+            self._dvfs_hw.lock_sm_clock(target_f)
+        self._cur_f_a = f_a
+        self._cur_f_f = f_f
+
+    def _afd_dvfs_before_batch(self, batch):
+        """Select and apply frequency before running a batch."""
+        if self._af_dvfs_ctrl is None:
+            return
+        from sglang.srt.layers.afd import get_afd_micro_batch
+        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+
+        M = get_afd_micro_batch()
+
+        if batch.forward_mode == ForwardMode.EXTEND:
+            slack_us = self._compute_prefill_slack(batch)
+            max_il = max(
+                (r.extend_input_len for r in batch.reqs), default=1024
+            )
+            decision = self._af_dvfs_ctrl.select_freq_prefill(
+                bs=batch.batch_size(), il=max_il,
+                slack_us=slack_us, M=M,
+            )
+            if decision.f_a != self._cur_f_a or decision.f_f != self._cur_f_f:
+                self._apply_freq(decision.f_a, decision.f_f)
+
+        elif batch.forward_mode.is_decode():
+            self._af_dvfs_ctrl.tick_decode_iteration()
+            if self._af_dvfs_ctrl.should_reevaluate_decode(batch.batch_size()):
+                repr_il = int(sum(len(r.origin_input_ids) for r in batch.reqs) / max(len(batch.reqs), 1))
+                repr_ol = int(sum(
+                    (r.seqlen - len(r.origin_input_ids)) for r in batch.reqs
+                ) / max(len(batch.reqs), 1))
+                repr_ol = max(repr_ol, 1)
+                decision = self._af_dvfs_ctrl.select_freq_decode(
+                    bs=batch.batch_size(), il=repr_il, ol=repr_ol,
+                    slo_tpot_us=self.server_args.afd_tpot_slo_us, M=M,
+                )
+                if decision.switched:
+                    self._apply_freq(decision.f_a, decision.f_f)
 
     def _afd_process_input_requests(self, recv_reqs):
         """Process input requests with AFD awareness (S1, S4).
@@ -1488,6 +1669,11 @@ class Scheduler(
             self._afd_forward_mode = afd_req.forward_mode
             self._afd_req_ids = afd_req.req_ids
 
+            # PD+AF decode: sync output_ids from Attn to FFN so fill_ids
+            # (origin_input_ids + output_ids) match and AF tensor shapes align.
+            if afd_req.output_ids_per_req and afd_req.req_ids:
+                self._afd_sync_output_ids(afd_req)
+
         for recv_req in recv_reqs:
             if isinstance(recv_req, AFDReqInput):
                 continue
@@ -1507,6 +1693,31 @@ class Scheduler(
             filtered_reqs.append(recv_req)
 
         self.process_input_requests(filtered_reqs)
+
+    def _afd_sync_output_ids(self, afd_req):
+        """Sync output_ids from Attn→FFN so fill_ids match for AF communication.
+
+        In PD+AF decode, Attn side has output_ids (from prefill's first token)
+        but FFN side doesn't. Without syncing, FFN's fill_ids is shorter by 1,
+        causing tensor shape mismatch in AF communication.
+        """
+        rid_to_oids = dict(zip(afd_req.req_ids, afd_req.output_ids_per_req))
+
+        # Sync to waiting_queue requests
+        for req in self.waiting_queue:
+            oids = rid_to_oids.get(req.rid)
+            if oids is not None and len(req.output_ids) < len(oids):
+                req.output_ids = list(oids)
+                req.fill_ids = req.origin_input_ids + req.output_ids
+                req.set_extend_input_len(len(req.fill_ids))
+
+        # Sync to running_batch requests
+        if self.running_batch is not None:
+            for req in self.running_batch.reqs:
+                oids = rid_to_oids.get(req.rid)
+                if oids is not None and len(req.output_ids) < len(oids):
+                    req.output_ids = list(oids)
+                    req.fill_ids = req.origin_input_ids + req.output_ids
 
     @DynamicGradMode()
     def event_loop_overlap(self):
@@ -2079,17 +2290,38 @@ class Scheduler(
             self.waiting_queue.append(req)
             req.time_stats.set_wait_queue_entry_time()
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
-            self._prefetch_kvcache(req)
-            self.disagg_prefill_bootstrap_queue.add(
-                req, self.model_config.num_key_value_heads
-            )
-            req.time_stats.set_prefill_bootstrap_queue_entry_time()
-        elif self.disaggregation_mode == DisaggregationMode.DECODE:
-            self.disagg_decode_prealloc_queue.add(req, is_retracted=is_retracted)
-            if not is_retracted:
-                req.time_stats.set_decode_prealloc_queue_entry_time()
+            # In AFD mode, FFN side doesn't do KV transfer — skip bootstrap
+            # queue and go straight to waiting_queue.
+            from sglang.srt.layers.afd import afd_is_ffn
+            if afd_is_ffn():
+                self._prefetch_kvcache(req)
+                req.sampling_params.max_new_tokens = 1
+                self.waiting_queue.append(req)
+                req.time_stats.set_wait_queue_entry_time()
             else:
-                req.time_stats.set_retract_time()
+                self._prefetch_kvcache(req)
+                self.disagg_prefill_bootstrap_queue.add(
+                    req, self.model_config.num_key_value_heads
+                )
+                req.time_stats.set_prefill_bootstrap_queue_entry_time()
+        elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            # In AFD mode, FFN side runs event_loop_afd (non-disagg) and needs
+            # requests in waiting_queue directly.
+            from sglang.srt.layers.afd import afd_is_ffn as _afd_is_ffn_decode
+            if _afd_is_ffn_decode():
+                self._prefetch_kvcache(req)
+                # Set extend_input_len so get_new_batch_prefill builds a
+                # valid EXTEND batch (without this it stays 0 → empty logits
+                # → CUDA assert in sampling).
+                req.set_extend_input_len(len(req.fill_ids))
+                self.waiting_queue.append(req)
+                req.time_stats.set_wait_queue_entry_time()
+            else:
+                self.disagg_decode_prealloc_queue.add(req, is_retracted=is_retracted)
+                if not is_retracted:
+                    req.time_stats.set_decode_prealloc_queue_entry_time()
+                else:
+                    req.time_stats.set_retract_time()
         else:
             raise ValueError(f"Invalid {self.disaggregation_mode=}")
 
@@ -3519,8 +3751,10 @@ def dispatch_event_loop(scheduler: Scheduler):
         else:
             scheduler.event_loop_normal()
     elif disaggregation_mode == DisaggregationMode.PREFILL:
-        if afd_is_attn() or afd_is_ffn():
+        if afd_is_attn():
             scheduler.event_loop_afd_disagg_prefill()
+        elif afd_is_ffn():
+            scheduler.event_loop_afd()
         elif server_args.pp_size > 1:
             scheduler.event_loop_pp_disagg_prefill()
         elif scheduler.enable_overlap:
@@ -3528,8 +3762,10 @@ def dispatch_event_loop(scheduler: Scheduler):
         else:
             scheduler.event_loop_normal_disagg_prefill()
     elif disaggregation_mode == DisaggregationMode.DECODE:
-        if afd_is_attn() or afd_is_ffn():
+        if afd_is_attn():
             scheduler.event_loop_afd_disagg_decode()
+        elif afd_is_ffn():
+            scheduler.event_loop_afd()
         elif server_args.pp_size > 1:
             scheduler.event_loop_pp_disagg_decode()
         elif scheduler.enable_overlap:

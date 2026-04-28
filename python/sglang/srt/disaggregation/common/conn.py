@@ -139,7 +139,16 @@ class CommonKVManager(BaseKVManager):
                 and self.attn_cp_size > 1
                 and self.attn_cp_rank != 0
             )
-            self.register_to_bootstrap()
+            # In AFD mode, only Attn side runs the bootstrap server and registers.
+            # FFN side skips registration to avoid connection errors.
+            _skip_bootstrap = False
+            try:
+                from sglang.srt.layers.afd import afd_is_ffn
+                _skip_bootstrap = afd_is_ffn()
+            except Exception:
+                pass
+            if not _skip_bootstrap:
+                self.register_to_bootstrap()
             self.transfer_infos = {}
             self.decode_kv_args_table = {}
             self.pp_group = get_pp_group()

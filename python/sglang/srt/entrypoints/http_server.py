@@ -1869,43 +1869,49 @@ def _execute_server_warmup(server_args: ServerArgs):
             _global_state.tokenizer_manager.server_status = ServerStatus.Up
 
         else:
-            logger.info(f"Start of pd disaggregation warmup ...")
-            json_data = {
-                "sampling_params": {
-                    "temperature": 0.0,
-                    "max_new_tokens": 8,
-                    "ignore_eos": True,
-                },
-                "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
-                # This is a hack to ensure fake transfer is enabled during prefill warmup
-                # ensure each dp rank has a unique bootstrap_room during prefill warmup
-                "bootstrap_room": [
-                    i * (2**63 // server_args.dp_size) + (i % server_args.tp_size)
-                    for i in range(server_args.dp_size)
-                ],
-                "input_ids": [[10, 11, 12, 13]] * server_args.dp_size,
-            }
-            res = requests.post(
-                url + request_name,
-                json=json_data,
-                headers=headers,
-                timeout=(
-                    warmup_timeout if warmup_timeout > 0 else 1800
-                ),  # because of deep gemm precache is very long if not precache.
-                verify=ssl_verify,
-            )
-            if res.status_code == 200:
-                logger.info(
-                    f"End of prefill disaggregation mode warmup with status {res.status_code}, resp: {res.json()}"
-                )
+            if server_args.disaggregation_mode == "decode":
+                # Decode side does not send warmup requests — it passively
+                # receives KV from Prefill's warmup.  Mark as Up directly.
+                logger.info("Decode disaggregation mode: skipping active warmup")
                 _global_state.tokenizer_manager.server_status = ServerStatus.Up
             else:
-                logger.info(
-                    "Prefill disaggregation mode warm Up Failed, status code: {}".format(
-                        res.status_code
-                    )
+                logger.info(f"Start of pd disaggregation warmup ...")
+                json_data = {
+                    "sampling_params": {
+                        "temperature": 0.0,
+                        "max_new_tokens": 8,
+                        "ignore_eos": True,
+                    },
+                    "bootstrap_host": [FAKE_BOOTSTRAP_HOST] * server_args.dp_size,
+                    # This is a hack to ensure fake transfer is enabled during prefill warmup
+                    # ensure each dp rank has a unique bootstrap_room during prefill warmup
+                    "bootstrap_room": [
+                        i * (2**63 // server_args.dp_size) + (i % server_args.tp_size)
+                        for i in range(server_args.dp_size)
+                    ],
+                    "input_ids": [[10, 11, 12, 13]] * server_args.dp_size,
+                }
+                res = requests.post(
+                    url + request_name,
+                    json=json_data,
+                    headers=headers,
+                    timeout=(
+                        warmup_timeout if warmup_timeout > 0 else 1800
+                    ),  # because of deep gemm precache is very long if not precache.
+                    verify=ssl_verify,
                 )
-                _global_state.tokenizer_manager.server_status = ServerStatus.UnHealthy
+                if res.status_code == 200:
+                    logger.info(
+                        f"End of prefill disaggregation mode warmup with status {res.status_code}, resp: {res.json()}"
+                    )
+                    _global_state.tokenizer_manager.server_status = ServerStatus.Up
+                else:
+                    logger.info(
+                        "Prefill disaggregation mode warm Up Failed, status code: {}".format(
+                            res.status_code
+                        )
+                    )
+                    _global_state.tokenizer_manager.server_status = ServerStatus.UnHealthy
 
     except Exception:
         last_traceback = get_exception_traceback()
