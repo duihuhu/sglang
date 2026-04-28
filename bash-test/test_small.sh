@@ -13,10 +13,10 @@ P_PID=$!
 wait "$P_PID"   # P 结束后再启动 D（nohup 仍可防 SSH 断开）
 
 # ---------- D 阶段（decode，依赖上面 wait，仅在 P 完成后执行）----------
-nohup bash -lc '
-cd /workspace/benchmark/sglang-main
-/workspace/env/sglang-main/bin/python bash-test/batch_pd_nvtx_test.py \
-  --keep-processed \
-  --config bash-test/pd_batch_config_d_small.json \
-  > bash-test/test_d_small.log 2>&1
-' > bash-test/test_pd_driver_d.log 2>&1 &
+# nohup bash -lc '
+# cd /workspace/benchmark/sglang-main
+# /workspace/env/sglang-main/bin/python bash-test/batch_pd_nvtx_test.py \
+#   --keep-processed \
+#   --config bash-test/pd_batch_config_d_small.json \
+#   > bash-test/test_d_small.log 2>&1
+# ' > bash-test/test_pd_driver_d.log 2>&1 &

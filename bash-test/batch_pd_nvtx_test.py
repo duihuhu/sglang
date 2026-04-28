@@ -61,17 +61,22 @@ def _load_done_keys_from_wide_csv(path: str) -> set[Tuple[int, int, int, int, in
         except StopIteration:
             return done
         idx = {name.strip(): i for i, name in enumerate(header)}
-        need = ["tp", "input_len", "output_len", "gpu_clock", "batch_size"]
+        need = ["tp", "input_len", "gpu_clock", "batch_size"]
         if not all(k in idx for k in need):
             return done
+        # P-stage wide often omits output_len; prefill key uses output_len=1.
+        out_i = idx.get("output_len")
         for row in r:
             if len(row) < len(header):
                 continue
             try:
+                out_len = 1
+                if out_i is not None and out_i < len(row) and str(row[out_i]).strip() != "":
+                    out_len = int(float(row[out_i]))
                 key = (
                     int(float(row[idx["tp"]])),
                     int(float(row[idx["input_len"]])),
-                    int(float(row[idx["output_len"]])),
+                    out_len,
                     int(float(row[idx["gpu_clock"]])),
                     int(float(row[idx["batch_size"]])),
                 )
@@ -98,6 +103,17 @@ def _job_key_for_skip(job: "JobSpec", bench_stage: str) -> Tuple[int, int, int, 
         int(job.batch_size),
     )
 
+
+def _display_input_len_for_cap(job: "JobSpec", bench_stage: str) -> int:
+    """Un-proxy D jobs to the same 'display' prefill input length as wide CSV / skip keys."""
+    if str(bench_stage).upper() == "D":
+        return int(job.input_len - job.target_output_len + 1)
+    return int(job.input_len)
+
+
+def _job_prefill_token_product(job: "JobSpec", bench_stage: str) -> int:
+    """Batched prefill token count: display_input_len * batch_size (per bench forward)."""
+    return _display_input_len_for_cap(job, bench_stage) * int(job.batch_size)
 
 
 @dataclass(frozen=True)
@@ -665,6 +681,15 @@ def main() -> None:
         help="Batch sizes to test in bench_sglang.py (comma-separated, e.g. '4,2,1').",
     )
     parser.add_argument(
+        "--max-prefill-tokens",
+        type=int,
+        default=16384,
+        help=(
+            "Drop jobs with display_input_len*batch_size above this (P and D: display input, not proxy). "
+            "Matches typical 16k batched prefill cap. Set 0 to disable."
+        ),
+    )
+    parser.add_argument(
         "--nsys-d-bucket-count",
         type=int,
         default=512,
@@ -746,7 +771,8 @@ def main() -> None:
         default="D",
         choices=["P", "D", "p", "d"],
         help=(
-            "P: prefill-only style benchmark (output_len fixed to 1, batch_size forced to 1). "
+            "P: prefill-only style benchmark (output_len fixed to 1). "
+            "Honors config defaults/runs batch_size and --batch-size (D uses them for decode batching). "
             "D: decode single-point proxy benchmark using input_len + output_len - 1 with one-token decode."
         ),
     )
@@ -864,21 +890,20 @@ def main() -> None:
             run_inputs = _to_int_list(run.get("input_len", default_input))
             run_clocks = _to_int_list(run.get("gpu_clock", default_clock))
             run_bs = _to_int_list(run.get("batch_size", default_bs))
-            if args.bench_stage == "P":
-                run_bs = [1]
             for input_len in run_inputs:
                 for gpu_clock in run_clocks:
                     if args.bench_stage == "P":
-                        jobs.append(
-                            JobSpec(
-                                tp=tp,
-                                input_len=input_len,
-                                gpu_clock=gpu_clock,
-                                output_len_max=output_len_max,
-                                batch_size=1,
-                                target_output_len=1,
+                        for batch_size in run_bs:
+                            jobs.append(
+                                JobSpec(
+                                    tp=tp,
+                                    input_len=input_len,
+                                    gpu_clock=gpu_clock,
+                                    output_len_max=output_len_max,
+                                    batch_size=batch_size,
+                                    target_output_len=1,
+                                )
                             )
-                        )
                     else:
                         for target_output_len in output_lens:
                             proxy_input_len = input_len + target_output_len - 1
@@ -899,16 +924,17 @@ def main() -> None:
             for input_len in input_lens:
                 for gpu_clock in gpu_clocks:
                     if args.bench_stage == "P":
-                        jobs.append(
-                            JobSpec(
-                                tp=tp,
-                                input_len=input_len,
-                                gpu_clock=gpu_clock,
-                                output_len_max=output_len_max,
-                                batch_size=1,
-                                target_output_len=1,
+                        for batch_size in batch_sizes:
+                            jobs.append(
+                                JobSpec(
+                                    tp=tp,
+                                    input_len=input_len,
+                                    gpu_clock=gpu_clock,
+                                    output_len_max=output_len_max,
+                                    batch_size=batch_size,
+                                    target_output_len=1,
+                                )
                             )
-                        )
                     else:
                         for target_output_len in output_lens:
                             proxy_input_len = input_len + target_output_len - 1
@@ -923,6 +949,22 @@ def main() -> None:
                                         target_output_len=target_output_len,
                                     )
                                 )
+
+    # Cap total prefill tokens per batch forward (display_input * batch_size).
+    max_pt = int(getattr(args, "max_prefill_tokens", 0) or 0)
+    if max_pt > 0:
+        before_cap = len(jobs)
+        jobs = [
+            j
+            for j in jobs
+            if _job_prefill_token_product(j, args.bench_stage) <= max_pt
+        ]
+        dropped_cap = before_cap - len(jobs)
+        if dropped_cap:
+            print(
+                f"[info] max_prefill_tokens={max_pt}, "
+                f"dropped_jobs (display_input×batch_size>{max_pt}): {dropped_cap}"
+            )
 
     skip_done_wide_csv = ""
     if cfg and isinstance(cfg, dict):
@@ -950,6 +992,13 @@ def main() -> None:
 
     print(f"[info] discovered GPUs: {free_gpus}")
     print(f"[info] total jobs: {len(jobs)}")
+
+    if not jobs:
+        print(
+            "[info] no jobs to run (empty grid, all dropped by max_prefill_tokens, or all keys in "
+            "skip_done_wide_csv). Skipping big table merge and pivot."
+        )
+        return
 
     next_port = args.port_base
     port_step = 1
