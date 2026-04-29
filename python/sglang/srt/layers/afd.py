@@ -172,6 +172,19 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
         socket.bind(f"tcp://*:{self._get_lport()}")
         return socket
 
+    def close(self):
+        """Release ZMQ sockets and context."""
+        for getter in (self._get_push_socket, self._get_pull_socket):
+            try:
+                sock = getter()
+                sock.close(linger=0)
+            except Exception:
+                pass
+        try:
+            self.zmq_context.term()
+        except Exception:
+            pass
+
     def _ensure_pinned_buf(self, tensor: torch.Tensor, is_send: bool):
         """C1: ensure pinned memory buffer is large enough."""
         nbytes = tensor.nelement() * tensor.element_size()

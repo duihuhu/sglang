@@ -1086,6 +1086,8 @@ class SchedulerDisaggregationDecodeMixin:
                         self._afd_batchsize_attn = req.batch_size
                         self._afd_forward_mode = req.forward_mode
                         self._afd_req_ids = req.req_ids
+                        if req.output_ids_per_req and req.req_ids:
+                            self._afd_sync_output_ids(req)
             filtered_reqs = [r for r in recv_reqs if not isinstance(r, _AFDReqInput)]
             self.process_input_requests(filtered_reqs)
             self.process_decode_queue()

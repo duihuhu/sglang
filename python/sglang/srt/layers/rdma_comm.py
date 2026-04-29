@@ -72,12 +72,15 @@ _INT_TO_DTYPE = {v: k for k, v in _DTYPE_TO_INT.items()}
 _META_SLOTS = 8
 
 
-def _encode_meta(tensor: torch.Tensor) -> np.ndarray:
-    """Encode tensor shape and dtype into a fixed-size int64 array."""
+def _encode_meta(tensor: torch.Tensor, original_num_tokens: int = 0) -> np.ndarray:
+    """Encode tensor shape, dtype, and original token count into a fixed-size int64 array.
+
+    Layout: [ndim, shape[0], ..., shape[ndim-1], dtype_code, original_num_tokens, ...]
+    """
     meta = np.zeros(_META_SLOTS, dtype=np.int64)
     ndim = tensor.ndim
-    if ndim > _META_SLOTS - 2:
-        raise ValueError(f"Tensor ndim {ndim} exceeds metadata capacity {_META_SLOTS - 2}")
+    if ndim > _META_SLOTS - 3:
+        raise ValueError(f"Tensor ndim {ndim} exceeds metadata capacity {_META_SLOTS - 3}")
     meta[0] = ndim
     for i, s in enumerate(tensor.shape):
         meta[i + 1] = s
@@ -88,10 +91,12 @@ def _encode_meta(tensor: torch.Tensor) -> np.ndarray:
             f"Supported: {list(_DTYPE_TO_INT.keys())}"
         )
     meta[ndim + 1] = dtype_code
+    meta[ndim + 2] = original_num_tokens
     return meta
 
 
-def _decode_meta(meta: np.ndarray) -> Tuple[tuple, torch.dtype]:
+def _decode_meta(meta: np.ndarray) -> Tuple[tuple, torch.dtype, int]:
+    """Decode metadata array into (shape, dtype, original_num_tokens)."""
     ndim = int(meta[0])
     shape = tuple(int(meta[i + 1]) for i in range(ndim))
     dtype_code = int(meta[ndim + 1])
@@ -101,7 +106,8 @@ def _decode_meta(meta: np.ndarray) -> Tuple[tuple, torch.dtype]:
             f"Unknown dtype code {dtype_code} in UCX tensor metadata. "
             f"Known codes: {list(_INT_TO_DTYPE.keys())}"
         )
-    return shape, dtype
+    original_num_tokens = int(meta[ndim + 2])
+    return shape, dtype, original_num_tokens
 
 
 # ---- Async-to-sync bridge ----
@@ -344,19 +350,19 @@ class _UcxP2PCommunicator:
                             f"Attn rank {self._local_rank} connect failed: {e}"
                         ) from e
 
-    def send(self, x: torch.Tensor):
+    def send(self, x: torch.Tensor, original_num_tokens: int = 0):
         """Synchronous send: blocks until RDMA completes."""
         torch.cuda.current_stream().synchronize()
-        self._bridge.run(self._async_send(x))
+        self._bridge.run(self._async_send(x, original_num_tokens))
 
-    def send_nonblocking(self, x: torch.Tensor):
+    def send_nonblocking(self, x: torch.Tensor, original_num_tokens: int = 0):
         """Fire-and-forget send: submits to bridge, returns a Future.
 
         Caller must ensure GPU data is ready (e.g., via CUDA event)
         before the bridge thread reads the tensor.
         """
         return asyncio.run_coroutine_threadsafe(
-            self._async_send(x), self._bridge._loop
+            self._async_send(x, original_num_tokens), self._bridge._loop
         )
 
     def send_wait(self, future):
@@ -364,24 +370,25 @@ class _UcxP2PCommunicator:
         if future is not None:
             future.result()
 
-    def recv(self) -> torch.Tensor:
+    def recv(self) -> Tuple[torch.Tensor, int]:
+        """Returns (tensor, original_num_tokens)."""
         return self._bridge.run(self._async_recv())
 
-    async def _async_send(self, x: torch.Tensor):
-        meta = _encode_meta(x)
+    async def _async_send(self, x: torch.Tensor, original_num_tokens: int = 0):
+        meta = _encode_meta(x, original_num_tokens)
         await self._endpoint.send(meta)
         await self._endpoint.send(x.contiguous())
 
-    async def _async_recv(self) -> torch.Tensor:
+    async def _async_recv(self) -> Tuple[torch.Tensor, int]:
         if self._last_recv_buf is not None:
             self._pool.put(self._last_recv_buf)
         meta = np.empty(_META_SLOTS, dtype=np.int64)
         await self._endpoint.recv(meta)
-        shape, dtype = _decode_meta(meta)
+        shape, dtype, original_num_tokens = _decode_meta(meta)
         buf = self._pool.get(shape, dtype, self._device)
         await self._endpoint.recv(buf)
         self._last_recv_buf = buf
-        return buf
+        return buf, original_num_tokens
 
     def close(self):
         if self._endpoint is not None:
@@ -446,7 +453,6 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
         self._skip_warmup = getattr(__import__(__name__), '_EAGER_INIT', False)
 
         self._p2p: Optional[_UcxP2PCommunicator] = None
-        self._pending_num_tokens: deque = deque()
 
         logger.info(
             "UcxTensorCommunicator init: perspective=%s, rank=%d, "
@@ -607,7 +613,6 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
             return
 
         num_tokens = x.shape[0]
-        self._pending_num_tokens.append(num_tokens)
 
         if self._is_rep:
             chunk = (num_tokens + self._K - 1) // self._K
@@ -620,7 +625,7 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
                     dtype=x.dtype, device=x.device,
                 )
                 shard = torch.cat([shard, pad], dim=0)
-            self._p2p.send(shard)
+            self._p2p.send(shard, original_num_tokens=num_tokens)
 
     def send_tensor_nonblocking(self, x: torch.Tensor):
         """Non-blocking send: returns immediately, RDMA completes in background.
@@ -640,7 +645,6 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
             return
 
         num_tokens = x.shape[0]
-        self._pending_num_tokens.append(num_tokens)
 
         if self._is_rep:
             chunk = (num_tokens + self._K - 1) // self._K
@@ -653,7 +657,9 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
                     dtype=x.dtype, device=x.device,
                 )
                 shard = torch.cat([shard, pad], dim=0)
-            self._last_send_future = self._p2p.send_nonblocking(shard)
+            self._last_send_future = self._p2p.send_nonblocking(
+                shard, original_num_tokens=num_tokens
+            )
 
     def fence(self):
         """Wait for all in-flight nonblocking sends to complete."""
@@ -666,7 +672,8 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
 
     def recv_tensor(self) -> torch.Tensor:
         if self._local_tp <= 1:
-            return self._p2p.recv()
+            tensor, _orig = self._p2p.recv()
+            return tensor
 
         tp_group = self._get_tp_group()
 
@@ -678,7 +685,7 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
     def _recv_k1(self, tp_group) -> torch.Tensor:
         """K=1: rank 0 does RDMA recv, then NVLink broadcast to all."""
         if self._is_rep:
-            tensor = self._p2p.recv()
+            tensor, _orig = self._p2p.recv()
         else:
             tensor = None
 
@@ -716,8 +723,9 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
 
     def _recv_k_multi(self, tp_group) -> torch.Tensor:
         """K>1: K representatives RDMA recv, then all_gather + stride dedup."""
+        original_num_tokens = 0
         if self._is_rep:
-            my_shard = self._p2p.recv()
+            my_shard, original_num_tokens = self._p2p.recv()
         else:
             my_shard = None
 
@@ -728,7 +736,7 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
 
         if self._is_rep and self._nic_group == 0:
             shard_info = torch.tensor(
-                list(my_shard.shape) + [_DTYPE_TO_INT.get(my_shard.dtype, 2)],
+                list(my_shard.shape) + [_DTYPE_TO_INT.get(my_shard.dtype, 2), original_num_tokens],
                 dtype=torch.long, device=self._device,
             )
             ndim_t = torch.tensor([my_shard.ndim], dtype=torch.long, device=self._device)
@@ -740,16 +748,17 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
 
         if self._is_rep and self._nic_group == 0:
             shard_info = torch.tensor(
-                list(my_shard.shape) + [_DTYPE_TO_INT.get(my_shard.dtype, 2)],
+                list(my_shard.shape) + [_DTYPE_TO_INT.get(my_shard.dtype, 2), original_num_tokens],
                 dtype=torch.long, device=self._device,
             )
         else:
-            shard_info = torch.empty(ndim + 1, dtype=torch.long, device=self._device)
+            shard_info = torch.empty(ndim + 2, dtype=torch.long, device=self._device)
 
         dist.broadcast(shard_info, src=root_rank, group=tp_group.device_group)
 
         shard_shape = tuple(int(shard_info[i].item()) for i in range(ndim))
         shard_dtype = _INT_TO_DTYPE.get(int(shard_info[ndim].item()), torch.float32)
+        original_tokens = int(shard_info[ndim + 1].item())
 
         if not self._is_rep:
             my_shard = torch.zeros(shard_shape, dtype=shard_dtype, device=self._device)
@@ -760,10 +769,8 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
         unique = [gathered[i * self._ranks_per_group] for i in range(self._K)]
         full = torch.cat(unique, dim=0)
 
-        if self._pending_num_tokens:
-            original_tokens = self._pending_num_tokens.popleft()
-            if full.shape[0] > original_tokens:
-                full = full[:original_tokens]
+        if original_tokens > 0 and full.shape[0] > original_tokens:
+            full = full[:original_tokens]
 
         return full
 

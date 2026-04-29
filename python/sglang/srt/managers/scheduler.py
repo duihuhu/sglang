@@ -1354,7 +1354,7 @@ class Scheduler(
             get_afd_micro_batch,
             get_afd_perspective,
         )
-        from sglang.srt.managers.io_struct import AFDReqInput
+        from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
         from sglang.srt.model_executor.forward_batch_info import ForwardMode
         from sglang.srt.disaggregation.utils import DisaggregationMode
 
@@ -1482,23 +1482,7 @@ class Scheduler(
 
             if batch:
                 # Attn side: notify FFN about current batch
-                if afd_is_attn() and self.afd_send_to_ffn is not None:
-                    afd_req = AFDReqInput(
-                        batch_size=batch.batch_size(),
-                        forward_mode=batch.forward_mode,
-                        req_ids=[r.rid for r in batch.reqs],
-                        seq_lens=[r.extend_input_len + r.seqlen for r in batch.reqs],
-                        extend_lens=batch.extend_lens
-                        if hasattr(batch, "extend_lens")
-                        else None,
-                        max_input_len=max(
-                            (r.extend_input_len for r in batch.reqs), default=0
-                        ),
-                        repr_output_len=int(sum(
-                            max(r.seqlen - len(r.origin_input_ids), 1) for r in batch.reqs
-                        ) / max(len(batch.reqs), 1)) if batch.reqs else 1,
-                    )
-                    self.afd_send_to_ffn.send_pyobj(afd_req)
+                SchedulerAFDMixin.afd_send_batch_info(self, batch)
 
                 self._afd_dvfs_before_batch(batch)
                 _prepare_afd_overlap(batch)
@@ -1657,28 +1641,6 @@ class Scheduler(
                 self._afd_pending_batch_infos.append(recv_req)
                 continue
 
-        pending = getattr(self, "_afd_pending_batch_infos", None)
-        if pending is None:
-            from collections import deque
-            self._afd_pending_batch_infos = deque()
-            pending = self._afd_pending_batch_infos
-
-        if self._afd_batchsize_attn is None and pending:
-            afd_req = self._afd_pending_batch_infos.popleft()
-            self._afd_batchsize_attn = afd_req.batch_size
-            self._afd_forward_mode = afd_req.forward_mode
-            self._afd_req_ids = afd_req.req_ids
-
-            # PD+AF decode: sync output_ids from Attn to FFN so fill_ids
-            # (origin_input_ids + output_ids) match and AF tensor shapes align.
-            if afd_req.output_ids_per_req and afd_req.req_ids:
-                self._afd_sync_output_ids(afd_req)
-
-        for recv_req in recv_reqs:
-            if isinstance(recv_req, AFDReqInput):
-                continue
-
-            # Attn side: forward work requests to FFN
             if afd_is_attn() and self.afd_send_to_ffn is not None:
                 from sglang.srt.managers.io_struct import (
                     TokenizedEmbeddingReqInput,
@@ -1691,6 +1653,21 @@ class Scheduler(
                     self.afd_send_to_ffn.send_pyobj(recv_req)
 
             filtered_reqs.append(recv_req)
+
+        pending = getattr(self, "_afd_pending_batch_infos", None)
+        if pending is None:
+            from collections import deque
+            self._afd_pending_batch_infos = deque()
+            pending = self._afd_pending_batch_infos
+
+        if self._afd_batchsize_attn is None and pending:
+            afd_req = self._afd_pending_batch_infos.popleft()
+            self._afd_batchsize_attn = afd_req.batch_size
+            self._afd_forward_mode = afd_req.forward_mode
+            self._afd_req_ids = afd_req.req_ids
+
+            if afd_req.output_ids_per_req and afd_req.req_ids:
+                self._afd_sync_output_ids(afd_req)
 
         self.process_input_requests(filtered_reqs)
 
