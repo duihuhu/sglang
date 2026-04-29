@@ -4,7 +4,7 @@ Loads pre-trained models (from energy_model.py) and provides a simple scalar API
     predictor.predict_latency("prefill", "A", tp=1, freq=930, bs=4, il=1024)
     predictor.predict_energy("decode", "F", tp=2, freq=690, bs=16, il=512, ol=128)
 
-Strategy: LUT exact match first, fallback to GBDT (Decode) / LinearReg (Prefill latency).
+Strategy: LUT exact match first, fallback to GBDT (energy + decode latency) / LinearReg (prefill latency).
 """
 
 import logging
@@ -198,8 +198,14 @@ class AFProfilePredictor:
         slo_budget_us: float, ol: Optional[int] = None,
         freqs: Optional[list[int]] = None, M: int = 1,
         t_comm_us: float = 0.0,
+        num_layers: int = 1,
     ) -> Optional[tuple[int, int, float]]:
         """Search all (f_A, f_F) combos for minimum energy under SLO.
+
+        Args:
+            slo_budget_us: Total SLO budget (e.g. TTFT or TPOT) in microseconds.
+            num_layers: Number of transformer layers. The per-layer latency is
+                multiplied by this to compare against slo_budget_us.
 
         Returns (f_A, f_F, total_energy_mj) or None if no combo meets SLO.
         """
@@ -220,7 +226,7 @@ class AFProfilePredictor:
                 else:
                     t_layer = lat_a + lat_f + t_comm_us
 
-                if t_layer > slo_budget_us:
+                if t_layer * num_layers > slo_budget_us:
                     continue
 
                 try:
@@ -229,7 +235,7 @@ class AFProfilePredictor:
                 except (RuntimeError, ValueError):
                     continue
 
-                total_e = e_a + e_f
+                total_e = (e_a + e_f) * num_layers
                 if best is None or total_e < best[2]:
                     best = (f_a, f_f, total_e)
 

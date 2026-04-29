@@ -63,6 +63,8 @@ python test/srt/run_suite.py
 
 Tests use `CustomTestCase` (from `sglang.test.test_utils`) as the base class. CI tests are registered via `CIRegistry` in `sglang.test.ci.ci_register`. Retriable failures (accuracy, latency, throughput) are distinguished from non-retriable ones (SyntaxError, ImportError, OOM) in `ci_utils.py`.
 
+Tests live under `test/srt/` (not the repo root). AFD-related tests are in `test/srt/test_afd_basic.py` and `test/srt/test_afd_fixture.py`. Test configs (model args, env vars) are in `test/srt/configs/`.
+
 ## Architecture
 
 The repo has three main packages and two independent sub-projects:
@@ -78,14 +80,16 @@ The repo has three main packages and two independent sub-projects:
 | Subsystem | Key Files | Purpose |
 |---|---|---|
 | Entrypoints | `entrypoints/http_server.py`, `entrypoints/openai/` | FastAPI HTTP server, OpenAI-compatible API |
-| Scheduler | `managers/scheduler.py` | Token-level batching, RadixAttention cache, request dispatch |
+| Scheduler | `managers/scheduler.py` + many mixins | Token-level batching, RadixAttention cache, request dispatch. Key mixins: `scheduler_afd_mixin.py` (AFD event loop), `scheduler_pp_mixin.py` (pipeline parallelism), `scheduler_dp_attn_mixin.py` (data-parallel attention), `scheduler_profiler_mixin.py`, `scheduler_runtime_checker_mixin.py`, `scheduler_update_weights_mixin.py`, `scheduler_output_processor_mixin.py` |
 | Model executor | `model_executor/model_runner.py` | CUDA graph capture, forward pass orchestration |
 | Models | `models/` | ~160+ model implementations (one file per model family) |
 | Attention | `layers/attention/` | 20+ backends (FlashAttention, FlashInfer, Triton, MLA variants, etc.) |
 | Quantization | `layers/quantization/` | FP8, FP4, INT4, AWQ, GPTQ, GGUF, MXFP4 |
 | Memory/Cache | `mem_cache/` | RadixCache, chunk cache, prefix caching, HiCache, memory pool |
 | Distributed | `distributed/` | Communication ops, device communicators, parallel state |
-| Disaggregation | `disaggregation/` | Prefill-decode split: encode server, decode server, MoonCake/Mori/Nixl transfer |
+| Disaggregation | `disaggregation/` | Prefill-decode split: encode/decode servers, MoonCake/Mori/Nixl/fake backends |
+| AFD (A/F Disagg) | `layers/afd.py`, `layers/afd_mixin.py`, `layers/afd_type.py`, `managers/scheduler_afd_mixin.py` | Attention-FFN operator-level disaggregation: `AFDPerspective` (ATTN/FFN), `AFDCommunicator` (ZMQ/StepMesh/UCX backends), `AFDProxyAttention`/`AFDProxyMLP`, `AFDDecoderLayerMixin`, `AFDWeightFilter`, heterogeneous TP (tp_A ≠ tp_F), microbatch pipeline (M=1,2,3) |
+| DVFS | `layers/dvfs.py` | GPU frequency control via NVML `SetGpuLockedClocks`: `DVFSController` (per-GPU lock/unlock/reset), `DVFSManager` (node-wide), supports energy counter query |
 | Speculative | `speculative/` | Eagle v1/v2, ngram speculative decoding |
 | Constrained | `constrained/` | Structured JSON/grammar outputs (xgrammar, outlines, llguidance) |
 | LoRA | `lora/` | Multi-LoRA batching with eviction policy |
@@ -116,3 +120,14 @@ Independent Rust project (`Cargo.toml`). gRPC client, MCP support, routing polic
 - Python >= 3.10, CUDA 12.9, PyTorch 2.9.1, flashinfer 0.6.6, transformers 5.3.0
 - `uv` is the preferred package manager (see `[[tool.uv.index]]` and `[tool.uv.sources]` in pyproject.toml)
 - Build variants: CPU (`pyproject_cpu.toml`), NPU, XPU, ROCm, MUSA — each with separate pyproject config
+
+## Research / Benchmark sub-projects
+
+`benchmark/test_motivation/` contains energy profiling and AF-disaggregation motivation analysis:
+- `bench_prefill_af.py` / `bench_decode_af.py` — Profile A/F latency + energy (NVML counters) across TP/freq/bs/seq_len grids
+- `bench_dvfs_overhead.py` — Measure GPU frequency switching overhead
+- `dvfs/` — C++ NVML wrappers (`libdvfs_ctrl.so`) for `SetGpuLockedClocks`
+- `analyze_decode_v1.py` / `analyze_prefill_v1.py` — Energy saving analysis: AF-disaggregated vs unified frequency tuning
+- `energy_model.py` — Train GBDT/LinearReg latency and energy predictors from profile data
+- `prepare_trace.py` — Process Azure LLM traces for trace-driven evaluation
+- Profile data: `decode_data_v1.txt` (7530 rows), `prefill_data_v1.txt` (906 rows)

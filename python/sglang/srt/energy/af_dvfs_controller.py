@@ -47,6 +47,13 @@ class DecodeWindowState:
     window_size: int = 60
     last_decision_time: float = 0.0
 
+SLO_URGENCY_RATIO = 0.9
+
+REEVAL_NONE = 0
+REEVAL_WINDOW_EXPIRED = 1
+REEVAL_BS_CHANGE = 2
+REEVAL_SLO_URGENT = 3
+
 
 class AFDVFSController:
     """Tier 2 DVFS controller for AF-disaggregated serving.
@@ -54,7 +61,8 @@ class AFDVFSController:
     Args:
         predictor: AFProfilePredictor instance with loaded models.
         num_layers: Number of transformer layers (for prefill budget calc).
-        tp: Tensor parallelism degree.
+        tp_a: Tensor parallelism degree for attention.
+        tp_f: Tensor parallelism degree for FFN.
         t_comm_us: Inter-node communication latency per layer (microseconds).
         freqs: Candidate GPU frequencies in MHz.
     """
@@ -63,16 +71,21 @@ class AFDVFSController:
         self,
         predictor: AFProfilePredictor,
         num_layers: int = 64,
-        tp: int = 1,
+        tp_a: int = 1,
+        tp_f: Optional[int] = None,
         t_comm_us: float = 0.0,
         freqs: Optional[list[int]] = None,
     ):
         self.predictor = predictor
         self.num_layers = num_layers
-        self.tp = tp
+        self.tp_a = tp_a
+        self.tp_f = tp_f if tp_f is not None else tp_a
         self.t_comm_us = t_comm_us
         self.freqs = freqs or VALID_FREQS
         self._decode_state = DecodeWindowState()
+        self._stats_switch_up = 0
+        self._stats_switch_down = 0
+        self._stats_fallback = 0
         self._precompute_freq_pairs()
 
     def _precompute_freq_pairs(self):
@@ -84,8 +97,8 @@ class AFDVFSController:
     def _layer_latency(self, phase: str, f_a: int, f_f: int,
                        bs: int, il: int, ol: Optional[int], M: int) -> float:
         """Compute single-layer latency under pipeline model."""
-        lat_a = self.predictor.predict_latency(phase, "A", self.tp, f_a, bs, il, ol).value
-        lat_f = self.predictor.predict_latency(phase, "F", self.tp, f_f, bs, il, ol).value
+        lat_a = self.predictor.predict_latency(phase, "A", self.tp_a, f_a, bs, il, ol).value
+        lat_f = self.predictor.predict_latency(phase, "F", self.tp_f, f_f, bs, il, ol).value
         if M > 1:
             return max(lat_a, lat_f) + self.t_comm_us / M
         return lat_a + lat_f + self.t_comm_us
@@ -93,8 +106,8 @@ class AFDVFSController:
     def _layer_energy(self, phase: str, f_a: int, f_f: int,
                       bs: int, il: int, ol: Optional[int]) -> float:
         """Compute single-layer energy (mJ)."""
-        e_a = self.predictor.predict_energy(phase, "A", self.tp, f_a, bs, il, ol).value
-        e_f = self.predictor.predict_energy(phase, "F", self.tp, f_f, bs, il, ol).value
+        e_a = self.predictor.predict_energy(phase, "A", self.tp_a, f_a, bs, il, ol).value
+        e_f = self.predictor.predict_energy(phase, "F", self.tp_f, f_f, bs, il, ol).value
         return e_a + e_f
 
     # ── Prefill: per-request DVFS ──────────────────────────────────
@@ -143,6 +156,7 @@ class AFDVFSController:
                 )
 
         if best is None:
+            self._stats_fallback += 1
             logger.warning("Prefill DVFS: no feasible combo, fallback to max freq")
             t_layer = self._layer_latency("prefill", F_MAX, F_MAX, bs, il, None, M)
             e_layer = self._layer_energy("prefill", F_MAX, F_MAX, bs, il, None)
@@ -152,22 +166,40 @@ class AFDVFSController:
                 latency_us=t_layer * remaining_layers,
             )
 
+        logger.debug(
+            "Prefill DVFS: bs=%d il=%d → f_a=%d f_f=%d "
+            "lat=%.0fus energy=%.1fmJ",
+            bs, il, best.f_a, best.f_f, best.latency_us, best.energy_mj,
+        )
         return best
 
     # ── Decode: per-window DVFS ────────────────────────────────────
 
-    def should_reevaluate_decode(self, current_bs: int) -> bool:
-        """Check if decode frequency should be re-evaluated."""
+    def should_reevaluate_decode(
+        self, current_bs: int,
+        current_tpot_us: float = 0.0,
+        slo_tpot_us: float = 0.0,
+    ) -> int:
+        """Check if decode frequency should be re-evaluated.
+
+        Returns:
+            REEVAL_NONE (0) if no re-evaluation needed, otherwise one of
+            REEVAL_WINDOW_EXPIRED, REEVAL_BS_CHANGE, REEVAL_SLO_URGENT.
+        """
         st = self._decode_state
         if st.iters_since_decision >= st.window_size:
-            return True
+            return REEVAL_WINDOW_EXPIRED
         if st.last_bs > 0 and abs(current_bs - st.last_bs) / st.last_bs > 0.3:
-            return True
-        return False
+            return REEVAL_BS_CHANGE
+        if (current_tpot_us > 0 and slo_tpot_us > 0
+                and current_tpot_us > slo_tpot_us * SLO_URGENCY_RATIO):
+            return REEVAL_SLO_URGENT
+        return REEVAL_NONE
 
     def select_freq_decode(
         self, bs: int, il: int, ol: int,
         slo_tpot_us: float, M: int = 1,
+        reeval_reason: int = REEVAL_WINDOW_EXPIRED,
     ) -> DVFSDecision:
         """Select (f_A, f_F) for a decode window.
 
@@ -182,6 +214,11 @@ class AFDVFSController:
             DVFSDecision with chosen frequencies.
         """
         st = self._decode_state
+
+        if reeval_reason == REEVAL_WINDOW_EXPIRED:
+            w_remaining = st.window_size
+        else:
+            w_remaining = st.window_size - st.iters_since_decision
 
         # Sort candidates by energy (ascending) for early exit
         candidates = []
@@ -199,29 +236,51 @@ class AFDVFSController:
             except (RuntimeError, ValueError):
                 continue
 
-            if t_layer > slo_tpot_us:
+            if t_layer * self.num_layers > slo_tpot_us:
                 continue
 
             switched = self._should_switch(
                 f_a, f_f, st.cur_f_a, st.cur_f_f,
-                bs, il, ol, st.window_size - st.iters_since_decision,
+                bs, il, ol, w_remaining,
             )
 
+            if switched:
+                old_avg = (st.cur_f_a + st.cur_f_f) / 2
+                new_avg = (f_a + f_f) / 2
+                if new_avg > old_avg:
+                    self._stats_switch_up += 1
+                else:
+                    self._stats_switch_down += 1
+
             self._update_decode_state(f_a, f_f, bs, switched)
+            total_lat = t_layer * self.num_layers
+            total_e = e * self.num_layers
+            logger.debug(
+                "Decode DVFS: bs=%d il=%d ol=%d → f_a=%d f_f=%d "
+                "switched=%s lat=%.0fus energy=%.1fmJ "
+                "(up=%d down=%d fallback=%d)",
+                bs, il, ol, f_a, f_f, switched, total_lat, total_e,
+                self._stats_switch_up, self._stats_switch_down,
+                self._stats_fallback,
+            )
             return DVFSDecision(
                 f_a=f_a, f_f=f_f,
-                energy_mj=e, latency_us=t_layer,
+                energy_mj=total_e, latency_us=total_lat,
                 switched=switched,
             )
 
         # Fallback: max frequency
+        self._stats_fallback += 1
         logger.warning("Decode DVFS: no feasible combo, fallback to max freq")
+        self._stats_switch_up += 1
         self._update_decode_state(F_MAX, F_MAX, bs, switched=True)
         t_layer = self._layer_latency("decode", F_MAX, F_MAX, bs, il, ol, M)
         e = self._layer_energy("decode", F_MAX, F_MAX, bs, il, ol)
         return DVFSDecision(
             f_a=F_MAX, f_f=F_MAX,
-            energy_mj=e, latency_us=t_layer, switched=True,
+            energy_mj=e * self.num_layers,
+            latency_us=t_layer * self.num_layers,
+            switched=True,
         )
 
     def _should_switch(
@@ -244,7 +303,7 @@ class AFDVFSController:
         except (RuntimeError, ValueError):
             return True
 
-        savings = (e_cur - e_new) * max(w_remaining, 1)
+        savings = (e_cur - e_new) * self.num_layers * max(w_remaining, 1)
         return savings > E_SWITCH_MJ
 
     def _update_decode_state(self, f_a: int, f_f: int, bs: int, switched: bool):

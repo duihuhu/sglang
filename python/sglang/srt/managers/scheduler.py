@@ -1544,10 +1544,13 @@ class Scheduler(
             from sglang.srt.energy.af_dvfs_controller import AFDVFSController
 
             predictor = AFProfilePredictor(server_args.afd_energy_model_dir)
+            tp_a = getattr(server_args, "afd_attn_tp", None) or server_args.tp_size
+            tp_f = getattr(server_args, "afd_ffn_tp", None) or server_args.tp_size
             self._af_dvfs_ctrl = AFDVFSController(
                 predictor=predictor,
                 num_layers=self.model_config.num_hidden_layers,
-                tp=server_args.tp_size,
+                tp_a=tp_a,
+                tp_f=tp_f,
             )
             logger.info("AFD DVFS controller initialized")
         except Exception as e:
@@ -1612,7 +1615,17 @@ class Scheduler(
 
         elif batch.forward_mode.is_decode():
             self._af_dvfs_ctrl.tick_decode_iteration()
-            if self._af_dvfs_ctrl.should_reevaluate_decode(batch.batch_size()):
+            t_iter_us = 0.0
+            if hasattr(self, "_last_decode_batch_time"):
+                t_iter_us = (time.perf_counter() - self._last_decode_batch_time) * 1e6
+                self._af_dvfs_ctrl.compute_window_size(t_iter_us)
+            self._last_decode_batch_time = time.perf_counter()
+            reeval_reason = self._af_dvfs_ctrl.should_reevaluate_decode(
+                batch.batch_size(),
+                current_tpot_us=t_iter_us,
+                slo_tpot_us=self.server_args.afd_tpot_slo_us,
+            )
+            if reeval_reason:
                 repr_il = int(sum(len(r.origin_input_ids) for r in batch.reqs) / max(len(batch.reqs), 1))
                 repr_ol = int(sum(
                     (r.seqlen - len(r.origin_input_ids)) for r in batch.reqs
@@ -1621,6 +1634,7 @@ class Scheduler(
                 decision = self._af_dvfs_ctrl.select_freq_decode(
                     bs=batch.batch_size(), il=repr_il, ol=repr_ol,
                     slo_tpot_us=self.server_args.afd_tpot_slo_us, M=M,
+                    reeval_reason=reeval_reason,
                 )
                 if decision.switched:
                     self._apply_freq(decision.f_a, decision.f_f)
