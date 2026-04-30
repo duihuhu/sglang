@@ -75,7 +75,9 @@
   延迟接近的配置。如果用硬约束 |t_A - t_F| ≤ threshold，可能把所有可行解砍掉。                                   
 
   1.2 约束条件                                                                                                   
-
+  a) 跨节点的t_comm（stronger）. 
+  b) 先尽可能保证单阶段AF在同一台机器。
+  c) 避免剩余卡（资源碎片）
   约束 (1)：GPU 总量                                                                                             
 
   k_P × (tp_PA + tp_PF) + k_D × (tp_DA + tp_DF) ≤ G                                                              
