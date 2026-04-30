@@ -275,3 +275,6 @@ sgl-kernel/csrc/**/*_musa/
 
 bash-test/*
 .claude
+
+*.tsv
+*.pkl

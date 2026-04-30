@@ -26,13 +26,15 @@ dependencies = [
   "decord2 ; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'armv7l')",
   "datasets",
   "einops",
-  "fastapi",
+  "fastapi==0.135.1",
+  "starlette==0.52.1",
   "flashinfer_python==0.6.6", # keep it aligned with jit-cache version in Dockerfile
   "flashinfer_cubin==0.6.6",
   "gguf",
   "interegular",
   "llguidance>=0.7.11,<0.8.0",
   "modelscope",
+  "mooncake-transfer-engine==0.3.10",
   "msgspec",
   "ninja",
   "numpy",
@@ -126,6 +128,14 @@ tracing = [
   "opentelemetry-exporter-otlp",
   "opentelemetry-exporter-otlp-proto-grpc",
   "opentelemetry-sdk",
+]
+
+# UCX-Py + bundled UCX libs for AFD `--afd-comm-backend ucx` (Attn–FFN tensor RDMA).
+# Note: ucx-py-cu12 0.45 declares libucx-cu12<1.19; pinning 1.19.0 may make pip report a
+# conflict — override is intentional when using a newer libucx wheel.
+afd-ucx = [
+  "ucx-py-cu12==0.45.0",
+  "libucx-cu12==1.19.0",
 ]
 
 test = [

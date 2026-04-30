@@ -93,13 +93,16 @@ sccache-stop: ## Stop the sccache server
 	fi
 
 # Python bindings (maturin) targets
+# Prepend ~/.cargo/bin so rustup's cargo is used. Distro/apt rustc often lags (e.g. 1.75)
+# and cannot parse crates requiring Cargo edition2024 support.
+# vendored-openssl: avoid needing pkg-config / libssl-dev on minimal Linux images (same as python-build).
 python-dev: ## Build Python bindings in development mode (fast, debug build)
 	@echo "Building Python bindings in development mode (using $(JOBS) parallel jobs with sccache)..."
-	@cd $(PYTHON_DIR) && CARGO_BUILD_JOBS=$(JOBS) maturin develop
+	@cd $(PYTHON_DIR) && PATH="$$HOME/.cargo/bin:$$PATH" CARGO_BUILD_JOBS=$(JOBS) maturin develop --features vendored-openssl
 
 python-build: ## Build Python wheel (release mode with vendored OpenSSL)
 	@echo "Building Python wheel (release, vendored OpenSSL, using $(JOBS) parallel jobs with sccache)..."
-	@cd $(PYTHON_DIR) && CARGO_BUILD_JOBS=$(JOBS) maturin build --release --out dist --features vendored-openssl
+	@cd $(PYTHON_DIR) && PATH="$$HOME/.cargo/bin:$$PATH" CARGO_BUILD_JOBS=$(JOBS) maturin build --release --out dist --features vendored-openssl
 
 python-build-release: python-build ## Alias for python-build
 
@@ -124,7 +127,7 @@ python-test: ## Run Python tests
 
 python-check: ## Check Python package with twine
 	@echo "Checking Python package..."
-	@cd $(PYTHON_DIR) && CARGO_BUILD_JOBS=$(JOBS) maturin build --release --out dist --features vendored-openssl
+	@cd $(PYTHON_DIR) && PATH="$$HOME/.cargo/bin:$$PATH" CARGO_BUILD_JOBS=$(JOBS) maturin build --release --out dist --features vendored-openssl
 	@pip install twine 2>/dev/null || true
 	@twine check $(PYTHON_DIR)/dist/*
 	@echo "Python package check passed!"
