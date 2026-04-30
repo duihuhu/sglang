@@ -23,7 +23,7 @@
 
   初始化代码路径（scheduler.py）：                                                                               
 
-# **init** (line 520-526)
+# __init__ (line 520-526)
 
   self._cur_f_a = 1410          # 从最高频起步，安全  
   self._cur_f_f = 1410  
@@ -74,10 +74,21 @@
   为什么放在目标函数而非约束里？ E_bubble 做连续惩罚——10% 失衡有小代价，50% 失衡有大代价。ILP 自动倾向选 A/F  
   延迟接近的配置。如果用硬约束 |t_A - t_F| ≤ threshold，可能把所有可行解砍掉。                                   
 
-  1.2 约束条件                                                                                                   
-  a) 跨节点的t_comm（stronger）. 
-  b) 先尽可能保证单阶段AF在同一台机器。
-  c) 避免剩余卡（资源碎片）
+  1.2 约束条件
+
+  关于 AF 配对的物理拓扑（非 ILP 变量，但在生成候选配置时考虑）：
+  - A/F 配对跨节点部署：节点内通过 NVLink 通信，节点间通过 RDMA（IB/RoCE）传输 hidden states。
+    Decode 阶段传输量小（seq_len=1, t_AF_comm ≈ 37-42us via NVLink），跨节点 RDMA 开销在可接受范围。
+    Prefill 大 batch 长序列时传输量大（如 seq_len=4096, bs=4: ~965us via NVLink），跨节点时需纳入 SLO 预算。
+  - 配对后避免剩余孤立 GPU（如 7 卡给 P、1 卡剩余无法配对）。
+
+  多节点拓扑对 ILP 的额外约束（当前简化处理，后续扩展）：
+  - 每节点 GPU 数 ≤ 8（A800 SXM 单节点上限）。ILP 输出的 k_P×tp_P 个 GPU
+    需能分配到有限数量的节点上。若所有 AF 对跨节点部署，需要 2×N_node 个节点。
+  - 论文 v1 采用同构假设：所有 AF 对均为跨节点配对（A 在节点 i，F 在节点 j），
+    每个节点内部署同类型 GPU。节点容量约束通过 k_c × tp_c ≤ G_node × N_nodes_c 体现。
+  - 异构拓扑（部分同节点 NVLink + 部分跨节点 RDMA）的联合优化留作后续扩展。
+
   约束 (1)：GPU 总量                                                                                             
 
   k_P × (tp_PA + tp_PF) + k_D × (tp_DA + tp_DF) ≤ G                                                              
@@ -95,9 +106,14 @@
 
   约束 (5)(6)：延迟 SLO（保守 M=1 上界）                                                                         
 
-  (5) Prefill:  t_PA(r) + t_PF(r) + t_comm ≤ TTFT_SLO / L  
-  (6) Decode:   t_DA(r) + t_DF(r) + t_comm ≤ TPOT_SLO / L                                                        
+  (5) Prefill:  t_PA(r) + t_PF(r) + t_comm(r, M) ≤ TTFT_SLO / L  
+  (6) Decode:   t_DA(r) + t_DF(r) + t_comm(r, M) ≤ TPOT_SLO / L                                                        
 
+
+  // t_comm 待测：当前使用 NVLink P2P 实测值（第 1 节表格）。跨节点 RDMA（IB/RoCE）
+  // 通信开销待 bench_af_comm.py 实测。预计 Decode（seq_len=1）RDMA 开销仍
+  // 在 ~tens of us 量级；Prefill 大 batch 长序列可能到 ~ms 量级。
+  // t_comm 非全局常数，应按请求类型桶 r 分别计算：t_comm(r) = latency_overhead + tensor_size(r) / bandwidth。
   为什么用 M=1（串行）而非 M>1（pipeline）？                                                                     
 
   这是整个设计最重要的保守假设。M=1 时 t_layer = t_A + t_F + t_comm，M=2 时 t_layer = max(t_A, t_F) +  
@@ -171,7 +187,7 @@ KV cache 长度 = il + 已生成的 ol（不断增长直到完成）。
 
   KV_peak_D = N_active × avg_seq_total × KV_per_token / tp_DA                                                    
 
-- N_active：稳态下同时活跃的 Decode 请求数（由 Little's Law 近似：N_active ≈ λ × avg_ol）                      
+- N_active：稳态下同时活跃的 Decode 请求数（由 Little's Law 近似：N_active ≈ λ × avg_ol，在稳态下成立；Tier 1 是分钟级规划，稳态假设合理）                      
 - avg_seq_total：活跃请求的平均总序列长度 = avg(il + ol_current)，取 P99 做保守估计                            
 - 为什么不用 bs_max_D × (il_max + ol_max)？那是绝对最坏情况（所有请求同时在最长  
 序列长度），过于保守。稳态下请求处于生成过程的不同阶段，有的刚开始（KV 小），  
@@ -192,14 +208,14 @@ waiting queue 重新 Prefill
   Tier 2 可能选了低频节能，反而延长了请求驻留时间，加剧 KV cache 压力，最终触发更多  
   retract（浪费已完成的计算）。                                                                                  
 
-  Tier 2 显存感知扩展（三种方向）：                                                                              
+  Tier 2 显存感知扩展（以下为设计探索，非当前实现范围；推荐方向 A）：                                                                              
 
   方向 A — 显存感知的频率决策（推荐，增量最小）：  
   在 Tier 2 频率选择中加入 KV cache 占用率作为输入。当占用率超过阈值（如 85%）时，  
   强制升频加速当前请求完成，更快释放 KV cache。  
   优点：改动最小（只需在 af_dvfs_controller 的 pick 函数中加一个条件），不改变 scheduler  
   的 retract 逻辑，与现有架构完全兼容。  
-  实现：kv_util = 1 - available_size / total_size；if kv_util > 0.85: fallback (1410, 1410)。  
+  实现：kv_util = 1 - available_size / total_size；if kv_util > 0.85: fallback (1410, 1410)。（阈值 85% 留出 15% 空间，足以容纳一个典型最大序列请求的 KV cache 进入，避免在等待准入期间 OOM）  
   效果：主动升频比被动 retract 更优——retract 意味着浪费已完成的 Prefill + 部分 Decode  
   计算，而升频只是临时多耗一点能量。                                                                             
 
@@ -218,10 +234,10 @@ waiting queue 重新 Prefill
   方案。核心洞察是"升频加速释放 > 被动 retract 浪费计算"，用 O(1) 的条件判断换取  
   显著减少 retract 次数。方向 B/C 作为 Future Work 保留。                                  
 
-  Qwen3-32B（bf16, L=64, 32 kv_heads, head_dim=128）：                                                           
+  Qwen3-32B（GQA, bf16, L=64, num_kv_heads=8, head_dim=128）：                                                           
 
-  KV_cache/token = 2 × L × (num_kv_heads/tp) × head_dim × 2 bytes ≈ 1 MB / tp  
-  tp=1, bs_max_D=256, seq_max_D=4096: KV_cache ≈ 1TB → OOM → 被迫选 tp ≥ 4                                           
+  KV_cache/token = 2 × L × (num_kv_heads/tp) × head_dim × 2 bytes ≈ 0.25 MB / tp  
+  tp=1, bs_max_D=256, seq_max_D=4096: KV_cache ≈ 250GB → OOM → 被迫选 tp ≥ 4                                           
 
   1.3 搜索空间                                                                                                   
 
@@ -277,8 +293,11 @@ waiting queue 重新 Prefill
   实测 A800-80GB SXM, SetGpuLockedClocks：P50 ~4.5ms, avg ~6ms。多 GPU 因 nvidia.ko 全局锁串行化（N 卡 ×  
   6ms）。AF 分离下每池独立调频，单次只涉 1-2 卡，开销 6-12ms。
 
-  关键约束：不能在 A/F stage 之间切频。64 层 × 6ms/层 = 384ms 额外开销，完全不可行。调频在 scheduler 层、batch  
-  开始前做一次。
+  关键约束：不能在 A/F stage 之间切频。64 层 × 6ms/层 = 384ms 额外开销，完全不可行。调频在 scheduler 层、batch开始前做一次。
+
+  多节点部署优势：A/F 分属不同节点时，两个节点的 nvidia.ko 锁互不影响——可同时切频，
+  总开销保持在 ~6ms 而非串行的 ~12ms。这对 Decode 决策窗口是利好（更短的窗口即可满足 10% 开销约束）。
+
 
   2.3 Prefill DVFS                                                                                               
 
@@ -307,7 +326,7 @@ waiting queue 重新 Prefill
 
   2.4.1 窗口大小                                                                                                 
 
-  W = max(10, int(10 × 6000us / t_iter_avg_us + 0.5))                                                            
+  W = max(10, int(10 × T_SWITCH_US / t_iter_avg_us + 0.5))  其中 T_SWITCH_US = 6000 (6ms 切频开销)                                                            
 
   代码使用四舍五入（int(x+0.5)），与 ceil 绝大多数情况等价。                                                     
 
@@ -487,24 +506,7 @@ waiting queue 重新 Prefill
   └──────────┴─────────────────────┴───────────────────────────────┘                                             
 
   3.3 协同例子                                                                                                   
-
-  Tier 1 配了 f̄_DA=1410, f̄_DF=930。运行时 bs=8。                                                                 
-
-  │ 时间尺度 │ 分钟                │ 毫秒                          │
-  ├──────────┼─────────────────────┼───────────────────────────────┤
-  │ 决策变量 │ 10 个离散           │ 2 个离散（36 组合）           │
-  ├──────────┼─────────────────────┼───────────────────────────────┤
-  │ 延迟模型 │ M=1 保守上界        │ M≥1 精确 pipeline             │
-  ├──────────┼─────────────────────┼───────────────────────────────┤
-  │ 负载模型 │ 统计分桶 P90        │ 实际 batch                    │
-  ├──────────┼─────────────────────┼───────────────────────────────┤
-  │ 设计哲学 │ "保证绝对安全"      │ "在安全边界的 slack 内尽量省" │
-  ├──────────┼─────────────────────┼───────────────────────────────┤
-  │ 失效模式 │ 配置保守 → 多余 GPU │ 频率过低 → SLO_URGENT 升频    │
-  └──────────┴─────────────────────┴───────────────────────────────┘
-
   3.3 协同例子
-
   Tier 1 配了 f̄_DA=1410, f̄_DF=930。运行时 bs=8。
 
   Tier 2 从 (1410, 930) 出发，首次重评估：
