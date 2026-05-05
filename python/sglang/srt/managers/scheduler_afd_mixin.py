@@ -97,6 +97,9 @@ class SchedulerAFDMixin:
             ) / max(len(batch.reqs), 1)) if batch.reqs else 1,
             # PD+AF decode: FFN needs output_ids so fill_ids matches Attn side
             output_ids_per_req=[list(r.output_ids) for r in batch.reqs],
+            # FFN-side Req creation: carry origin_input_ids and max_new_tokens
+            input_ids_per_req=[list(r.origin_input_ids) for r in batch.reqs],
+            max_new_tokens_per_req=[r.sampling_params.max_new_tokens for r in batch.reqs],
         )
         send_socket.send_pyobj(afd_req)
 
@@ -108,6 +111,7 @@ class SchedulerAFDMixin:
 
         m = get_afd_micro_batch()
         if batch.batch_size() < m:
+            batch.afd_split_seq_index = None
             return
 
         forward_mode = batch.forward_mode

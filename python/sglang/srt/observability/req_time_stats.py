@@ -305,13 +305,12 @@ class APIServerReqTimeStats(ReqTimeStatsBase):
     response_sent_to_client_time: float = 0.0
 
     def __getstate__(self) -> object:
-        state = {}
-        # send to DP controller or Scheduler
-        # If necessary, can propagate the timestamp here, for example:
-        # state = {
-        #    "created_time": self.created_time,
-        #    "api_server_dispatch_time": self.api_server_dispatch_time,
-        # }
+        # Propagate to DP controller or Scheduler so that the collector
+        # running on the scheduler process can compute TTFT from
+        # (prefill_finished_time — api_server_dispatch_time).
+        state = {
+            "api_server_dispatch_time": self.api_server_dispatch_time,
+        }
         state.update(super().__getstate__())
         return state
 
@@ -467,14 +466,10 @@ class DPControllerReqTimeStats(ReqTimeStatsBase):
     dc_dispatch_finish_time: float = 0.0
 
     def __getstate__(self) -> object:
-        state = {}
-        # send to Scheduler
-        # If necessary, can propagate the timestamp here, for example:
-        # state = {
-        #     "created_time": self.created_time,
-        #     "api_server_dispatch_time": self.api_server_dispatch_time,
-        #     "dc_dispatch_time": self.dc_dispatch_time,
-        # }
+        # Propagate to Scheduler so that the collector can compute TTFT.
+        state = {
+            "api_server_dispatch_time": self.api_server_dispatch_time,
+        }
         state.update(super().__getstate__())
         return state
 

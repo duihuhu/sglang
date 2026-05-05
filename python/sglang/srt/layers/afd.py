@@ -1012,7 +1012,11 @@ def model_forward_afd(
     # R4: true overlap — on the Attn node, after an F stage (which contains
     # postprocess_layer with recv), issue recv_start for the NEXT F stage
     # early so the network transfer overlaps with the next A stage compute.
+    _afd_pipe_logger = logging.getLogger("afd_pipeline")
     for i, (stage_type, *args) in enumerate(pipeline):
+        stage_name = stage_type.name
+        layer_id = args[0] if args else -1
+        mb_id = args[1] if len(args) > 1 else -1
         executors[stage_type](*args)
 
         # After an A stage on Attn node, the send_async already returned.
@@ -1044,10 +1048,28 @@ def model_forward_afd(
     if len(results) == 1:
         return results[0].hidden_states, results[0].residual
 
+    # Validate results before merging
+    for i, r in enumerate(results):
+        if r.hidden_states.numel() == 0:
+            raise RuntimeError(
+                f"model_forward_afd: micro-batch {i} has empty hidden_states "
+                f"(shape={r.hidden_states.shape}) — likely a communication or split mismatch"
+            )
+
+    # Sync CUDA to catch async errors from upstream kernels before merge
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
     total_tokens = sum(r.hidden_states.shape[0] for r in results)
     hidden_dim = results[0].hidden_states.shape[1]
     dtype = results[0].hidden_states.dtype
     device = results[0].hidden_states.device
+
+    if total_tokens <= 0:
+        raise RuntimeError(
+            f"model_forward_afd: total_tokens={total_tokens} (expected > 0) "
+            f"across {len(results)} micro-batches"
+        )
 
     merged_hidden = torch.empty(total_tokens, hidden_dim, dtype=dtype, device=device)
     need_residual = afd_is_attn() and results[0].residual is not None

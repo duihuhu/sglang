@@ -525,6 +525,15 @@ class Scheduler(
         if getattr(self.server_args, "afd_dvfs_enabled", False):
             self._init_afd_dvfs(self.server_args)
 
+        # Tier 1: Joint ILP resource planning
+        self._tier1_solver = None
+        self._tier1_solution = None
+        self._tier1_monitor = None
+        self._tier1_collector = None
+        self._tier1_last_monitor_time = 0.0
+        if getattr(self.server_args, "enable_tier1_pa", False):
+            self._init_afd_tier1(self.server_args)
+
     def init_tokenizer(self):
         server_args = self.server_args
         self.is_generation = self.model_config.is_generation
@@ -1390,13 +1399,10 @@ class Scheduler(
             afd_poller = zmq.Poller()
             afd_poller.register(self.afd_recv_from_attn, zmq.POLLIN)
 
-        def _recv_afd_messages():
-            """Poll for messages from Attn scheduler.
+        _afd_loop_iter = 0
 
-            Returns ALL messages (including AFDReqInput) so they can be
-            broadcast to all TP ranks. AFDReqInput state is extracted later
-            in _afd_process_input_requests on every rank.
-            """
+        def _recv_afd_messages():
+            """Poll for messages from Attn scheduler."""
             if self.afd_recv_from_attn is None:
                 return []
             extra_reqs = []
@@ -1412,6 +1418,7 @@ class Scheduler(
             """Compute microbatch split points for AFD."""
             m = get_afd_micro_batch()
             if batch.batch_size() < m:
+                batch.afd_split_seq_index = None
                 return
 
             from sglang.srt.batch_overlap.afd_overlap import (
@@ -1429,6 +1436,7 @@ class Scheduler(
                     batch.batch_size(), m, None
                 )
             else:
+                batch.afd_split_seq_index = None
                 return
 
             batch.afd_split_seq_index = split_indices
@@ -1443,6 +1451,7 @@ class Scheduler(
             self.process_batch_result(tmp_batch, tmp_result)
 
         while True:
+            _afd_loop_iter += 1
             recv_reqs = self.recv_requests()
 
             # Step 3.6: FFN also receives AFD messages
@@ -1468,6 +1477,14 @@ class Scheduler(
             if afd_is_ffn() and self._afd_batchsize_attn is None:
                 if afd_poller is not None:
                     afd_poller.poll(timeout=10)
+
+                # If running_batch is non-empty but Attn stopped sending
+                # batch info, the requests are stale — clean them up.
+                if (
+                    self.running_batch is not None
+                    and not self.running_batch.is_empty()
+                ):
+                    self._afd_ffn_cleanup_all()
                 continue
 
             batch = self._afd_get_next_batch(disagg_mode)
@@ -1484,6 +1501,8 @@ class Scheduler(
                 # Attn side: notify FFN about current batch
                 SchedulerAFDMixin.afd_send_batch_info(self, batch)
 
+                is_decode = batch.forward_mode.is_decode()
+                self._tier1_record_batch_start(is_prefill=not is_decode)
                 self._afd_dvfs_before_batch(batch)
                 _prepare_afd_overlap(batch)
                 batch_result = self.run_batch(batch)
@@ -1492,6 +1511,11 @@ class Scheduler(
                     self.result_queue.append((batch.copy(), batch_result))
                 else:
                     self.process_batch_result(batch, batch_result)
+
+                t_iter = (time.perf_counter() - self._last_decode_batch_time) * 1e6 \
+                    if is_decode and hasattr(self, "_last_decode_batch_time") and self._last_decode_batch_time is not None \
+                    else 0.0
+                self._tier1_record_batch(batch, is_decode, t_iter)
 
                 # Reset AFD state for next iteration
                 self._afd_batchsize_attn = None
@@ -1505,6 +1529,10 @@ class Scheduler(
                 if afd_overlap:
                     self.cancel_bubble_timer()
                 else:
+                    # FFN side: force-clean any remaining stale requests before
+                    # the idle memory check, since no more AFDReqInput will arrive.
+                    if afd_is_ffn():
+                        self._afd_ffn_cleanup_all()
                     self.self_check_during_idle()
 
             # F3: overlap — process last batch (while GPU runs current batch)
@@ -1518,6 +1546,130 @@ class Scheduler(
                     self.launch_batch_sample_if_needed(batch_result)
 
             self.last_batch = batch
+
+            # ── Tier 1 workload monitor (periodic re-planning check) ──
+            self._tier1_monitor_check()
+
+    def _tier1_monitor_check(self):
+        """Periodically check WorkloadMonitor and trigger re-plan if needed."""
+        if self._tier1_monitor is None or self._tier1_collector is None:
+            return
+        from sglang.srt.layers.afd import afd_is_attn
+
+        if not afd_is_attn():
+            return
+
+        now = time.time()
+        if now - self._tier1_last_monitor_time < self.server_args.tier1_monitor_window_s:
+            return
+        self._tier1_last_monitor_time = now
+
+        # Build MonitoringWindow from collector and feed to monitor
+        window = self._tier1_collector.build_window()
+        if window is None:
+            return  # not enough data yet
+
+        self._tier1_monitor.record_window(window)
+        self._tier1_collector.reset_window()
+
+        should_replan, reasons = self._tier1_monitor.should_replan()
+
+        # ── Per-window detection summary ──
+        logger.info(
+            "[Tier1] window=%.0fs | SLO_violation=%.2f%% | "
+            "a_util=%.2f f_util=%.2f p_util=%.2f d_util=%.2f | "
+            "TTFT_p99=%.0fms TPOT_p99=%.0fus | active=%d | "
+            "replan=%s%s",
+            self._tier1_collector.window_elapsed_s,
+            window.slo_violation_rate * 100,
+            window.a_util, window.f_util, window.p_util, window.d_util,
+            window.ttft_p99_ms, window.tpot_p99_us,
+            window.active_requests,
+            "YES" if should_replan else "no",
+            f" reasons={reasons}" if should_replan else "",
+        )
+        if window.load_distribution:
+            logger.info("[Tier1] load_dist=%s", window.load_distribution)
+
+        if should_replan:
+            logger.info("[Tier1] Triggering re-plan: %s", reasons)
+            self._replan_tier1(reasons)
+
+    def _tier1_record_batch(self, batch, is_decode: bool, t_iter_us: float = 0.0):
+        """Record per-batch metrics into the collector (no-op if collector is None)."""
+        if self._tier1_collector is None:
+            return
+        # End-of-batch: extract per-request TTFT/TPOT from this batch
+        self._tier1_collector.record_batch_end(batch, is_decode, t_iter_us)
+
+    def _tier1_record_batch_start(self, is_prefill: bool):
+        """Record batch start time (no-op if collector is None)."""
+        if self._tier1_collector is None:
+            return
+        self._tier1_collector.record_batch_start(is_prefill)
+
+    def _replan_tier1(self, reasons: list[str]):
+        """Re-run the Tier 1 solver and switch configuration.
+
+        Called when WorkloadMonitor detects a significant workload shift.
+        Lazy-initialises the solver if it was deferred (pre-computed solution
+        mode).  Currently logs the new solution; the drain-then-switch
+        transition will be implemented in a follow-up.
+        """
+        try:
+            self._ensure_tier1_solver()
+            if self._tier1_solver is None:
+                logger.warning("Tier 1 re-plan: solver init failed")
+                return
+
+            server_args = self.server_args
+            wl, slo = self._make_tier1_workload_slo(server_args)
+
+            new_solution = self._tier1_solver.solve(
+                G=server_args.tier1_gpu_count,
+                workload=wl,
+                slo=slo,
+            )
+
+            if not new_solution.feasible:
+                logger.warning(
+                    "[Tier1] Re-plan: INFEASIBLE — keeping current config "
+                    "(reasons: %s)", reasons)
+                return
+
+            old = self._tier1_solution
+            logger.info(
+                "[Tier1] Re-plan OLD: PA(tp=%d,f=%d) PF(tp=%d,f=%d) "
+                "DA(tp=%d,f=%d) DF(tp=%d,f=%d) k_P=%d k_D=%d E/layer=%.2fmJ",
+                old.tp_pa, old.f_pa, old.tp_pf, old.f_pf,
+                old.tp_da, old.f_da, old.tp_df, old.f_df,
+                old.k_p, old.k_d, old.total_energy_mj_per_layer,
+            )
+            logger.info(
+                "[Tier1] Re-plan NEW: PA(tp=%d,f=%d) PF(tp=%d,f=%d) "
+                "DA(tp=%d,f=%d) DF(tp=%d,f=%d) k_P=%d k_D=%d E/layer=%.2fmJ | "
+                "reasons=%s",
+                new_solution.tp_pa, new_solution.f_pa,
+                new_solution.tp_pf, new_solution.f_pf,
+                new_solution.tp_da, new_solution.f_da,
+                new_solution.tp_df, new_solution.f_df,
+                new_solution.k_p, new_solution.k_d,
+                new_solution.total_energy_mj_per_layer,
+                reasons,
+            )
+            self._tier1_solution = new_solution
+
+            # Reset monitor reference distribution
+            if self._tier1_monitor is not None:
+                self._tier1_monitor.reset_reference({})
+
+            # TODO: drain-then-switch transition
+            # 1. Drain current batches
+            # 2. Reconfigure pools (k_P, k_D, tp_*, f_*)
+            # 3. Resume with new config
+
+        except Exception as e:
+            logger.error("Tier 1 re-plan failed: %s", e)
 
     def _afd_get_next_batch(self, disagg_mode):
         """Select the correct batch scheduling function based on disagg mode.
@@ -1559,16 +1711,195 @@ class Scheduler(
             return
 
         try:
-            from sglang.srt.layers.dvfs import DVFSController
             import torch
-            self._dvfs_hw = DVFSController(
-                device_index=torch.cuda.current_device()
-            )
-            logger.info("DVFS HW controller initialized on GPU %d", torch.cuda.current_device())
+            from sglang.srt.layers.dvfs import DVFSController
+
+            # Use physical NVML GPU index set by launcher (not CUDA index,
+            # which may differ when CUDA_VISIBLE_DEVICES remaps devices).
+            nvml_device_index = int(os.environ.get("AFD_NVML_DEVICE_INDEX",
+                torch.cuda.current_device() if torch.cuda.is_available() else 0))
+
+            self._dvfs_hw = DVFSController(device_index=nvml_device_index)
+            logger.info("DVFS HW controller initialized on NVML GPU %d", nvml_device_index)
         except Exception as e:
             logger.warning("DVFS HW unavailable (libdvfs_ctrl.so missing?): %s. "
                            "Frequency decisions will be logged but not applied.", e)
             self._dvfs_hw = None
+
+    def _init_afd_tier1(self, server_args):
+        """Initialize Tier 1 dynamic monitoring on the PA scheduler.
+
+        Always starts WorkloadMonitor + WorkloadMetricsCollector for real-time
+        per-request TTFT/TPOT tracking and GPU utilisation polling.
+
+        Solver initialisation depends on the startup mode:
+        - If ``--tier1-initial-solution`` is set (written by af_launcher.py
+          --start-with-workload), the solution is loaded from JSON and the
+          solver is NOT initialised.  It is lazy-created only when a re-plan
+          is triggered.
+        - Otherwise the solver is initialised immediately and run once at
+          startup.
+        """
+        from sglang.srt.layers.afd_type import AFDPerspective
+
+        if server_args.afd_perspective != AFDPerspective.AFD_PERSPECTIVE_ATTN:
+            return
+
+        try:
+            # ── Monitor + collector (always) ───────────────────────
+            from sglang.srt.energy.workload_monitor import WorkloadMonitor
+            from sglang.srt.energy.workload_collector import WorkloadMetricsCollector
+
+            # Read GPU→pool mapping from launcher-set env vars
+            attn_gpu_indices = _parse_gpu_indices_env("AFD_ATTN_GPU_INDICES")
+            ffn_gpu_indices = _parse_gpu_indices_env("AFD_FFN_GPU_INDICES")
+
+            self._tier1_monitor = WorkloadMonitor(
+                window_s=server_args.tier1_monitor_window_s,
+            )
+            self._tier1_collector = WorkloadMetricsCollector(
+                ttft_slo_ms=server_args.afd_ttft_slo_ms,
+                tpot_slo_us=server_args.afd_tpot_slo_us,
+                window_s=server_args.tier1_monitor_window_s,
+                attn_gpu_indices=attn_gpu_indices,
+                ffn_gpu_indices=ffn_gpu_indices,
+                enable_nvml_polling=True,
+                stats_path=server_args.tier1_stats_path,
+            )
+            self._tier1_last_monitor_time = time.time()
+            logger.info(
+                "Tier 1 monitor+collector started (window=%.1fs, "
+                "attn_gpus=%s, ffn_gpus=%s)",
+                server_args.tier1_monitor_window_s,
+                attn_gpu_indices, ffn_gpu_indices,
+            )
+
+            # ── Solution ──────────────────────────────────────────
+            init_sol_path = server_args.tier1_initial_solution
+            if init_sol_path:
+                # Pre-computed by af_launcher.py --start-with-workload
+                self._load_tier1_solution_from_json(init_sol_path)
+                self._tier1_solver = None  # lazy-init on re-plan
+                sol = self._tier1_solution
+                logger.info(
+                    "[Tier1] Loaded pre-computed solution from %s: "
+                    "PA(tp=%d,f=%d) PF(tp=%d,f=%d) "
+                    "DA(tp=%d,f=%d) DF(tp=%d,f=%d) "
+                    "k_P=%d k_D=%d E/layer=%.2fmJ GPU=%d",
+                    init_sol_path,
+                    sol.tp_pa, sol.f_pa, sol.tp_pf, sol.f_pf,
+                    sol.tp_da, sol.f_da, sol.tp_df, sol.f_df,
+                    sol.k_p, sol.k_d, sol.total_energy_mj_per_layer,
+                    sol.gpu_used,
+                )
+            else:
+                # No pre-computed solution — run solver now
+                self._tier1_solver = self._make_tier1_solver(server_args)
+                wl, slo = self._make_tier1_workload_slo(server_args)
+                self._tier1_solution = self._tier1_solver.solve(
+                    G=server_args.tier1_gpu_count,
+                    workload=wl,
+                    slo=slo,
+                )
+                if self._tier1_solution.feasible:
+                    sol = self._tier1_solution
+                    logger.info(
+                        "[Tier1] Init solution: "
+                        "PA(tp=%d,f=%d) PF(tp=%d,f=%d) "
+                        "DA(tp=%d,f=%d) DF(tp=%d,f=%d) "
+                        "k_P=%d k_D=%d E/layer=%.2fmJ GPU=%d",
+                        sol.tp_pa, sol.f_pa, sol.tp_pf, sol.f_pf,
+                        sol.tp_da, sol.f_da, sol.tp_df, sol.f_df,
+                        sol.k_p, sol.k_d, sol.total_energy_mj_per_layer,
+                        sol.gpu_used,
+                    )
+                else:
+                    logger.warning(
+                        "[Tier1] Init: INFEASIBLE — using warm_start fallback"
+                    )
+                    self._tier1_solution = self._tier1_solver.warm_start(
+                        G=server_args.tier1_gpu_count,
+                        workload=wl,
+                        slo=slo,
+                    )
+
+        except Exception as e:
+            logger.warning("Failed to init Tier 1: %s", e)
+            self._tier1_solver = None
+            self._tier1_solution = None
+            self._tier1_monitor = None
+            self._tier1_collector = None
+
+    # ── Lazy solver init helpers ─────────────────────────────────────
+
+    def _load_tier1_solution_from_json(self, path: str):
+        """Create a Tier1Solution from a JSON file written by af_launcher.py."""
+        import json
+        from sglang.srt.energy.tier1_solver import Tier1Solution
+
+        with open(path, "r") as f:
+            data = json.load(f)
+        self._tier1_solution = Tier1Solution(
+            k_p=data.get("k_p", 1),
+            k_d=data.get("k_d", 1),
+            tp_pa=data.get("tp_pa", 1),
+            tp_pf=data.get("tp_pf", 1),
+            tp_da=data.get("tp_da", 1),
+            tp_df=data.get("tp_df", 1),
+            f_pa=data.get("f_pa", 1410),
+            f_pf=data.get("f_pf", 1410),
+            f_da=data.get("f_da", 1410),
+            f_df=data.get("f_df", 1410),
+            total_energy_mj_per_layer=data.get("total_energy_mj_per_layer", 0.0),
+            gpu_used=data.get("gpu_used", 0),
+            feasible=data.get("feasible", True),
+        )
+
+    @staticmethod
+    def _make_tier1_workload_slo(server_args):
+        from sglang.srt.energy.tier1_solver import SLOConfig, WorkloadProfile
+
+        wl = WorkloadProfile(
+            lambda_prefill=server_args.tier1_lambda_prefill,
+            n_active_decode=server_args.tier1_n_active_decode,
+            il_rep_p=server_args.tier1_il_rep_p,
+            bs_avg_p=server_args.tier1_bs_avg_p,
+            il_rep_d=server_args.tier1_il_rep_d,
+            ol_rep_d=server_args.tier1_ol_rep_d,
+            bs_avg_d=server_args.tier1_bs_avg_d,
+        )
+        slo = SLOConfig(
+            ttft_ms=server_args.afd_ttft_slo_ms,
+            tpot_ms=server_args.afd_tpot_slo_us / 1000.0,
+        )
+        return wl, slo
+
+    def _ensure_tier1_solver(self):
+        """Lazy-init the Tier1Solver if it was deferred (pre-computed solution mode)."""
+        if self._tier1_solver is not None:
+            return
+        server_args = self.server_args
+        logger.info("Tier 1: lazy-initialising solver for re-plan …")
+        self._tier1_solver = self._make_tier1_solver(server_args)
+
+    def _make_tier1_solver(self, server_args):
+        """Create a fully initialised Tier1Solver with ProfileTable."""
+        from sglang.srt.energy.profile_table import ProfileTable
+        from sglang.srt.energy.tier1_solver import Tier1Solver
+
+        pt = ProfileTable(
+            prefill_path=server_args.tier1_prefill_data_path,
+            decode_path=server_args.tier1_decode_data_path,
+            energy_model_dir=server_args.afd_energy_model_dir,
+        )
+        return Tier1Solver(
+            profile_table=pt,
+            num_layers=self.model_config.num_hidden_layers,
+            num_kv_heads=self.model_config.num_key_value_heads,
+            head_dim=self.model_config.head_dim,
+            hidden_size=self.model_config.hidden_size,
+            gpu_mem_gb=80.0,
+        )
 
     def _compute_prefill_slack(self, batch) -> float:
         """Compute tightest TTFT slack (us) across all requests in batch."""
@@ -1620,6 +1951,10 @@ class Scheduler(
                 t_iter_us = (time.perf_counter() - self._last_decode_batch_time) * 1e6
                 self._af_dvfs_ctrl.compute_window_size(t_iter_us)
             self._last_decode_batch_time = time.perf_counter()
+
+            # Share decode iteration time with PA's Tier1 monitor via stats file
+            self._write_afd_decode_stats(t_iter_us, batch.batch_size())
+
             reeval_reason = self._af_dvfs_ctrl.should_reevaluate_decode(
                 batch.batch_size(),
                 current_tpot_us=t_iter_us,
@@ -1638,6 +1973,22 @@ class Scheduler(
                 )
                 if decision.switched:
                     self._apply_freq(decision.f_a, decision.f_f)
+
+    def _write_afd_decode_stats(self, t_iter_us: float, bs: int):
+        """Write decode iteration timing to shared stats file for PA's Tier1 monitor."""
+        import json
+        stats_path = getattr(self.server_args, "tier1_stats_path", None)
+        if not stats_path:
+            return
+        try:
+            with open(stats_path, "w") as f:
+                json.dump({
+                    "t_iter_us": t_iter_us,
+                    "bs": bs,
+                    "timestamp": time.time(),
+                }, f)
+        except Exception as e:
+            logger.error("Failed to write decode stats to %s: %s", stats_path, e)
 
     def _afd_process_input_requests(self, recv_reqs):
         """Process input requests with AFD awareness (S1, S4).
@@ -1674,8 +2025,14 @@ class Scheduler(
             self._afd_pending_batch_infos = deque()
             pending = self._afd_pending_batch_infos
 
+        # Track whether we just consumed an AFDReqInput so we can create Reqs
+        # AFTER process_input_requests (to avoid duplicates with TokenizedGenerateReqInput).
+        consumed_afd_req = None
+
         if self._afd_batchsize_attn is None and pending:
             afd_req = self._afd_pending_batch_infos.popleft()
+            consumed_afd_req = afd_req
+            old_req_ids = self._afd_req_ids
             self._afd_batchsize_attn = afd_req.batch_size
             self._afd_forward_mode = afd_req.forward_mode
             self._afd_req_ids = afd_req.req_ids
@@ -1683,7 +2040,74 @@ class Scheduler(
             if afd_req.output_ids_per_req and afd_req.req_ids:
                 self._afd_sync_output_ids(afd_req)
 
+            # FFN decode side: clean up requests no longer tracked by Attn
+            if not afd_is_attn() and old_req_ids is not None:
+                self._afd_ffn_cleanup_stale(
+                    set(afd_req.req_ids), set(old_req_ids)
+                )
+
+        # process_input_requests handles TokenizedGenerateReqInput → creates Req objects
         self.process_input_requests(filtered_reqs)
+
+        # Now create Reqs from AFDReqInput for any rids that still don't exist
+        if (
+            consumed_afd_req is not None
+            and not afd_is_attn()
+            and consumed_afd_req.input_ids_per_req
+        ):
+            self._afd_ensure_reqs_from_afdreq(consumed_afd_req)
+
+    def _afd_ensure_reqs_from_afdreq(self, afd_req):
+        """FFN decode: create Req objects from AFDReqInput data when missing.
+
+        In PD+AF decode, DA sends AFDReqInput with metadata but the FFN side
+        may not have corresponding Req objects (since they arrive via KV-cache
+        transfer, not TokenizedGenerateReqInput). This creates minimal Reqs so
+        get_next_disagg_decode_batch_to_run can build a batch.
+        """
+        from sglang.srt.layers.afd import afd_is_attn
+        from sglang.srt.managers.schedule_batch import Req
+        from sglang.srt.sampling.sampling_params import SamplingParams
+
+        if afd_is_attn():
+            return
+
+        existing_rids = set(req.rid for req in self.waiting_queue)
+        if self.running_batch is not None:
+            existing_rids.update(req.rid for req in self.running_batch.reqs)
+
+        for i, rid in enumerate(afd_req.req_ids):
+            if rid in existing_rids:
+                continue
+
+            origin_input_ids = (
+                afd_req.input_ids_per_req[i]
+                if afd_req.input_ids_per_req and i < len(afd_req.input_ids_per_req)
+                else []
+            )
+            max_new_tokens = (
+                afd_req.max_new_tokens_per_req[i]
+                if afd_req.max_new_tokens_per_req and i < len(afd_req.max_new_tokens_per_req)
+                else 128
+            )
+
+            req = Req(
+                rid=rid,
+                origin_input_text="",
+                origin_input_ids=origin_input_ids,
+                sampling_params=SamplingParams(
+                    max_new_tokens=max_new_tokens,
+                    stop=[],
+                    stop_regex=[],
+                ),
+                vocab_size=self.model_config.vocab_size,
+            )
+            # Pre-populate output_ids so fill_ids is correct for the forward pass
+            if afd_req.output_ids_per_req and i < len(afd_req.output_ids_per_req):
+                req.output_ids = list(afd_req.output_ids_per_req[i])
+            req.fill_ids = list(origin_input_ids) + list(req.output_ids)
+            req.set_extend_input_len(len(req.fill_ids))
+            self.waiting_queue.append(req)
 
     def _afd_sync_output_ids(self, afd_req):
         """Sync output_ids from Attn→FFN so fill_ids match for AF communication.
@@ -1709,6 +2133,73 @@ class Scheduler(
                 if oids is not None and len(req.output_ids) < len(oids):
                     req.output_ids = list(oids)
                     req.fill_ids = req.origin_input_ids + req.output_ids
+
+    def _afd_ffn_cleanup_stale(self, active_req_ids: set, old_req_ids: set):
+        """Release KV cache for FFN-side requests that Attn has stopped tracking.
+
+        On the decode-FFN side, the Attn side drives the request lifecycle.
+        When a request ID disappears from AFDReqInput, it means Attn has
+        finished the request. The FFN side must release its KV cache pages
+        to avoid a false memory-leak detection during idle checks.
+        """
+        from sglang.srt.layers.afd import afd_is_attn as _is_attn
+        from sglang.srt.mem_cache.common import release_kv_cache as _release_kv
+
+        if _is_attn():
+            return
+
+        # Req IDs that left the Attn-managed set since last batch info
+        finished_ids = old_req_ids - active_req_ids
+        if not finished_ids:
+            return
+
+        # Clean waiting_queue
+        stale_waiting = [r for r in self.waiting_queue if r.rid in finished_ids]
+        if stale_waiting:
+            for req in stale_waiting:
+                _release_kv(req, self.tree_cache)
+            self.waiting_queue = [r for r in self.waiting_queue if r.rid not in finished_ids]
+
+        # Clean running_batch — force-finish so filter_batch removes them
+        if self.running_batch is not None:
+            for req in self.running_batch.reqs:
+                if req.rid in finished_ids and not req.finished():
+                    from sglang.srt.managers.schedule_batch import FINISH_LENGTH
+                    req.finished_reason = FINISH_LENGTH(length=0)
+                    _release_kv(req, self.tree_cache)
+
+    def _afd_ffn_cleanup_all(self):
+        """Force-clean ALL remaining requests on the FFN decode side at idle.
+
+        Called when no more AFDReqInput will arrive (DA side is idle too).
+        Without this, stale requests in running_batch hold KV cache pages that
+        trigger a false memory-leak detection.
+        """
+        from sglang.srt.layers.afd import afd_is_attn as _is_attn
+        from sglang.srt.mem_cache.common import release_kv_cache as _release_kv
+
+        if _is_attn():
+            return
+
+        # Clean waiting_queue
+        for req in self.waiting_queue:
+            if req.req_pool_idx is not None:
+                _release_kv(req, self.tree_cache)
+        self.waiting_queue.clear()
+
+        # Clean running_batch
+        if self.running_batch is not None:
+            from sglang.srt.managers.schedule_batch import FINISH_LENGTH
+            for req in self.running_batch.reqs:
+                if not req.finished():
+                    req.finished_reason = FINISH_LENGTH(length=0)
+                if req.req_pool_idx is not None:
+                    _release_kv(req, self.tree_cache)
+            # Clear the batch to prevent double-free on the next call
+            # (the wait loop calls _afd_ffn_cleanup_all every 10ms, and
+            #  release_kv_cache sets req_pool_idx=None on the first call).
+            self.running_batch.reqs.clear()
+            self.running_batch.batch_is_full = False
 
     @DynamicGradMode()
     def event_loop_overlap(self):
@@ -3699,6 +4190,18 @@ def is_work_request(recv_req):
             BatchTokenizedEmbeddingReqInput,
         ),
     )
+
+
+def _parse_gpu_indices_env(var_name: str) -> List[int]:
+    """Parse a comma-separated list of GPU indices from an environment variable."""
+    val = os.environ.get(var_name, "")
+    if not val:
+        return []
+    try:
+        return [int(x.strip()) for x in val.split(",") if x.strip()]
+    except ValueError:
+        logger.warning("Invalid %s value: %r, ignoring", var_name, val)
+        return []
 
 
 class SenderWrapper:

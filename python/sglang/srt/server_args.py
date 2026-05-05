@@ -644,6 +644,23 @@ class ServerArgs:
     afd_ttft_slo_ms: float = 5000.0
     afd_tpot_slo_us: float = 50000.0
 
+    # Tier 1: Joint ILP resource planning + dynamic monitoring
+    enable_tier1_pa: bool = False
+    tier1_initial_solution: Optional[str] = None  # path to pre-computed solution JSON
+    tier1_gpu_count: int = 16
+    tier1_lambda_prefill: float = 10.0
+    tier1_n_active_decode: int = 32
+    tier1_il_rep_p: int = 1024
+    tier1_bs_avg_p: int = 8
+    tier1_il_rep_d: int = 512
+    tier1_ol_rep_d: int = 256
+    tier1_bs_avg_d: int = 16
+    tier1_monitor_window_s: float = 30.0
+    tier1_prefill_data_path: str = "benchmark/test_motivation/hucc/paper/prefill_data_v1.txt"
+    tier1_decode_data_path: str = "benchmark/test_motivation/hucc/paper/decode_data_v1.txt"
+    tier1_stats_path: Optional[str] = None
+    """Path to a shared JSON file for DA→PA decode timing stats (cross-process Tier1 TPOT monitoring)."""
+
     enable_torch_compile: bool = False
     disable_piecewise_cuda_graph: bool = False
     enforce_piecewise_cuda_graph: bool = False
@@ -3250,6 +3267,19 @@ class ServerArgs:
                     self.afd_ttft_slo_ms,
                     self.afd_tpot_slo_us,
                 )
+
+            # Tier 1 validation
+            if self.enable_tier1_pa and not self.afd_energy_model_dir:
+                raise ValueError(
+                    "--enable-tier1-pa requires --afd-energy-model-dir "
+                    "(for re-planning Tier1Solver)."
+                )
+            if self.tier1_initial_solution and not os.path.exists(self.tier1_initial_solution):
+                logger.warning(
+                    "--tier1-initial-solution file not found: %s, ignoring.",
+                    self.tier1_initial_solution,
+                )
+                self.tier1_initial_solution = None
         else:
             if self.afd_enable_overlap_schedule:
                 logger.warning(
@@ -3261,6 +3291,11 @@ class ServerArgs:
                     "--afd-dvfs-enabled requires --afd-perspective, ignoring."
                 )
                 self.afd_dvfs_enabled = False
+            if self.enable_tier1_pa:
+                logger.warning(
+                    "--enable-tier1-pa requires --afd-perspective, ignoring."
+                )
+                self.enable_tier1_pa = False
 
     def _validate_ib_devices(self, device_str: str) -> Optional[str]:
         """
@@ -5487,6 +5522,104 @@ class ServerArgs:
             type=float,
             default=ServerArgs.afd_tpot_slo_us,
             help="TPOT SLO in microseconds for Decode DVFS. Default: 50000.",
+        )
+
+        parser.add_argument(
+            "--enable-tier1-pa",
+            action="store_true",
+            default=ServerArgs.enable_tier1_pa,
+            help="Enable Tier 1 dynamic monitoring on the PA scheduler. "
+            "Starts WorkloadMonitor + WorkloadMetricsCollector to track "
+            "per-request TTFT/TPOT and GPU utilisation.  When workload "
+            "shifts are detected (SLO violation, A/F imbalance, load "
+            "distribution change), triggers Tier1Solver re-planning. "
+            "Requires --afd-perspective and --afd-energy-model-dir.",
+        )
+        parser.add_argument(
+            "--tier1-initial-solution",
+            type=str,
+            default=ServerArgs.tier1_initial_solution,
+            help="Path to a pre-computed Tier1Solution JSON file (written by "
+            "af_launcher.py --start-with-workload).  When provided, the "
+            "scheduler loads this solution at startup instead of running "
+            "the ILP solver.  The solver is lazy-initialised only when a "
+            "re-plan is triggered.",
+        )
+        parser.add_argument(
+            "--tier1-gpu-count",
+            type=int,
+            default=ServerArgs.tier1_gpu_count,
+            help="Total GPU budget for Tier 1 ILP solver. Default: 16.",
+        )
+        parser.add_argument(
+            "--tier1-lambda-prefill",
+            type=float,
+            default=ServerArgs.tier1_lambda_prefill,
+            help="Expected prefill request arrival rate (req/s). Default: 10.0.",
+        )
+        parser.add_argument(
+            "--tier1-n-active-decode",
+            type=int,
+            default=ServerArgs.tier1_n_active_decode,
+            help="Expected steady-state active decode requests. Default: 32.",
+        )
+        parser.add_argument(
+            "--tier1-il-rep-p",
+            type=int,
+            default=ServerArgs.tier1_il_rep_p,
+            help="Representative prefill input length for ILP. Default: 1024.",
+        )
+        parser.add_argument(
+            "--tier1-bs-avg-p",
+            type=int,
+            default=ServerArgs.tier1_bs_avg_p,
+            help="Expected average prefill batch size. Default: 8.",
+        )
+        parser.add_argument(
+            "--tier1-il-rep-d",
+            type=int,
+            default=ServerArgs.tier1_il_rep_d,
+            help="Representative decode input length for ILP. Default: 512.",
+        )
+        parser.add_argument(
+            "--tier1-ol-rep-d",
+            type=int,
+            default=ServerArgs.tier1_ol_rep_d,
+            help="Representative decode output length for ILP. Default: 256.",
+        )
+        parser.add_argument(
+            "--tier1-bs-avg-d",
+            type=int,
+            default=ServerArgs.tier1_bs_avg_d,
+            help="Expected average decode batch size. Default: 16.",
+        )
+        parser.add_argument(
+            "--tier1-monitor-window-s",
+            type=float,
+            default=ServerArgs.tier1_monitor_window_s,
+            help="Monitoring window size in seconds for the workload monitor. "
+            "Used only when --enable-monitor is set. Default: 30.0.",
+        )
+        parser.add_argument(
+            "--tier1-prefill-data-path",
+            type=str,
+            default=ServerArgs.tier1_prefill_data_path,
+            help="Path to prefill profile data for Tier 1 ILP solver. Default: "
+            "benchmark/test_motivation/hucc/paper/prefill_data_v1.txt.",
+        )
+        parser.add_argument(
+            "--tier1-decode-data-path",
+            type=str,
+            default=ServerArgs.tier1_decode_data_path,
+            help="Path to decode profile data for Tier 1 ILP solver. Default: "
+            "benchmark/test_motivation/hucc/paper/decode_data_v1.txt.",
+        )
+        parser.add_argument(
+            "--tier1-stats-path",
+            type=str,
+            default=ServerArgs.tier1_stats_path,
+            help="Path to a shared JSON file for DA→PA decode timing stats. "
+            "Set by af_launcher.py for cross-process Tier1 TPOT monitoring.",
         )
 
         parser.add_argument(

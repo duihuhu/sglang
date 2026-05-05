@@ -37,6 +37,7 @@ from sglang.srt.layers.linear import (
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.pooler import Pooler, PoolingType
+from sglang.srt.layers.afd import afd_is_ffn
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.rotary_embedding import get_rope
@@ -416,7 +417,15 @@ class LlamaModel(nn.Module):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]], PPProxyTensors]:
         if self.pp_group.is_first_rank:
             if input_embeds is None:
-                hidden_states = self.embed_tokens(input_ids)
+                if afd_is_ffn():
+                    hidden_states = torch.zeros(
+                        input_ids.shape[0],
+                        self.config.hidden_size,
+                        dtype=self.embed_tokens.weight.dtype,
+                        device=input_ids.device,
+                    )
+                else:
+                    hidden_states = self.embed_tokens(input_ids)
             else:
                 hidden_states = input_embeds
             residual = None
@@ -598,6 +607,13 @@ class LlamaForCausalLM(nn.Module):
 
         if self.pp_group.is_last_rank:
             if not get_embedding:
+                if afd_is_ffn():
+                    vocab_size = self.lm_head.weight.shape[0]
+                    dummy = torch.zeros(
+                        forward_batch.batch_size, vocab_size,
+                        dtype=hidden_states.dtype, device=hidden_states.device,
+                    )
+                    return LogitsProcessorOutput(next_token_logits=dummy, hidden_states=None)
                 return self.logits_processor(
                     input_ids,
                     hidden_states,

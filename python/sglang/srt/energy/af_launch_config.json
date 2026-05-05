@@ -1,0 +1,88 @@
+{
+  "_comment": "AFlex multi-module launch configuration.  Start order: DF → DA → PF → PA → router.",
+  "model": {
+    "path": "/models/llama3.1-8",
+    "tp": 1,
+    "mem_fraction_static": 0.7
+  },
+  "gpu_indices": [0,1,2,3],
+
+  "disaggregation": {
+    "bootstrap_port": 18999,
+    "ib_device": "mlx5_4"
+  },
+  "afd": {
+    "comm_backend": "ucx",
+    "dvfs_enabled": true,
+    "energy_model_dir": "/workspace/sglang/benchmark/test_motivation/energy_models"
+  },
+  "tier1": {
+    "_comment": "Tier 1 ILP resource planning + dynamic monitoring on PA",
+    "enable_tier1_pa": true,
+    "start_with_workload": true,
+    "gpu_count": 4,
+    "lambda_prefill": 10.0,
+    "n_active_decode": 32,
+    "il_rep_p": 1024,
+    "bs_avg_p": 8,
+    "il_rep_d": 512,
+    "ol_rep_d": 256,
+    "bs_avg_d": 16,
+    "monitor_window_s": 30.0,
+    "prefill_data_path": "benchmark/test_motivation/hucc/paper/prefill_data_v1.txt",
+    "decode_data_path": "benchmark/test_motivation/hucc/paper/decode_data_v1.txt",
+    "ttft_slo_ms": 5000.0,
+    "tpot_slo_us": 50000.0
+  },
+  "modules": [
+    {
+      "name": "DF",
+      "gpu": 0,
+      "perspective": "ffn",
+      "disagg_mode": "decode",
+      "port": 50021,
+      "sched_port": 65400,
+      "ucx_base_port": 25100
+    },
+    {
+      "name": "DA",
+      "gpu": 1,
+      "perspective": "attn",
+      "disagg_mode": "decode",
+      "port": 50020,
+      "sched_port": 65400,
+      "ucx_base_port": 25100,
+      "ffn_host": "127.0.0.1"
+    },
+    {
+      "name": "PF",
+      "gpu": 2,
+      "perspective": "ffn",
+      "disagg_mode": "prefill",
+      "port": 50011,
+      "sched_port": 65300,
+      "ucx_base_port": 25000
+    },
+    {
+      "name": "PA",
+      "gpu": 3,
+      "perspective": "attn",
+      "disagg_mode": "prefill",
+      "port": 50010,
+      "sched_port": 65300,
+      "ucx_base_port": 25000,
+      "ffn_host": "127.0.0.1"
+    }
+  ],
+  "router": {
+    "enabled": true,
+    "prefill_url": "http://127.0.0.1:50010",
+    "decode_url": "http://127.0.0.1:50020",
+    "host": "127.0.0.1",
+    "port": 50000
+  },
+  "logs": {
+    "dir": "af_launch_logs",
+    "level": "info"
+  }
+}

@@ -312,9 +312,9 @@ def fit_final_models(df: pd.DataFrame, feature_cols: list[str],
 def main():
     parser = argparse.ArgumentParser(description="T2-1: Energy model fitting")
     parser.add_argument("--prefill", type=str,
-                        default=str(SCRIPT_DIR / "paper" / "prefill_data_v1.txt"))
+                        default=str(SCRIPT_DIR / "hucc/paper" / "prefill_data_v1.txt"))
     parser.add_argument("--decode", type=str,
-                        default=str(SCRIPT_DIR / "paper" / "decode_data_v1.txt"))
+                        default=str(SCRIPT_DIR / "hucc/paper" / "decode_data_v1.txt"))
     parser.add_argument("--output-dir", type=str,
                         default=str(SCRIPT_DIR / "energy_models"))
     parser.add_argument("--folds", type=int, default=5)

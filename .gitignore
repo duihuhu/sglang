@@ -278,3 +278,6 @@ bash-test/*
 
 *.tsv
 *.pkl
+
+# AFlex launch logs (runtime artifacts)
+af_launch_logs/

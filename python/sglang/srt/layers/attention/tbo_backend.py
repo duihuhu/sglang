@@ -214,7 +214,7 @@ class AfdAttnBackend(AttentionBackend):
                 # req_pool_indices so skip their attention metadata init.
                 return
             for child_backend, child_batch in zip(
-                self.children, forward_batch.afd_children, strict=True
+                self.children, forward_batch.afd_children
             ):
                 if child_batch.batch_size > 0:
                     child_backend.init_forward_metadata(forward_batch=child_batch)

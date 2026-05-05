@@ -955,6 +955,10 @@ class AFDReqInput(BaseReq):
     # For PD+AF decode: FFN needs the first output token from prefill
     # so fill_ids matches Attn side (origin_input_ids + output_ids).
     output_ids_per_req: Optional[List[List[int]]] = None
+    # For FFN-side Req creation in PD+AF decode: DF receives AFDReqInput
+    # but has no Req objects — these fields let DF create them.
+    input_ids_per_req: Optional[List[List[int]]] = None
+    max_new_tokens_per_req: Optional[List[int]] = None
 
 
 @dataclass

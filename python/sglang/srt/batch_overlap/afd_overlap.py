@@ -48,8 +48,8 @@ def _split_seq_indices_m_way(
 ) -> List[int]:
     """Compute m-1 split indices that divide num_seqs into m roughly equal parts.
 
-    G3 optimization: when extend_lens is provided, use token-count-aware
-    greedy splitting instead of naive num_seqs // m.
+    Guarantees no split equals num_seqs (would create empty trailing child).
+    When num_seqs < m, returns at most num_seqs - 1 splits.
     """
     if m <= 1:
         return []
@@ -63,19 +63,23 @@ def _split_seq_indices_m_way(
         for i in range(len(extend_lens)):
             running_sum += extend_lens[i]
             if running_sum >= target_per_part * part_idx and part_idx < m:
-                splits.append(i + 1)
+                if i + 1 < num_seqs:
+                    splits.append(i + 1)
                 part_idx += 1
                 if part_idx >= m:
                     break
+        # Fill remaining splits without creating one at num_seqs
         while len(splits) < m - 1:
             last = splits[-1] if splits else 0
             remaining = num_seqs - last
+            if remaining <= 1:
+                break
             step = max(1, remaining // (m - len(splits)))
-            splits.append(min(last + step, num_seqs))
-        return splits[:m - 1]
+            splits.append(min(last + step, num_seqs - 1))
+        return splits
 
     interval = max(1, num_seqs // m)
-    return [interval * (i + 1) for i in range(m - 1)]
+    return [interval * (i + 1) for i in range(m - 1) if interval * (i + 1) < num_seqs]
 
 
 def _compute_token_indices_m_way(
@@ -114,7 +118,7 @@ class AfdForwardBatchPreparer:
     @classmethod
     def prepare(cls, batch: ForwardBatch):
         m = _get_afd_micro_batch()
-        if batch.afd_split_seq_index is None or m <= 1:
+        if not batch.afd_split_seq_index or m <= 1:
             return
 
         from sglang.srt.layers.attention.tbo_backend import AfdAttnBackend
@@ -125,20 +129,24 @@ class AfdForwardBatchPreparer:
         token_indices = cls._compute_split_token_indices(batch, m)
         seq_indices = batch.afd_split_seq_index
 
+        # Use actual number of children from valid splits, not m
+        actual_m = len(seq_indices) + 1
+
         children_backends = batch.attn_backend.children
-        assert len(children_backends) == m, (
-            f"AfdAttnBackend has {len(children_backends)} children but m={m}"
+        assert len(children_backends) >= actual_m, (
+            f"AfdAttnBackend has {len(children_backends)} children but "
+            f"actual_m={actual_m} (from {len(seq_indices)} splits for m={m})"
         )
 
         children = []
         num_tokens_total = batch.input_ids.shape[0]
 
-        # Build m children from m-1 split points
+        # Build actual_m children from actual_m-1 split points
         boundaries_seq = [0] + list(seq_indices) + [batch.batch_size]
         boundaries_tok = [0] + list(token_indices) + [num_tokens_total]
 
         num_token_non_padded_values = []
-        for i in range(m):
+        for i in range(actual_m):
             tok_start = boundaries_tok[i]
             tok_end = boundaries_tok[i + 1]
             num_token_non_padded_values.append(max(0, tok_end - tok_start))
@@ -147,7 +155,9 @@ class AfdForwardBatchPreparer:
             num_token_non_padded_values, dtype=torch.int32
         ).to(device=batch.input_ids.device, non_blocking=True)
 
-        for i in range(m):
+        for i in range(actual_m):
+            if num_token_non_padded_values[i] == 0:
+                continue
             child = cls._filter_batch(
                 batch,
                 start_token_index=boundaries_tok[i],
@@ -159,6 +169,8 @@ class AfdForwardBatchPreparer:
             )
             children.append(child)
 
+        if not children:
+            return
         batch.afd_children = children
         batch.can_run_afd_overlap = True
 
@@ -207,7 +219,12 @@ class AfdForwardBatchPreparer:
             if is_ffn and key in skip_keys_ffn:
                 continue
             old_value = getattr(batch, key)
-            assert old_value.shape[0] == num_tokens
+            assert old_value.shape[0] == num_tokens, (
+                f"AFD filter_batch shape mismatch: key={key!r} "
+                f"shape[0]={old_value.shape[0]} num_tokens={num_tokens} "
+                f"token_range=[{start_token_index}:{end_token_index}] "
+                f"forward_mode={batch.forward_mode} "
+            )
             output_dict[key] = old_value[start_token_index:end_token_index]
 
         attention_tp_size = get_attention_tp_size()

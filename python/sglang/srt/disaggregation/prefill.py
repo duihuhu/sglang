@@ -20,6 +20,7 @@ Life cycle of a request in the prefill server
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional
@@ -458,16 +459,28 @@ class SchedulerDisaggregationPrefillMixin:
             if batch:
                 SchedulerAFDMixin.afd_send_batch_info(self, batch)
                 SchedulerAFDMixin.afd_prepare_overlap(self, batch)
+                is_decode = batch.forward_mode.is_decode()
+                self._tier1_record_batch_start(is_prefill=not is_decode)
                 self._afd_dvfs_before_batch(batch)
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
+                t_iter = (time.perf_counter() - self._last_decode_batch_time) * 1e6 \
+                    if is_decode and hasattr(self, "_last_decode_batch_time") and self._last_decode_batch_time is not None \
+                    else 0.0
+                self._tier1_record_batch(batch, is_decode, t_iter)
                 SchedulerAFDMixin.afd_reset_state(self)
             else:
                 self.self_check_during_idle()
+                if hasattr(self, "_tier1_collector") and self._tier1_collector is not None:
+                    self._tier1_collector.record_idle_start()
 
             if not afd_is_ffn():
                 self.process_disagg_prefill_inflight_queue()
             self.last_batch = batch
+
+            # ── Tier 1 workload monitor ──
+            if hasattr(self, "_tier1_monitor_check"):
+                self._tier1_monitor_check()
 
     @torch.no_grad()
     def event_loop_overlap_disagg_prefill(self: Scheduler) -> None:
@@ -786,7 +799,9 @@ class SchedulerDisaggregationPrefillMixin:
                     len(self.chunked_req.origin_input_ids),
                 )
             else:
-                self.send_kv_chunk(self.chunked_req)
+                from sglang.srt.layers.afd import afd_is_ffn as _is_ffn
+                if not _is_ffn():
+                    self.send_kv_chunk(self.chunked_req)
             self.running_batch.batch_is_full = False
 
         if self.last_batch and self.last_batch.forward_mode.is_extend():
@@ -811,6 +826,9 @@ class SchedulerDisaggregationPrefillMixin:
         """
         Send a prefilled chunk to the decode server
         """
+        # AFD FFN side doesn't manage KV cache — skip KV transfer
+        if req.disagg_kv_sender is None:
+            return
         page_size = self.token_to_kv_pool_allocator.page_size
         start_idx = req.start_send_idx
         end_idx = (

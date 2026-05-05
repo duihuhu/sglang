@@ -1,0 +1,40 @@
+{
+  "_comment": "Minimal AFlex config — no DVFS, no Tier1",
+  "model": {
+    "path": "/models/llama3.1-8",
+    "tp": 1,
+    "mem_fraction_static": 0.7
+  },
+  "gpu_indices": [0,1,2,3],
+  "disaggregation": {
+    "bootstrap_port": 18999,
+    "ib_device": "mlx5_4"
+  },
+  "afd": {
+    "comm_backend": "ucx",
+    "dvfs_enabled": false,
+    "energy_model_dir": "/workspace/sglang/benchmark/test_motivation/energy_models"
+  },
+  "tier1": {
+    "enable_tier1_pa": false,
+    "start_with_workload": false,
+    "gpu_count": 4
+  },
+  "modules": [
+    {"name": "DF", "gpu": 0, "perspective": "ffn", "disagg_mode": "decode", "port": 50021, "sched_port": 65400, "ucx_base_port": 25100},
+    {"name": "DA", "gpu": 1, "perspective": "attn", "disagg_mode": "decode", "port": 50020, "sched_port": 65400, "ucx_base_port": 25100, "ffn_host": "127.0.0.1"},
+    {"name": "PF", "gpu": 2, "perspective": "ffn", "disagg_mode": "prefill", "port": 50011, "sched_port": 65300, "ucx_base_port": 25000},
+    {"name": "PA", "gpu": 3, "perspective": "attn", "disagg_mode": "prefill", "port": 50010, "sched_port": 65300, "ucx_base_port": 25000, "ffn_host": "127.0.0.1"}
+  ],
+  "router": {
+    "enabled": true,
+    "prefill_url": "http://127.0.0.1:50010",
+    "decode_url": "http://127.0.0.1:50020",
+    "host": "127.0.0.1",
+    "port": 50000
+  },
+  "logs": {
+    "dir": "af_launch_logs",
+    "level": "info"
+  }
+}

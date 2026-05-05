@@ -52,6 +52,8 @@ class ScheduleBatchDisaggregationDecodeMixin:
                 seq_lens.append(seq_len)
                 pre_lens.append(pre_len)
                 req.extend_logprob_start_len = 0
+                req.kv_committed_len = len(req.fill_ids)
+                req.kv_allocated_len = len(req.fill_ids)
 
             # Populate batch fields needed by alloc_for_extend
             self.prefix_lens = pre_lens
@@ -139,7 +141,13 @@ class ScheduleBatchDisaggregationDecodeMixin:
         """Assign the buffered last input id to schedule batch"""
         self.output_ids = []
         for req in self.reqs:
-            self.output_ids.append(req.output_ids[-1])
+            # Guard: a freshly migrated request may not have output tokens yet.
+            # Fall back to the last input token so the batch remains valid.
+            if len(req.output_ids) > 0:
+                last_token = req.output_ids[-1]
+            else:
+                last_token = req.origin_input_ids[-1]
+            self.output_ids.append(last_token)
             self.tree_cache.cache_unfinished_req(req)
             if req.grammar is not None:
                 # FIXME: this try-except block is for handling unexpected xgrammar issue.
@@ -147,7 +155,7 @@ class ScheduleBatchDisaggregationDecodeMixin:
                     # if it is not None, then the grammar is from a retracted request, and we should not
                     # accept the token as it's already accepted
                     if req.grammar.current_token is None:
-                        req.grammar.accept_token(req.output_ids[-1])
+                        req.grammar.accept_token(last_token)
                 except ValueError as e:
                     from sglang.srt.managers.schedule_batch import FINISH_ABORT
 
@@ -155,7 +163,7 @@ class ScheduleBatchDisaggregationDecodeMixin:
                     # This can happen if the grammar is not set correctly or the token is invalid.
                     # Use to_finish (not finished_reason) so that process_batch_result_prebuilt
                     # handles the release via check_finished -> release_kv_cache in one place.
-                    error_message = f"Grammar accept_token failed for req {req.rid} with token {req.output_ids[-1]}: {e}"
+                    error_message = f"Grammar accept_token failed for req {req.rid} with token {last_token}: {e}"
                     req.to_finish = FINISH_ABORT(
                         error_message, HTTPStatus.INTERNAL_SERVER_ERROR
                     )

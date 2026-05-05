@@ -550,7 +550,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             ret.extend_prefix_lens = torch.tensor(
                 batch.extend_prefix_lens, dtype=torch.int32
             ).to(device, non_blocking=True)
-            ret.extend_num_tokens = batch.extend_num_tokens
+            ret.extend_num_tokens = num_tokens
             positions, ret.extend_start_loc = compute_position(
                 model_runner.server_args.attention_backend,
                 ret.extend_prefix_lens,
@@ -582,6 +582,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                     ret.out_cache_loc
                 )
             )
+
+        # Ensure positions matches input_ids when the batch is inconsistent
+        if ret.positions is not None and ret.positions.shape[0] != num_tokens:
+            ret.positions = ret.positions[:num_tokens]
 
         # Init lora information
         if model_runner.server_args.enable_lora:
@@ -1112,7 +1116,7 @@ def compute_position(
         )
     else:
         positions, extend_start_loc = compute_position_torch(
-            extend_prefix_lens, extend_seq_lens
+            extend_prefix_lens, extend_seq_lens, extend_seq_lens_sum
         )
     return positions, extend_start_loc
 
@@ -1174,7 +1178,9 @@ def compute_position_kernel(
 
 
 def compute_position_torch(
-    extend_prefix_lens: torch.Tensor, extend_seq_lens: torch.Tensor
+    extend_prefix_lens: torch.Tensor,
+    extend_seq_lens: torch.Tensor,
+    extend_seq_lens_sum: int,
 ):
     positions = torch.cat(
         [
@@ -1185,6 +1191,8 @@ def compute_position_torch(
         ],
         axis=0,
     )
+    if positions.shape[0] > extend_seq_lens_sum:
+        positions = positions[:extend_seq_lens_sum]
     extend_start_loc = torch.zeros_like(extend_seq_lens)
     extend_start_loc[1:] = torch.cumsum(extend_seq_lens[:-1], dim=0)
     return positions.to(torch.int64), extend_start_loc

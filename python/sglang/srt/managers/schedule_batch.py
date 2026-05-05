@@ -2204,8 +2204,19 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.orig_seq_lens = torch.cat([self.orig_seq_lens, other.orig_seq_lens])
         self.out_cache_loc = None
         self.seq_lens_sum += other.seq_lens_sum
-        if self.output_ids is not None:
+        if self.output_ids is None and len(self.reqs) > 0:
+            self.output_ids = torch.tensor(
+                [
+                    req.output_ids[-1] if req.output_ids else req.origin_input_ids[-1]
+                    for req in self.reqs
+                ],
+                dtype=torch.int64,
+                device=self.device,
+            )
+        if self.output_ids is not None and other.output_ids is not None:
             self.output_ids = torch.cat([self.output_ids, other.output_ids])
+        elif self.output_ids is None and other.output_ids is not None:
+            self.output_ids = other.output_ids
         self.mamba_track_indices = None
         self.mamba_track_mask = None
         self.mamba_track_seqlens = None
