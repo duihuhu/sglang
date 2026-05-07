@@ -398,6 +398,10 @@ class APIServerReqTimeStats(ReqTimeStatsBase):
             meta_info["request_received_ts"] = convert_time_to_realtime(
                 self.created_time
             )
+        if self.api_server_dispatch_time > 0.0:
+            meta_info["api_server_dispatch_ts"] = convert_time_to_realtime(
+                self.api_server_dispatch_time
+            )
         if self.api_server_dispatch_finish_time > 0.0:
             meta_info["api_server_dispatch_finish_ts"] = convert_time_to_realtime(
                 self.api_server_dispatch_finish_time
@@ -419,6 +423,27 @@ class APIServerReqTimeStats(ReqTimeStatsBase):
             meta_info["inference_time"] = (
                 self.finished_time - scheduler_time_stats.forward_entry_time
             )
+
+        first_token_latency = self.get_first_token_latency()
+        if first_token_latency > 0.0:
+            meta_info["time_to_first_token"] = first_token_latency
+
+        # Processing TTFT: time from dispatch to prefill finish (excludes queueing).
+        # This matches the PA.log Tier1 monitor metric.
+        if scheduler_time_stats is not None:
+            _pft = getattr(scheduler_time_stats, "prefill_finished_time", -1.0)
+            _adt = self.api_server_dispatch_time
+            if _pft > 0.0 and _adt > 0.0:
+                proc_ttft = _pft - _adt
+                if proc_ttft > 0.0:
+                    meta_info["time_to_first_token_processing"] = proc_ttft
+            # Fallback: use cached TTFT propagated from PA via KV transfer metadata.
+            # This is needed in PD+AF mode where DA's scheduler_time_stats doesn't
+            # have prefill_finished_time.
+            if "time_to_first_token_processing" not in meta_info:
+                _cached = getattr(scheduler_time_stats, "cached_ttft_processing", 0.0)
+                if _cached > 0.0:
+                    meta_info["time_to_first_token_processing"] = _cached
 
         decode_latency = self.get_decode_latency()
         if decode_latency > 0.0 and completion_tokens > 0:
@@ -548,10 +573,21 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
     transfer_total_mb: float = 0.0
     # Number of prefill retries for this request
     prefill_retry_count: int = 0
+    # Processing TTFT propagated from PA via KV transfer metadata (excludes queueing).
+    # Set by DA's _commit_transfer_to_req after KV transfer completes.
+    cached_ttft_processing: float = 0.0
 
     def __getstate__(self) -> object:
         # send to detokenizer/tokenizer
+        state = {}
         if not self.enable_metrics:
+            # Only propagate the cached TTFT (from PA KV metadata) when metrics
+            # are disabled — other fields are not needed without metrics.
+            if self.cached_ttft_processing > 0.0:
+                return {
+                    "cached_ttft_processing": self.cached_ttft_processing,
+                    "diff_realtime_monotonic": global_diff_realtime_monotonic,
+                }
             return {}
 
         state = {
@@ -562,6 +598,9 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
             "prefill_finished_time": self.prefill_finished_time,
             "diff_realtime_monotonic": global_diff_realtime_monotonic,
         }
+        # Propagate processing TTFT computed on PA and transferred via KV metadata
+        if self.cached_ttft_processing > 0.0:
+            state["cached_ttft_processing"] = self.cached_ttft_processing
         return state
 
     def set_scheduler_recv_time(self, ts=None):

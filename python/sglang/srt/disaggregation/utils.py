@@ -169,6 +169,10 @@ class MetadataBuffers:
             self.bootstrap_room = torch.zeros(
                 (size, 8), dtype=bootstrap_room_dtype, device=device
             )
+            # Processing TTFT propagated from PA to DA (prefill_finished_time - api_server_dispatch_time)
+            self.prefill_ttft_processing = torch.zeros(
+                (size, 1), dtype=torch.float64, device=device
+            )
 
     def get_buf_infos(self):
         ptrs = [
@@ -182,6 +186,7 @@ class MetadataBuffers:
             self.output_topk_index.data_ptr(),
             self.output_hidden_states.data_ptr(),
             self.bootstrap_room.data_ptr(),
+            self.prefill_ttft_processing.data_ptr(),
         ]
         data_lens = [
             self.output_ids.nbytes,
@@ -194,6 +199,7 @@ class MetadataBuffers:
             self.output_topk_index.nbytes,
             self.output_hidden_states.nbytes,
             self.bootstrap_room.nbytes,
+            self.prefill_ttft_processing.nbytes,
         ]
         item_lens = [
             self.output_ids[0].nbytes,
@@ -206,6 +212,7 @@ class MetadataBuffers:
             self.output_topk_index[0].nbytes,
             self.output_hidden_states[0].nbytes,
             self.bootstrap_room[0].nbytes,
+            self.prefill_ttft_processing[0].nbytes,
         ]
         return ptrs, data_lens, item_lens
 
@@ -221,6 +228,7 @@ class MetadataBuffers:
             self.output_topk_index[idx],
             self.output_hidden_states[idx],
             self.bootstrap_room[idx],
+            self.prefill_ttft_processing[idx],
         )
 
     def set_buf(self, req: Req):
@@ -267,6 +275,16 @@ class MetadataBuffers:
         self.bootstrap_room[req.metadata_buffer_index, 0] = (
             req.bootstrap_room if req.bootstrap_room is not None else 0
         )
+        # Propagate processing TTFT (prefill_finished_time - api_server_dispatch_time)
+        # from PA to DA via KV transfer metadata buffers.
+        if hasattr(req, "time_stats") and req.time_stats is not None:
+            ts = req.time_stats
+            pft = getattr(ts, "prefill_finished_time", 0.0)
+            adt = getattr(ts, "api_server_dispatch_time", 0.0)
+            if pft > 0.0 and adt > 0.0:
+                proc_ttft = pft - adt
+                if proc_ttft > 0.0:
+                    self.prefill_ttft_processing[req.metadata_buffer_index, 0] = proc_ttft
 
 
 #########################

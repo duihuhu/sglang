@@ -1576,12 +1576,15 @@ class Scheduler(
 
         # ── Per-window detection summary ──
         logger.info(
-            "[Tier1] window=%.0fs | SLO_violation=%.2f%% | "
+            "[Tier1] window=%.0fs | SLO_violation=%.2f%% "
+            "(TTFT_SLO=%.0fms TPOT_SLO=%.0fus) | "
             "a_util=%.2f f_util=%.2f p_util=%.2f d_util=%.2f | "
             "TTFT_p99=%.0fms TPOT_p99=%.0fus | active=%d | "
             "replan=%s%s",
             self._tier1_collector.window_elapsed_s,
             window.slo_violation_rate * 100,
+            self.server_args.afd_ttft_slo_ms,
+            self.server_args.afd_tpot_slo_us,
             window.a_util, window.f_util, window.p_util, window.d_util,
             window.ttft_p99_ms, window.tpot_p99_us,
             window.active_requests,

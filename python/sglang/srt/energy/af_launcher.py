@@ -105,8 +105,13 @@ def _build_server_cmd(
         "--mem-fraction-static", str(cfg["model"]["mem_fraction_static"]),
     ]
 
+    if cfg.get("enable_metrics", False):
+        cmd += ["--enable-metrics"]
+        cmd += ["--enable-metrics-for-all-schedulers"]
+
     if cfg["afd"]["dvfs_enabled"]:
         cmd += ["--afd-dvfs-enabled"]
+    if cfg["afd"]["dvfs_enabled"] or tier1_extra is not None:
         cmd += ["--afd-energy-model-dir", cfg["afd"]["energy_model_dir"]]
 
     if tier1_extra:
@@ -266,6 +271,11 @@ def launch_all(cfg: dict, start_with_workload: bool = False) -> int:
             tier1_extra += ["--enable-tier1-pa"]
         if solution_path:
             tier1_extra += ["--tier1-initial-solution", solution_path]
+        # Forward AFD SLO thresholds (used by WorkloadMetricsCollector)
+        tier1_extra += [
+            "--afd-ttft-slo-ms", str(tier1_cfg.get("ttft_slo_ms", 5000.0)),
+            "--afd-tpot-slo-us", str(tier1_cfg.get("tpot_slo_us", 50000.0)),
+        ]
         # Forward workload params (used when re-plan triggers lazy solver init)
         tier1_extra += [
             "--tier1-gpu-count", str(tier1_cfg.get("gpu_count", 16)),

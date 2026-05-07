@@ -886,6 +886,12 @@ class SchedulerOutputProcessorMixin:
         skip_req: Optional[Req] = None,
         is_idle_batch: bool = False,
     ):
+        # FFN perspective produces dummy logits; skip detokenizer entirely.
+        from sglang.srt.layers.afd import afd_is_ffn
+
+        if afd_is_ffn():
+            return
+
         rids = []
         http_worker_ipcs = []
         finished_reasons: List[BaseFinishReason] = []

@@ -874,6 +874,7 @@ class DecodeTransferQueue:
             output_topk_index,
             output_hidden_states,
             output_bootstrap_room,
+            output_prefill_ttft,
         ) = self.metadata_buffers.get_buf(idx)
 
         # Validate bootstrap_room to detect context corruption
@@ -913,6 +914,10 @@ class DecodeTransferQueue:
         # Case 3: Success - commit the transfer
         decode_req.req.output_ids.append(output_id[0].item())
         decode_req.req.cached_tokens = cached_tokens[0].item()
+        # Propagate processing TTFT from PA (computed via KV transfer metadata)
+        _ttft = output_prefill_ttft[0].item()
+        if _ttft > 0.0:
+            decode_req.req.time_stats.cached_ttft_processing = _ttft
         if not self.spec_algorithm.is_none():
             decode_req.req.output_topk_p = output_topk_p
             decode_req.req.output_topk_index = output_topk_index

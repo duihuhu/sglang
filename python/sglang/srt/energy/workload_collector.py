@@ -270,6 +270,11 @@ class WorkloadMetricsCollector:
                 if ol > 0 and decode_dur_us > 0:
                     rec.tpot_us = decode_dur_us / ol  # average TPOT
                 rec.ol = ol
+            elif not is_decode and prefill_finish_t > 0:
+                # AFD prefill-only path (PA/PF): request is done on this side
+                # after prefill — it will be transferred to DA/DF for decode.
+                # PA never sees completion_time, so mark finished here.
+                rec.finished = True
 
             # Input length
             origin_ids = getattr(req, "origin_input_ids", None)
@@ -316,13 +321,17 @@ class WorkloadMetricsCollector:
             with open(self._stats_path) as f:
                 stats = json.load(f)
             ts = stats.get("timestamp", 0)
-            # Only use data within the current window
-            if ts >= self._window_start and stats.get("t_iter_us", 0) > 0:
-                self._decode_steps.append(_DecodeStep(
-                    bs=stats.get("bs", 0),
-                    t_iter_us=stats["t_iter_us"],
-                    timestamp=ts,
-                ))
+            t_iter = stats.get("t_iter_us", 0)
+            # Only use data within the current window, and deduplicate by
+            # timestamp so repeated polls of an unchanged file do not
+            # inflate _decode_steps.
+            if ts >= self._window_start and t_iter > 0:
+                if not self._decode_steps or self._decode_steps[-1].timestamp != ts:
+                    self._decode_steps.append(_DecodeStep(
+                        bs=stats.get("bs", 0),
+                        t_iter_us=t_iter,
+                        timestamp=ts,
+                    ))
         except FileNotFoundError:
             pass  # expected before first write from DA
         except (json.JSONDecodeError, KeyError, OSError) as e:
@@ -345,10 +354,14 @@ class WorkloadMetricsCollector:
         # ── SLO violation rate ────────────────────────────────────────
         ttft_violations = 0
         tpot_violations = 0
-        total_requests = max(len(self._reqs), 1)
+        total_requests = len(self._reqs)
         n_with_ttft_data = sum(1 for r in self._reqs if r.ttft_us > 0)
         n_with_tpot_data = sum(1 for r in self._reqs if r.tpot_us > 0)
-        if total_requests > 0 and n_with_ttft_data == 0 and n_with_tpot_data == 0:
+        # Only warn when there are actual requests AND zero timing data
+        # from ANY source (requests or decode steps from DA).
+        # In AFD mode PA only does prefill, so per-request TPOT is always
+        # zero — TPOT comes from _decode_steps (DA→PA via stats file).
+        if total_requests > 0 and n_with_ttft_data == 0 and n_with_tpot_data == 0 and not self._decode_steps:
             logger.warning(
                 "build_window: %d reqs in window but ZERO have TTFT data "
                 "(api_server_dispatch_time or prefill_finished_time missing) "
