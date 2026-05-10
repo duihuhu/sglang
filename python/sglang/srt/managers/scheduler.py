@@ -1487,9 +1487,38 @@ class Scheduler(
                     self._afd_ffn_cleanup_all()
                 continue
 
+            # FFN side: clear stale chunked_req — we force extend_lens=[1] after
+            # batch creation so the chunking mechanism (which operates on original
+            # extend_lens) would leave a dangling chunked_req that doesn't match
+            # the FFN-side KV pool (smaller than Attn's).
+            if afd_is_ffn():
+                self.chunked_req = None
+
             batch = self._afd_get_next_batch(disagg_mode)
             self.cur_batch = batch
             disable_overlap_for_batch = False
+
+            # ── FFN side: force-sync batch to match Attn's AFDReqInput ──
+            if afd_is_ffn() and batch is not None:
+                # UCX always brings [1, hidden_size] per-layer regardless of
+                # the Attn-side batch size.  Force extend_lens=1 per req so
+                # embedding + logits-extraction stay in sync.
+                bs = batch.batch_size()
+                if bs > 0:
+                    batch.extend_lens = [1] * bs
+                    for r in batch.reqs:
+                        r.extend_input_len = 1
+
+                # Deduplicate reqs by rid (merge in get_next_batch_to_run
+                # can produce duplicates when running_batch is empty).
+                seen = set()
+                deduped = []
+                for r in batch.reqs:
+                    if r.rid not in seen:
+                        seen.add(r.rid)
+                        deduped.append(r)
+                if len(deduped) < bs:
+                    batch.reqs = deduped
 
             # F3: overlap — process last batch immediately if overlap disabled for this batch
             if afd_overlap:
@@ -2002,6 +2031,10 @@ class Scheduler(
         """
         from sglang.srt.layers.afd import afd_is_attn
         from sglang.srt.managers.io_struct import AFDReqInput
+        from sglang.srt.managers.io_struct import (
+            TokenizedEmbeddingReqInput,
+            TokenizedGenerateReqInput,
+        )
 
         filtered_reqs = []
         for recv_req in recv_reqs:
@@ -2010,15 +2043,18 @@ class Scheduler(
                 continue
 
             if afd_is_attn() and self.afd_send_to_ffn is not None:
-                from sglang.srt.managers.io_struct import (
-                    TokenizedEmbeddingReqInput,
-                    TokenizedGenerateReqInput,
-                )
-
                 if isinstance(
                     recv_req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)
                 ):
                     self.afd_send_to_ffn.send_pyobj(recv_req)
+
+            # FFN side: skip forwarded TokenizedGenerateReqInput — Reqs are
+            # created exclusively from AFDReqInput via _afd_ensure_reqs_from_afdreq
+            # so the FFN batch *always* matches the Attn's current batch.
+            if not afd_is_attn() and isinstance(
+                recv_req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)
+            ):
+                continue
 
             filtered_reqs.append(recv_req)
 
@@ -2078,6 +2114,11 @@ class Scheduler(
         existing_rids = set(req.rid for req in self.waiting_queue)
         if self.running_batch is not None:
             existing_rids.update(req.rid for req in self.running_batch.reqs)
+        # AFD event_loop never populates running_batch on FFN side — reqs
+        # live in last_batch instead.  Without this check every AFDReqInput
+        # creates a duplicate Req, tripling the batch.
+        if self.last_batch is not None:
+            existing_rids.update(req.rid for req in self.last_batch.reqs)
 
         for i, rid in enumerate(afd_req.req_ids):
             if rid in existing_rids:
@@ -2203,6 +2244,19 @@ class Scheduler(
             #  release_kv_cache sets req_pool_idx=None on the first call).
             self.running_batch.reqs.clear()
             self.running_batch.batch_is_full = False
+
+        # Clean last_batch — may hold reqs from the final EXTEND batch that
+        # were never merged into running_batch (e.g. DECODE-mode last_batch).
+        if self.last_batch is not None:
+            for req in self.last_batch.reqs:
+                if req.finished():
+                    continue
+                from sglang.srt.managers.schedule_batch import FINISH_LENGTH
+                req.finished_reason = FINISH_LENGTH(length=0)
+                if req.req_pool_idx is not None:
+                    _release_kv(req, self.tree_cache)
+            self.last_batch.reqs.clear()
+            self.last_batch = None
 
     @DynamicGradMode()
     def event_loop_overlap(self):
@@ -3452,11 +3506,19 @@ class Scheduler(
                 with self.forward_stream_ctx, self.record_bubble_metrics(batch):
                     self.forward_stream.wait_stream(self.schedule_stream)
                     self.future_map.resolve_future(model_worker_batch)
+                    t_fwd_start = time.perf_counter()
                     with self.record_forward_metrics(batch):
                         batch_result = self.model_worker.forward_batch_generation(
                             model_worker_batch
                             # here pp is not compatible with overlap
                         )
+                    t_fwd_ms = (time.perf_counter() - t_fwd_start) * 1000
+                    count_added = 0
+                    for req in batch.reqs:
+                        if not req.finished() and not req.is_retracted:
+                            req.time_stats.add_model_forward_time(t_fwd_ms / 1000.0)
+                            count_added += 1
+                    logger.debug(f"[MODEL_FWD_TIMING] overlap path: t_fwd_ms={t_fwd_ms:.1f}, forward_mode={batch.forward_mode}, batch_size={len(batch.reqs)}, count_added={count_added}")
                     # FIXME(lsyin): maybe move this to forward_batch_generation
                     batch_result.copy_done = self.device_module.Event()
                     if batch_result.delay_sample_func is None:
@@ -3492,10 +3554,18 @@ class Scheduler(
                     if self.spec_algorithm.is_none()
                     else {}
                 )
+                t_fwd_start = time.perf_counter()
                 with self.record_forward_metrics(batch):
                     batch_result = self.model_worker.forward_batch_generation(
                         worker_batch_or_batch, **kwargs
                     )
+                t_fwd_ms = (time.perf_counter() - t_fwd_start) * 1000
+                count_added = 0
+                for req in batch.reqs:
+                    if not req.finished() and not req.is_retracted:
+                        req.time_stats.add_model_forward_time(t_fwd_ms / 1000.0)
+                        count_added += 1
+                logger.debug(f"[MODEL_FWD_TIMING] non-overlap path: t_fwd_ms={t_fwd_ms:.1f}, forward_mode={batch.forward_mode}, batch_size={len(batch.reqs)}, count_added={count_added}")
                 future_indices_or_next_token_ids = batch_result.next_token_ids
                 self.update_cache_from_scheduler(batch, batch_result)
 

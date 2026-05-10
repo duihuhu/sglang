@@ -502,9 +502,19 @@ class TpModelWorker(BaseTpWorker):
 
             if not model_worker_batch.is_prefill_only:
                 # For normal requests, sample the next token ids.
-                batch_result.next_token_ids = self.model_runner.sample(
-                    logits_output, forward_batch
-                )
+                from sglang.srt.layers.afd import afd_is_ffn
+
+                if afd_is_ffn():
+                    # FFN perspective produces dummy logits — skip sampling.
+                    batch_result.next_token_ids = torch.zeros(
+                        len(model_worker_batch.seq_lens),
+                        dtype=torch.long,
+                        device=model_worker_batch.input_ids.device,
+                    )
+                else:
+                    batch_result.next_token_ids = self.model_runner.sample(
+                        logits_output, forward_batch
+                    )
             else:
                 # For prefill-only requests, create dummy token IDs on CPU
                 # The size should match the batch size (number of sequences), not total tokens

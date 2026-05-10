@@ -2500,12 +2500,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         kwargs = {}
         if self.support_pp:
             kwargs["pp_proxy_tensors"] = pp_proxy_tensors
-        return self.model.forward(
+        t0 = time.perf_counter()
+        ret = self.model.forward(
             forward_batch.input_ids,
             forward_batch.positions,
             forward_batch,
             **kwargs,
         )
+        t_ms = (time.perf_counter() - t0) * 1000
+        logger.debug(f"[MODEL_FWD] DECODE: t={t_ms:.1f}ms, bs={forward_batch.batch_size}, seq_lens={forward_batch.seq_lens}")
+        return ret
 
     def forward_extend(
         self,
@@ -2528,22 +2532,29 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             and self.piecewise_cuda_graph_runner.can_run(forward_batch)
         )
 
+        t0 = time.perf_counter()
         if can_run_graph:
+            ret = self.piecewise_cuda_graph_runner.replay(forward_batch, **kwargs)
+            t_ms = (time.perf_counter() - t0) * 1000
+            logger.debug(f"[MODEL_FWD] EXTEND(cuda_graph): t={t_ms:.1f}ms, bs={forward_batch.batch_size}")
             return (
-                self.piecewise_cuda_graph_runner.replay(forward_batch, **kwargs),
+                ret,
                 can_run_graph,
             )
 
         if not skip_attn_backend_init:
             self.attn_backend.init_forward_metadata(forward_batch)
 
+        ret = self.model.forward(
+            forward_batch.input_ids,
+            forward_batch.positions,
+            forward_batch,
+            **kwargs,
+        )
+        t_ms = (time.perf_counter() - t0) * 1000
+        logger.debug(f"[MODEL_FWD] EXTEND: t={t_ms:.1f}ms, bs={forward_batch.batch_size}, seq_lens={forward_batch.seq_lens[:5] if forward_batch.seq_lens is not None else None}")
         return (
-            self.model.forward(
-                forward_batch.input_ids,
-                forward_batch.positions,
-                forward_batch,
-                **kwargs,
-            ),
+            ret,
             can_run_graph,
         )
 
@@ -2559,12 +2570,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         kwargs = {}
         if self.support_pp:
             kwargs["pp_proxy_tensors"] = pp_proxy_tensors
-        return self.model.forward(
+        t0 = time.perf_counter()
+        ret = self.model.forward(
             forward_batch.input_ids,
             forward_batch.positions,
             forward_batch,
             **kwargs,
         )
+        t_ms = (time.perf_counter() - t0) * 1000
+        logger.debug(f"[MODEL_FWD] IDLE: t={t_ms:.1f}ms, bs={forward_batch.batch_size}")
+        return ret
 
     def forward_split_prefill(
         self,

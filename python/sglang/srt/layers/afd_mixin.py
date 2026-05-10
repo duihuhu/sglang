@@ -6,6 +6,7 @@ Provides:
 """
 
 import logging
+import time
 from typing import Optional, Tuple
 
 import torch
@@ -22,6 +23,11 @@ from sglang.srt.utils import is_npu
 
 logger = logging.getLogger(__name__)
 _is_npu = is_npu()
+
+# ── AFD TPOT breakdown timing ──────────────────────────────────────────────
+# Global accumulator reset per forward pass from model_forward_afd()
+_afd_timing_records: list = []  # list of dicts with per-stage timing breakdown
+_afd_timing_enabled: bool = True
 
 
 class AFDDecoderLayerMixin:
@@ -119,14 +125,53 @@ class AFDDecoderLayerMixin:
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Attention stage: prepare_attn -> attn -> prepare_mlp."""
+        global _afd_timing_records, _afd_timing_enabled
+
+        ev_prep_attn_start = ev_prep_attn_end = None
+        ev_attn_start = ev_attn_end = None
+        ev_prep_mlp_start = ev_prep_mlp_end = None
+
+        if _afd_timing_enabled and torch.cuda.is_available():
+            ev_prep_attn_start = torch.cuda.Event(enable_timing=True)
+            ev_prep_attn_end = torch.cuda.Event(enable_timing=True)
+            ev_prep_attn_start.record()
+
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
         )
+
+        if ev_prep_attn_end is not None:
+            ev_prep_attn_end.record()
+            ev_attn_start = torch.cuda.Event(enable_timing=True)
+            ev_attn_end = torch.cuda.Event(enable_timing=True)
+            ev_attn_start.record()
+
         if hidden_states.shape[0] != 0:
             hidden_states = self._run_attn(positions, hidden_states, forward_batch)
+
+        if ev_attn_end is not None:
+            ev_attn_end.record()
+            ev_prep_mlp_start = torch.cuda.Event(enable_timing=True)
+            ev_prep_mlp_end = torch.cuda.Event(enable_timing=True)
+            ev_prep_mlp_start.record()
+
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
         )
+
+        if ev_prep_mlp_end is not None:
+            ev_prep_mlp_end.record()
+            _afd_timing_records.append({
+                "stage": "A",
+                "layer_id": getattr(self, "layer_id", -1),
+                "perspective": "attn" if get_afd_perspective() == AFDPerspective.AFD_PERSPECTIVE_ATTN else "ffn",
+                "events": {
+                    "prep_attn": (ev_prep_attn_start, ev_prep_attn_end),
+                    "attn": (ev_attn_start, ev_attn_end),
+                    "prep_mlp": (ev_prep_mlp_start, ev_prep_mlp_end),
+                },
+            })
+
         return hidden_states, residual
 
     def forward_afd_F(
@@ -136,10 +181,40 @@ class AFDDecoderLayerMixin:
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """FFN stage: mlp -> postprocess_layer."""
+        global _afd_timing_records, _afd_timing_enabled
+
+        ev_mlp_start = ev_mlp_end = None
+        ev_post_start = ev_post_end = None
+
+        if _afd_timing_enabled and torch.cuda.is_available():
+            ev_mlp_start = torch.cuda.Event(enable_timing=True)
+            ev_mlp_end = torch.cuda.Event(enable_timing=True)
+            ev_mlp_start.record()
+
         hidden_states = self._run_mlp(hidden_states, forward_batch)
+
+        if ev_mlp_end is not None:
+            ev_mlp_end.record()
+            ev_post_start = torch.cuda.Event(enable_timing=True)
+            ev_post_end = torch.cuda.Event(enable_timing=True)
+            ev_post_start.record()
+
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
         )
+
+        if ev_post_end is not None:
+            ev_post_end.record()
+            _afd_timing_records.append({
+                "stage": "F",
+                "layer_id": getattr(self, "layer_id", -1),
+                "perspective": "attn" if get_afd_perspective() == AFDPerspective.AFD_PERSPECTIVE_ATTN else "ffn",
+                "events": {
+                    "mlp": (ev_mlp_start, ev_mlp_end),
+                    "postprocess": (ev_post_start, ev_post_end),
+                },
+            })
+
         return hidden_states, residual
 
 

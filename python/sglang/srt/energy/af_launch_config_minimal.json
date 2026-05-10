@@ -34,7 +34,7 @@
     "port": 50000
   },
   "logs": {
-    "dir": "af_launch_logs",
+    "dir": "af_launch_logs/logs",
     "level": "info"
   }
 }

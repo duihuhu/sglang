@@ -304,6 +304,14 @@ class Qwen3DecoderLayer(nn.Module):
             self, hidden_states, forward_batch, residual
         )
 
+    def _run_mlp(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+    ) -> torch.Tensor:
+        """Qwen2MLP.forward() takes only (self, x) — drop forward_batch."""
+        return self.mlp(hidden_states)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -517,13 +525,14 @@ class Qwen3ForCausalLM(nn.Module):
 
         if self.pp_group.is_last_rank:
             if not get_embedding:
-                return self.logits_processor(
+                result = self.logits_processor(
                     input_ids,
                     hidden_states,
                     self.lm_head,
                     forward_batch,
                     aux_hidden_states,
                 )
+                return result
             else:
                 return self.pooler(hidden_states, forward_batch)
         else:

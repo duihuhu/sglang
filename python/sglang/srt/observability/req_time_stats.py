@@ -303,6 +303,9 @@ class APIServerReqTimeStats(ReqTimeStatsBase):
     api_server_dispatch_time: float = 0.0
     api_server_dispatch_finish_time: float = 0.0
     response_sent_to_client_time: float = 0.0
+    decode_step_total_time: float = 0.0
+    decode_step_count: int = 0
+    decode_step_times: list = field(default_factory=list)
 
     def __getstate__(self) -> object:
         # Propagate to DP controller or Scheduler so that the collector
@@ -333,6 +336,22 @@ class APIServerReqTimeStats(ReqTimeStatsBase):
             ts = time.perf_counter()
         self.first_token_time = ts
         self.last_time = ts
+        self.decode_step_total_time = 0.0
+        self.decode_step_count = 0
+        self.decode_step_times.clear()
+
+    def add_decode_step(self, duration: float, num_tokens: int = 1):
+        self.decode_step_total_time += duration
+        self.decode_step_count += num_tokens
+        # Store per-token time (evenly divide interval across tokens in this chunk)
+        per_token = duration / max(num_tokens, 1)
+        for _ in range(max(num_tokens, 1)):
+            self.decode_step_times.append(per_token)
+
+    def get_avg_decode_tpot_s(self) -> float:
+        if self.decode_step_count > 0:
+            return self.decode_step_total_time / self.decode_step_count
+        return 0.0
 
     def set_last_time(self, ts=None):
         if ts is None:
@@ -437,17 +456,38 @@ class APIServerReqTimeStats(ReqTimeStatsBase):
                 proc_ttft = _pft - _adt
                 if proc_ttft > 0.0:
                     meta_info["time_to_first_token_processing"] = proc_ttft
-            # Fallback: use cached TTFT propagated from PA via KV transfer metadata.
-            # This is needed in PD+AF mode where DA's scheduler_time_stats doesn't
-            # have prefill_finished_time.
+            # Fallback 1: cached TTFT from PA via KV transfer metadata (PD+AF DA side).
             if "time_to_first_token_processing" not in meta_info:
                 _cached = getattr(scheduler_time_stats, "cached_ttft_processing", 0.0)
                 if _cached > 0.0:
                     meta_info["time_to_first_token_processing"] = _cached
+            # Fallback 2: Native mode where prefill_finished_time may be 0.
+            # Use first_token_time - api_server_dispatch_time (prefill + 1st decode step).
+            if "time_to_first_token_processing" not in meta_info:
+                if self.first_token_time > 0 and self.api_server_dispatch_time > 0:
+                    proc_ttft = self.first_token_time - self.api_server_dispatch_time
+                    if proc_ttft > 0:
+                        meta_info["time_to_first_token_processing"] = proc_ttft
 
         decode_latency = self.get_decode_latency()
         if decode_latency > 0.0 and completion_tokens > 0:
             meta_info["decode_throughput"] = completion_tokens / decode_latency
+        # Model forward time measured in scheduler
+        if scheduler_time_stats is not None:
+            _mft = getattr(scheduler_time_stats, "model_forward_time", 0.0)
+            if _mft > 0.0:
+                meta_info["scheduler_model_forward_ms"] = round(_mft * 1000, 2)
+
+        # Per-token decode TPOT: average of individual decode step times,
+        # recorded by add_decode_step() in tokenizer_manager output processing.
+        avg_tpot = self.get_avg_decode_tpot_s()
+        if avg_tpot > 0.0:
+            meta_info["decode_tpot_avg_s"] = avg_tpot
+        # Per-token decode step timings (ms), one entry per output token
+        if self.decode_step_times:
+            meta_info["decode_tpot_per_token_ms"] = [
+                round(t * 1000, 2) for t in self.decode_step_times
+            ]
         return meta_info
 
     def convert_to_gen_ai_span_attrs(self):
@@ -545,6 +585,9 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
     prefill_run_batch_end_time: float = 0.0
     prefill_finished_time: float = 0.0
     completion_time: float = 0.0
+    # Per-forward timing: accumulated model.forward() durations (seconds)
+    model_forward_time: float = 0.0
+    model_forward_count: int = 0
 
     # prefill node, get by time.perf_counter()
     prefill_bootstrap_queue_entry_time: float = 0.0
@@ -700,6 +743,10 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
         stage = RequestStage.PREFILL_CHUNKED_FORWARD
         self.observe_per_stage_req_latency(stage, ts - last_time)
         self.trace_slice(stage, last_time, ts)
+
+    def add_model_forward_time(self, duration: float):
+        self.model_forward_time += duration
+        self.model_forward_count += 1
 
     def set_prefill_finished_time(self, ts=None):
         if ts is None:
@@ -1072,6 +1119,10 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
                 "prefill_launch_latency": self.get_prefill_launch_latency(),
             }
         )
+        if self.model_forward_time > 0:
+            meta_data["scheduler_model_forward_ms"] = round(
+                self.model_forward_time * 1000, 2
+            )
         return meta_data
 
     def format_duration(self, duration: float) -> str:

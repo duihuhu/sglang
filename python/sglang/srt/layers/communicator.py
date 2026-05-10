@@ -443,6 +443,16 @@ class LayerCommunicator:
         if hidden_states.shape[0] == 0:
             residual = hidden_states
         else:
+            # Safety: if residual batch_size doesn't match, re-initialize.
+            # This guards against a PD+AF micro-batch pipeline ordering bug
+            # where staged residual from a different micro-batch is used.
+            if residual is not None and residual.shape[0] != hidden_states.shape[0]:
+                logger.warning(
+                    f"prepare_attn: residual batch_size mismatch "
+                    f"(residual={residual.shape[0]}, hidden={hidden_states.shape[0]}). "
+                    f"Re-initializing residual."
+                )
+                residual = None
             if (
                 residual is not None
                 and hasattr(hidden_states, "_sglang_needs_allreduce_fusion")

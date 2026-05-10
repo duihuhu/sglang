@@ -1963,11 +1963,11 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         else:
             num_new_tokens = completion_tokens - state.last_completion_tokens
             if num_new_tokens:
+                interval = state.time_stats.get_interval()
                 self.metrics_collector.observe_inter_token_latency(
-                    labels,
-                    state.time_stats.get_interval(),
-                    num_new_tokens,
+                    labels, interval, num_new_tokens
                 )
+                state.time_stats.add_decode_step(interval, num_new_tokens)
                 state.time_stats.set_last_time()
                 state.last_completion_tokens = completion_tokens
 

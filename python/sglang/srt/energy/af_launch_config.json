@@ -1,12 +1,17 @@
 {
-  "_comment": "AFlex multi-module launch configuration.  Start order: DF → DA → PF → PA → router.",
+  "_comment": "AFlex multi-module launch configuration for PD+AF. Start order: DF → DA → PF → PA → router.",
   "enable_metrics": true,
   "model": {
-    "path": "/models/llama3.1-8",
+    "path": "/models/Qwen/Qwen3-32B/",
     "tp": 1,
-    "mem_fraction_static": 0.7
+    "mem_fraction_static": 0.93,
+    "num_layers": 64,
+    "num_kv_heads": 8,
+    "head_dim": 128,
+    "hidden_size": 5120,
+    "gpu_mem_gb": 80.0
   },
-  "gpu_indices": [0,1,2,7],
+  "gpu_indices": [0,1,2,3],
 
   "disaggregation": {
     "bootstrap_port": 18999,
@@ -14,13 +19,13 @@
   },
   "afd": {
     "comm_backend": "ucx",
-    "dvfs_enabled": true,
+    "dvfs_enabled": false,
     "energy_model_dir": "/workspace/sglang/benchmark/test_motivation/energy_models"
   },
   "tier1": {
-    "_comment": "Tier 1 ILP resource planning + dynamic monitoring on PA (workload-driven, from AzureLLMInferenceTrace_conv_1week analysis)",
-    "enable_tier1_pa": true,
-    "start_with_workload": true,
+    "_comment": "Tier 1 — disabled for PD+AF architecture comparison (enabled by run_4arch.py when needed)",
+    "enable_tier1_pa": false,
+    "start_with_workload": false,
     "gpu_count": 4,
     "lambda_prefill": 25.2,
     "n_active_decode": 58,
@@ -43,7 +48,8 @@
       "disagg_mode": "decode",
       "port": 50021,
       "sched_port": 65400,
-      "ucx_base_port": 25100
+      "ucx_base_port": 25200,
+      "extra_cli_args": ["--skip-server-warmup", "--max-running-requests", "16"]
     },
     {
       "name": "DA",
@@ -52,8 +58,9 @@
       "disagg_mode": "decode",
       "port": 50020,
       "sched_port": 65400,
-      "ucx_base_port": 25100,
-      "ffn_host": "127.0.0.1"
+      "ucx_base_port": 25200,
+      "ffn_host": "127.0.0.1",
+      "extra_cli_args": ["--skip-server-warmup", "--max-running-requests", "16"]
     },
     {
       "name": "PF",
@@ -62,7 +69,8 @@
       "disagg_mode": "prefill",
       "port": 50011,
       "sched_port": 65300,
-      "ucx_base_port": 25000
+      "ucx_base_port": 25100,
+      "extra_cli_args": ["--skip-server-warmup"]
     },
     {
       "name": "PA",
@@ -71,8 +79,9 @@
       "disagg_mode": "prefill",
       "port": 50010,
       "sched_port": 65300,
-      "ucx_base_port": 25000,
-      "ffn_host": "127.0.0.1"
+      "ucx_base_port": 25100,
+      "ffn_host": "127.0.0.1",
+      "extra_cli_args": ["--skip-server-warmup"]
     }
   ],
   "router": {
@@ -83,7 +92,7 @@
     "port": 50000
   },
   "logs": {
-    "dir": "af_launch_logs",
+    "dir": "af_launch_logs/logs",
     "level": "info"
   }
 }

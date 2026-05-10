@@ -73,6 +73,11 @@ class AFDStageScheduleGenerator:
     def attn_stage(
         num_layers: int, m_stage: int
     ) -> "AFDStageScheduleGenerator.Schedule":
+        # Layer-major schedule with micro-batch interleaving.
+        # For layer 0 we must emit all M A-stages first (no F(-1, m) exists),
+        # then for layer_id ≥ 1 we interleave F(l-1, m) with A(l, m).
+        # This maximises DA throughput by filling the DF→DA round-trip gap
+        # with A-stages for other micro-batches.
         schedule = []
         if num_layers == 1:
             return [
@@ -732,22 +737,54 @@ def _int_to_dtype(i: int) -> torch.dtype:
 class AsyncTensorCommunicator:
     """Wraps a FifoTensorCommunicator to overlap communication with computation.
 
-    send_async: queues the send on a separate CUDA stream, returns immediately.
-    recv_start: begins receiving on the comm stream (non-blocking on compute stream).
-    recv_wait: blocks the compute stream until the recv completes.
+    send_async: queues the send on a background thread or CUDA stream;
+        returns immediately.
+    recv_start: launches a background daemon thread for the blocking
+        inner.recv_tensor() call; returns immediately so the CPU pipeline
+        loop can continue launching compute.
+    recv_wait: joins the background thread, fences sends, and synchronizes
+        the comm stream event so the received tensor is ready on the GPU.
     """
+
+    _RING_SIZE = 3  # 3BO: support up to 3 concurrent recvs
 
     def __init__(self, inner: FifoTensorCommunicator):
         self.inner = inner
         self.comm_stream = (
             torch.cuda.Stream() if torch.cuda.is_available() else None
         )
-        self._pending_recv: Optional[torch.Tensor] = None
-        self._recv_event: Optional[torch.cuda.Event] = None
+        # 3BO ring buffer for concurrent recvs
+        self._recv_ring: list = [None] * self._RING_SIZE
+        self._recv_event_ring: list = [None] * self._RING_SIZE
+        self._recv_threads: list = [None] * self._RING_SIZE
+        self._recv_idx_write: int = 0
+        self._recv_idx_read: int = 0
+        self._pending_recv_count: int = 0
+        # Sends
         self._send_thread: Optional[object] = None
+        self._pending_sends: list = []  # 3BO: all in-flight send threads
+
+    # Backward-compat properties for code that checks single-recv state.
+    # With async recv, the ring slot may still be None while the background
+    # thread is running — return the thread as a truthy sentinel so callers
+    # that check "is not None" correctly detect a pending recv.
+    @property
+    def _pending_recv(self):
+        if self._pending_recv_count > 0:
+            idx = self._recv_idx_read
+            thread = self._recv_threads[idx]
+            if thread is not None and thread.is_alive():
+                return thread  # truthy sentinel
+            return self._recv_ring[idx]
+        return None
+
+    @property
+    def _recv_event(self):
+        return self._recv_event_ring[self._recv_idx_read] if self._pending_recv_count > 0 else None
 
     @torch.compiler.disable()
     def send_async(self, x: torch.Tensor):
+        """3BO: non-blocking send — never joins previous sends."""
         if self.comm_stream is not None and hasattr(self.inner, "send_tensor_nonblocking"):
             compute_event = torch.cuda.current_stream().record_event()
 
@@ -755,12 +792,13 @@ class AsyncTensorCommunicator:
                 compute_event.synchronize()
                 self.inner.send_tensor_nonblocking(x)
 
-            if self._send_thread is not None:
-                self._send_thread.join(timeout=30)
-            self._send_thread = threading.Thread(
+            self._pending_sends = [t for t in self._pending_sends if t.is_alive()]
+            thread = threading.Thread(
                 target=_deferred_send, daemon=True, name="ucx-deferred-send",
             )
-            self._send_thread.start()
+            thread.start()
+            self._pending_sends.append(thread)
+            self._send_thread = thread
         elif self.comm_stream is not None:
             compute_event = torch.cuda.current_stream().record_event()
             with torch.cuda.stream(self.comm_stream):
@@ -771,27 +809,89 @@ class AsyncTensorCommunicator:
 
     @torch.compiler.disable()
     def recv_start(self):
-        if self.comm_stream is not None:
-            with torch.cuda.stream(self.comm_stream):
-                self._pending_recv = self.inner.recv_tensor()
-                self._recv_event = self.comm_stream.record_event()
-        else:
-            self._pending_recv = self.inner.recv_tensor()
-            self._recv_event = None
+        """3BO: enqueue a recv into the ring buffer.
+
+        Runs the blocking inner.recv_tensor() in a background daemon thread so
+        the CPU pipeline loop can continue.  GPU work is still issued on the
+        comm_stream, isolated from the compute stream.
+
+        Can be called up to RING_SIZE times before recv_wait drains slots.
+        """
+        idx = self._recv_idx_write
+
+        def _deferred_recv():
+            if self.comm_stream is not None:
+                with torch.cuda.stream(self.comm_stream):
+                    tensor = self.inner.recv_tensor()
+                    event = self.comm_stream.record_event()
+            else:
+                tensor = self.inner.recv_tensor()
+                event = None
+            self._recv_ring[idx] = tensor
+            self._recv_event_ring[idx] = event
+
+        thread = threading.Thread(
+            target=_deferred_recv, daemon=True, name="ucx-deferred-recv",
+        )
+        thread.start()
+        self._recv_threads[idx] = thread
+        self._recv_idx_write = (self._recv_idx_write + 1) % self._RING_SIZE
+        self._pending_recv_count += 1
 
     @torch.compiler.disable()
     def recv_wait(self) -> torch.Tensor:
+        """3BO: drain the oldest pending recv from the ring."""
+        if self._pending_recv_count == 0:
+            raise RuntimeError("recv_wait called with no pending recv (drain mismatch)")
+        idx = self._recv_idx_read
+
+        # Wait for the background recv thread to finish
+        thread = self._recv_threads[idx]
+        if thread is not None:
+            thread.join(timeout=30)
+            self._recv_threads[idx] = None
+
+        ev = self._recv_event_ring[idx]
+        tensor = self._recv_ring[idx]
+
         if self._send_thread is not None:
             self._send_thread.join(timeout=30)
             self._send_thread = None
         if hasattr(self.inner, "fence"):
             self.inner.fence()
-        if self._recv_event is not None:
-            self._recv_event.synchronize()
-        result = self._pending_recv
-        self._pending_recv = None
-        self._recv_event = None
-        return result
+        if ev is not None:
+            ev.synchronize()
+
+        self._recv_ring[idx] = None
+        self._recv_event_ring[idx] = None
+        self._recv_idx_read = (self._recv_idx_read + 1) % self._RING_SIZE
+        self._pending_recv_count -= 1
+        return tensor
+
+    @torch.compiler.disable()
+    def drain_sends(self):
+        """3BO: wait for all in-flight sends to complete."""
+        for t in self._pending_sends:
+            try:
+                t.join(timeout=30)
+            except Exception:
+                pass
+        self._pending_sends.clear()
+        self._send_thread = None
+
+    @torch.compiler.disable()
+    def drain_recvs(self):
+        """3BO: discard any pending recvs. Call on error/reset."""
+        for i in range(self._RING_SIZE):
+            thread = self._recv_threads[i]
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=5)
+        self._recv_ring = [None] * self._RING_SIZE
+        self._recv_event_ring = [None] * self._RING_SIZE
+        self._recv_threads = [None] * self._RING_SIZE
+        self._pending_recv_count = 0
+        self._recv_idx_write = 0
+        self._recv_idx_read = 0
 
     @torch.compiler.disable()
     def send_sync(self, x: torch.Tensor):
@@ -944,6 +1044,59 @@ def model_forward_afd_split_inputs(
     return [_post_transform(**inp) for inp in inputs_arr]
 
 
+def _log_afd_breakdown(timing_records: list, num_layers: int, m_stage: int) -> None:
+    """Aggregate AFD per-stage CUDA events and log per-node TPOT breakdown.
+
+    Called after torch.cuda.synchronize() inside model_forward_afd() so all
+    recorded events have elapsed_time available.
+    """
+    from sglang.srt.layers.afd_mixin import _afd_timing_enabled
+
+    if not _afd_timing_enabled or not timing_records:
+        return
+
+    perspective = "attn" if afd_is_attn() else "ffn"
+
+    # Aggregate by stage and sub-stage
+    agg = {
+        "A_prep_attn_ms": 0.0,
+        "A_attn_ms": 0.0,
+        "A_prep_mlp_ms": 0.0,
+        "F_mlp_ms": 0.0,
+        "F_postprocess_ms": 0.0,
+    }
+    stage_counts = {"A": 0, "F": 0}
+
+    for rec in timing_records:
+        stage = rec["stage"]
+        stage_counts[stage] += 1
+        events = rec["events"]
+        for key, (ev_start, ev_end) in events.items():
+            if ev_start is not None and ev_end is not None:
+                t_ms = ev_start.elapsed_time(ev_end)
+                agg_key = f"{stage}_{key}_ms"
+                if agg_key in agg:
+                    agg[agg_key] += t_ms
+
+    t_A_total = agg["A_prep_attn_ms"] + agg["A_attn_ms"] + agg["A_prep_mlp_ms"]
+    t_F_total = agg["F_mlp_ms"] + agg["F_postprocess_ms"]
+    t_total = t_A_total + t_F_total
+
+    logger.error(
+        f"[AFD_BREAKDOWN] perspective={perspective} "
+        f"layers={num_layers} M={m_stage} "
+        f"total={t_total:.1f}ms "
+        f"| A_stage={t_A_total:.1f}ms "
+        f"(prep_attn={agg['A_prep_attn_ms']:.1f}ms "
+        f"attn={agg['A_attn_ms']:.1f}ms "
+        f"prep_mlp={agg['A_prep_mlp_ms']:.1f}ms) "
+        f"| F_stage={t_F_total:.1f}ms "
+        f"(mlp={agg['F_mlp_ms']:.1f}ms "
+        f"postprocess={agg['F_postprocess_ms']:.1f}ms) "
+        f"| nA={stage_counts['A']} nF={stage_counts['F']}"
+    )
+
+
 def model_forward_afd(
     layers,
     positions: torch.Tensor,
@@ -955,11 +1108,21 @@ def model_forward_afd(
     if hidden_states.shape[0] == 0:
         return hidden_states, residual
 
+    from sglang.srt.layers.afd_mixin import _afd_timing_records, _afd_timing_enabled
+
     num_layers = len(layers)
     if forward_batch.afd_children is not None:
         m_stage = len(forward_batch.afd_children)
     else:
         m_stage = 1
+
+    # Reset timing records for this forward pass
+    if _afd_timing_enabled:
+        _afd_timing_records.clear()
+
+    # Detailed per-stage wall-clock timing (env-var gated)
+    _detailed_timing_enabled = os.getenv("AFD_DETAILED_TIMING", "0") == "1"
+    _detailed_timeline: list = []
 
     input_arrs = model_forward_afd_split_inputs(
         layers=layers,
@@ -1009,30 +1172,62 @@ def model_forward_afd(
         else AFDStageScheduleGenerator.ffn_stage(num_layers, m_stage)
     )
 
-    # R4: true overlap — on the Attn node, after an F stage (which contains
-    # postprocess_layer with recv), issue recv_start for the NEXT F stage
-    # early so the network transfer overlaps with the next A stage compute.
+    # 3BO: with async recv (background-threaded UCX recv), pre-issue after
+    # EVERY A-stage on the Attn node.  The background thread blocks on UCX
+    # while the main pipeline loop continues launching compute, overlapping
+    # DF→DA transfer with subsequent A-stage computation.
+    #
+    # On the FFN node: pre-issue after every F-stage for the next A-stage
+    # so DA→DF transfer overlaps with FFN compute.
     _afd_pipe_logger = logging.getLogger("afd_pipeline")
     for i, (stage_type, *args) in enumerate(pipeline):
         stage_name = stage_type.name
         layer_id = args[0] if args else -1
         mb_id = args[1] if len(args) > 1 else -1
-        executors[stage_type](*args)
 
-        # After an A stage on Attn node, the send_async already returned.
-        # Before the next F stage, pre-issue recv_start so it overlaps
-        # with any remaining computation.
-        if (
-            afd_is_attn()
-            and stage_type == AFDForwardStage.AFD_FORWARD_STAGE_A
-            and i + 1 < len(pipeline)
-            and pipeline[i + 1][0] == AFDForwardStage.AFD_FORWARD_STAGE_F
-        ):
-            layer_id_next_f = pipeline[i + 1][1]
-            if hasattr(layers[layer_id_next_f], "layer_communicator"):
-                lc = layers[layer_id_next_f].layer_communicator
-                if hasattr(lc, "postprocess_layer_start_recv"):
-                    lc.postprocess_layer_start_recv()
+        t0 = time.perf_counter() if _detailed_timing_enabled else 0
+        executors[stage_type](*args)
+        t1 = time.perf_counter() if _detailed_timing_enabled else 0
+
+        if _detailed_timing_enabled:
+            _detailed_timeline.append({
+                "step": i,
+                "stage": stage_name,
+                "layer": layer_id,
+                "mb": mb_id,
+                "t_start_ms": t0 * 1000,
+                "t_end_ms": t1 * 1000,
+                "dur_ms": (t1 - t0) * 1000,
+            })
+
+        # Attn node: pre-issue after every A-stage.  A-stages send data to DF
+        # via send_async; immediately start waiting for DF's F-stage response
+        # in a background thread so the pipeline loop can continue.
+        if afd_is_attn() and i + 1 < len(pipeline):
+            should_preissue = (
+                stage_type == AFDForwardStage.AFD_FORWARD_STAGE_A
+            ) or (
+                stage_type == AFDForwardStage.AFD_FORWARD_STAGE_F
+                and pipeline[i + 1][0] == AFDForwardStage.AFD_FORWARD_STAGE_F
+            )
+            if should_preissue:
+                comm = get_async_communicator()
+                if comm._pending_recv_count < comm._RING_SIZE:
+                    comm.recv_start()
+
+        # FFN node: pre-issue recv for DA→FFN data before next A stage.
+        # The FFN schedule is A,F interleaved per micro-batch, so pre-issuing
+        # after every F stage keeps the ring buffer full for the next A stage.
+        if afd_is_ffn() and i + 1 < len(pipeline):
+            next_stage = pipeline[i + 1][0]
+            should_preissue = (
+                stage_type == AFDForwardStage.AFD_FORWARD_STAGE_F
+                and next_stage == AFDForwardStage.AFD_FORWARD_STAGE_A
+            )
+            if should_preissue:
+                comm = get_async_communicator()
+                if comm._pending_recv_count < comm._RING_SIZE:
+                    comm.recv_start()
 
     try:
         results = [
@@ -1042,6 +1237,34 @@ def model_forward_afd(
     except IndexError:
         raise ValueError(
             "model_forward_afd: unexpected empty queue — potential implementation bug"
+        )
+
+    # ── 3BO: drain all pending sends before returning ───────────────────
+    try:
+        comm = get_async_communicator()
+        comm.drain_sends()
+    except Exception:
+        pass
+
+    # ── TPOT breakdown logging ──────────────────────────────────────────
+    if _afd_timing_enabled and _afd_timing_records:
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        _log_afd_breakdown(_afd_timing_records, num_layers, m_stage)
+        _afd_timing_records.clear()
+
+    # ── Detailed per-stage timeline logging ─────────────────────────────
+    if _detailed_timing_enabled and _detailed_timeline:
+        import json as _json
+        perspective = "attn" if afd_is_attn() else "ffn"
+        tl_json = _json.dumps(_detailed_timeline)
+        logger.error(
+            f"[AFD_TIMELINE] perspective={perspective} "
+            f"layers={num_layers} M={m_stage} "
+            f"total_steps={len(_detailed_timeline)} "
+            f"timeline={tl_json}"
         )
 
     # G5 optimization: pre-allocate output and copy slices instead of torch.cat
@@ -1153,9 +1376,14 @@ class AFDCommunicator:
     ):
         comm = get_async_communicator()
         if self.perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
-            # C2: start receiving from Attn asynchronously
-            comm.recv_start()
-            hidden_states = comm.recv_wait()
+            # 3BO: if recv was pre-issued by the pipeline (thread running or
+            # tensor already received), just drain it. _pending_recv can be
+            # a running Thread (async) or a tensor (sync / already completed).
+            if comm._pending_recv is not None:
+                hidden_states = comm.recv_wait()
+            else:
+                comm.recv_start()
+                hidden_states = comm.recv_wait()
             return hidden_states, residual
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(

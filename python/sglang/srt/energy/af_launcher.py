@@ -117,6 +117,11 @@ def _build_server_cmd(
     if tier1_extra:
         cmd += tier1_extra
 
+    # Per-module extra CLI args (e.g. ["--skip-server-warmup"])
+    extra = mod.get("extra_cli_args", [])
+    if isinstance(extra, list):
+        cmd += extra
+
     return cmd
 
 
@@ -127,7 +132,6 @@ def _build_server_env(
 ) -> dict:
     """Build the environment dict for a server process."""
     env = os.environ.copy()
-    env["CUDA_LAUNCH_BLOCKING"] = "1"
     env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices or str(mod["gpu"])
     env["AFD_UCX_BASE_PORT"] = str(mod["ucx_base_port"])
     env["AFD_SCHED_PORT"] = str(mod["sched_port"])
@@ -191,14 +195,15 @@ def _run_preflight_solve(cfg: dict, log_dir: Path) -> Optional[str]:
             energy_model_dir=energy_dir,
         )
 
-        # Model geometry — hardcoded for Llama3.1-8B; adjust for other models
+        # Model geometry — read from config or fall back to Llama3.1-8B defaults
+        model_cfg = cfg.get("model", {})
         solver = Tier1Solver(
             profile_table=pt,
-            num_layers=32,       # Llama 3.1 8B
-            num_kv_heads=8,
-            head_dim=128,
-            hidden_size=4096,
-            gpu_mem_gb=80.0,
+            num_layers=model_cfg.get("num_layers", 32),
+            num_kv_heads=model_cfg.get("num_kv_heads", 8),
+            head_dim=model_cfg.get("head_dim", 128),
+            hidden_size=model_cfg.get("hidden_size", 4096),
+            gpu_mem_gb=model_cfg.get("gpu_mem_gb", 80.0),
         )
 
         wl = WorkloadProfile(
