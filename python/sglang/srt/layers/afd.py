@@ -18,6 +18,7 @@ import itertools
 import logging
 import multiprocessing
 import os
+import queue
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -73,11 +74,13 @@ class AFDStageScheduleGenerator:
     def attn_stage(
         num_layers: int, m_stage: int
     ) -> "AFDStageScheduleGenerator.Schedule":
-        # Layer-major schedule with micro-batch interleaving.
-        # For layer 0 we must emit all M A-stages first (no F(-1, m) exists),
-        # then for layer_id ≥ 1 we interleave F(l-1, m) with A(l, m).
-        # This maximises DA throughput by filling the DF→DA round-trip gap
-        # with A-stages for other micro-batches.
+        # Batch schedule: all A-stages for a layer, then all F-stages.
+        # This maximizes overlap: while DA does A(L,0)..A(L,M-1), DF is
+        # computing MLP for L-1 results. By the time DA reaches F(L-1,0),
+        # DF has likely finished and sent back all results.
+        #
+        # Schedule for M=3, 3 layers:
+        #   A(0,0) A(0,1) A(0,2) | F(0,0) F(0,1) F(0,2) | A(1,0) A(1,1) A(1,2) | ...
         schedule = []
         if num_layers == 1:
             return [
@@ -85,13 +88,24 @@ class AFDStageScheduleGenerator:
             ] + [
                 (AFDForwardStage.AFD_FORWARD_STAGE_F, 0, m) for m in range(m_stage)
             ]
-        for layer_id, m in itertools.product(range(num_layers + 1), range(m_stage)):
-            if layer_id > 0:
+        # Layer 0: only A-stages (no F(-1) exists)
+        for m in range(m_stage):
+            schedule.append((AFDForwardStage.AFD_FORWARD_STAGE_A, 0, m))
+        # Layers 1..N-1: batch-F(prev) then batch-A(cur)
+        for layer_id in range(1, num_layers):
+            # All F-stages for previous layer (recv from DF)
+            for m in range(m_stage):
                 schedule.append(
                     (AFDForwardStage.AFD_FORWARD_STAGE_F, layer_id - 1, m)
                 )
-            if layer_id < num_layers:
+            # All A-stages for current layer
+            for m in range(m_stage):
                 schedule.append((AFDForwardStage.AFD_FORWARD_STAGE_A, layer_id, m))
+        # Final F-stages for last layer
+        for m in range(m_stage):
+            schedule.append(
+                (AFDForwardStage.AFD_FORWARD_STAGE_F, num_layers - 1, m)
+            )
         return schedule
 
 
@@ -760,9 +774,22 @@ class AsyncTensorCommunicator:
         self._recv_idx_write: int = 0
         self._recv_idx_read: int = 0
         self._pending_recv_count: int = 0
-        # Sends
+        # Sends — persistent sender daemon with queue + pre-allocated event pool
         self._send_thread: Optional[object] = None
-        self._pending_sends: list = []  # 3BO: all in-flight send threads
+        self._pending_sends: list = []  # legacy compat
+        self._send_futures: list = []  # UCX-level send futures for fence
+        self._send_queue: Optional[queue.Queue] = None
+        self._sender_daemon: Optional[threading.Thread] = None
+        self._sender_daemon_started = False
+        # Pre-allocated CUDA event pool to avoid per-send object creation (~15μs)
+        self._event_pool_size = 16
+        self._event_pool: list = []
+        self._event_pool_idx: int = 0
+        if torch.cuda.is_available():
+            self._event_pool = [
+                torch.cuda.Event(enable_timing=False)
+                for _ in range(self._event_pool_size)
+            ]
 
     # Backward-compat properties for code that checks single-recv state.
     # With async recv, the ring slot may still be None while the background
@@ -784,28 +811,73 @@ class AsyncTensorCommunicator:
 
     @torch.compiler.disable()
     def send_async(self, x: torch.Tensor):
-        """3BO: non-blocking send — never joins previous sends."""
+        """Near-zero-cost send via pre-allocated event pool + persistent daemon.
+
+        Main thread cost: ~3-5μs (reuse event from pool + queue.put).
+        No Python object creation, no profiling overhead in hot path.
+        """
         if self.comm_stream is not None and hasattr(self.inner, "send_tensor_nonblocking"):
-            compute_event = torch.cuda.current_stream().record_event()
+            # Reuse event from pre-allocated pool (avoids ~15μs object creation)
+            ev = self._event_pool[self._event_pool_idx]
+            self._event_pool_idx = (self._event_pool_idx + 1) % self._event_pool_size
+            ev.record()  # record on current compute stream
 
-            def _deferred_send():
-                compute_event.synchronize()
-                self.inner.send_tensor_nonblocking(x)
+            # Ensure persistent sender daemon is running
+            if not self._sender_daemon_started:
+                self._start_sender_daemon()
 
-            self._pending_sends = [t for t in self._pending_sends if t.is_alive()]
-            thread = threading.Thread(
-                target=_deferred_send, daemon=True, name="ucx-deferred-send",
-            )
-            thread.start()
-            self._pending_sends.append(thread)
-            self._send_thread = thread
+            # Fire-and-forget: enqueue (tensor, event)
+            # No profiling in hot path — profiling moved to daemon thread
+            self._send_queue.put_nowait((x, ev))
+        elif self.comm_stream is not None and hasattr(self.inner, "send_tensor_stream"):
+            # IPC path: submit GPU copy on comm_stream, flag_write deferred to daemon.
+            # Main thread cost: ~5μs (record_event + wait_event + submit copy commands)
+            ev = self._event_pool[self._event_pool_idx]
+            self._event_pool_idx = (self._event_pool_idx + 1) % self._event_pool_size
+            ev.record()
+            self.comm_stream.wait_event(ev)
+            self.inner.send_tensor_stream(x, self.comm_stream)
         elif self.comm_stream is not None:
-            compute_event = torch.cuda.current_stream().record_event()
+            ev = self._event_pool[self._event_pool_idx]
+            self._event_pool_idx = (self._event_pool_idx + 1) % self._event_pool_size
+            ev.record()
             with torch.cuda.stream(self.comm_stream):
-                self.comm_stream.wait_event(compute_event)
+                self.comm_stream.wait_event(ev)
                 self.inner.send_tensor(x)
         else:
             self.inner.send_tensor(x)
+
+    def _start_sender_daemon(self):
+        """Start the persistent sender daemon thread."""
+        from sglang.srt.layers.afd_mixin import _afd_host_events
+
+        self._send_queue = queue.Queue()
+
+        def _sender_loop():
+            while True:
+                item = self._send_queue.get()
+                if item is None:
+                    self._send_queue.task_done()
+                    break  # Shutdown signal
+                x, compute_event = item
+                compute_event.synchronize()
+                # IPC needs compute_event for GPU-level stream ordering;
+                # UCX ignores it (already CPU-synced above).
+                try:
+                    self.inner.send_tensor_nonblocking(x, compute_event=compute_event)
+                except TypeError:
+                    # Fallback for backends that don't accept compute_event
+                    self.inner.send_tensor_nonblocking(x)
+                future = getattr(self.inner, "_last_send_future", None)
+                if future is not None:
+                    self._send_futures.append(future)
+                self._send_queue.task_done()
+
+        self._sender_daemon = threading.Thread(
+            target=_sender_loop, daemon=True, name="ucx-persistent-sender",
+        )
+        self._sender_daemon.start()
+        self._sender_daemon_started = True
 
     @torch.compiler.disable()
     def recv_start(self):
@@ -817,18 +889,55 @@ class AsyncTensorCommunicator:
 
         Can be called up to RING_SIZE times before recv_wait drains slots.
         """
-        idx = self._recv_idx_write
+        from sglang.srt.layers.afd_mixin import _afd_host_events, _afd_ctx
 
-        def _deferred_recv():
-            if self.comm_stream is not None:
+        idx = self._recv_idx_write
+        _prof_layer = _afd_ctx.get("layer", -1)
+        _prof_mb = _afd_ctx.get("mb", -1)
+
+        def _deferred_recv(_l=_prof_layer, _m=_prof_mb):
+            t0 = time.time()
+            if hasattr(self.inner, "recv_poll"):
+                # 2-phase IPC: bg-thread flag polling only (no GPU ops).
+                # Avoids 10-40ms bg-thread event.synchronize() bottleneck.
+                # Main thread does GPU copy + sync in recv_wait via recv_complete.
+                slot_info = self.inner.recv_poll()  # (slot, total_bytes)
+                event = None
+                t1 = time.time()
+                _afd_host_events.append({
+                    "ts_ms": round(t0 * 1000, 3),
+                    "role": "UCX_PROFILE", "layer": _l, "mb": _m,
+                    "event": "recv_start_detail",
+                    "recv_inner_us": round((t1 - t0) * 1e6, 1),
+                    "phase": "poll_only",
+                })
+                self._recv_ring[idx] = slot_info
+                self._recv_event_ring[idx] = None
+            elif self.comm_stream is not None:
                 with torch.cuda.stream(self.comm_stream):
                     tensor = self.inner.recv_tensor()
                     event = self.comm_stream.record_event()
+                t1 = time.time()
+                _afd_host_events.append({
+                    "ts_ms": round(t0 * 1000, 3),
+                    "role": "UCX_PROFILE", "layer": _l, "mb": _m,
+                    "event": "recv_start_detail",
+                    "recv_inner_us": round((t1 - t0) * 1e6, 1),
+                })
+                self._recv_ring[idx] = tensor
+                self._recv_event_ring[idx] = event
             else:
                 tensor = self.inner.recv_tensor()
                 event = None
-            self._recv_ring[idx] = tensor
-            self._recv_event_ring[idx] = event
+                t1 = time.time()
+                _afd_host_events.append({
+                    "ts_ms": round(t0 * 1000, 3),
+                    "role": "UCX_PROFILE", "layer": _l, "mb": _m,
+                    "event": "recv_start_detail",
+                    "recv_inner_us": round((t1 - t0) * 1e6, 1),
+                })
+                self._recv_ring[idx] = tensor
+                self._recv_event_ring[idx] = event
 
         thread = threading.Thread(
             target=_deferred_recv, daemon=True, name="ucx-deferred-recv",
@@ -841,26 +950,73 @@ class AsyncTensorCommunicator:
     @torch.compiler.disable()
     def recv_wait(self) -> torch.Tensor:
         """3BO: drain the oldest pending recv from the ring."""
+        from sglang.srt.layers.afd_mixin import _afd_host_events, _afd_ctx
+
         if self._pending_recv_count == 0:
             raise RuntimeError("recv_wait called with no pending recv (drain mismatch)")
         idx = self._recv_idx_read
+        _prof_layer = _afd_ctx.get("layer", -1)
+        _prof_mb = _afd_ctx.get("mb", -1)
 
         # Wait for the background recv thread to finish
         thread = self._recv_threads[idx]
+        t0 = time.time()
         if thread is not None:
             thread.join(timeout=30)
+            if thread.is_alive():
+                raise RuntimeError(
+                    f"recv_wait: background recv thread timed out after 30s "
+                    f"(slot={idx}, pending_count={self._pending_recv_count}). "
+                    f"The remote node may be unresponsive."
+                )
             self._recv_threads[idx] = None
+        t1 = time.time()
 
         ev = self._recv_event_ring[idx]
-        tensor = self._recv_ring[idx]
+        data = self._recv_ring[idx]
+
+        # 2-phase IPC: bg thread polled flag only, main thread does GPU copy
+        if hasattr(self.inner, "recv_complete") and isinstance(data, tuple):
+            t_phase2 = time.time()
+            slot, total_bytes = data
+            if self.comm_stream is not None:
+                with torch.cuda.stream(self.comm_stream):
+                    tensor = self.inner.recv_complete(slot, total_bytes)
+                    ev = self.comm_stream.record_event()
+            else:
+                tensor = self.inner.recv_complete(slot, total_bytes)
+                ev = None
+            t_phase2_end = time.time()
+            _afd_host_events.append({
+                "ts_ms": round(t_phase2 * 1000, 3),
+                "role": "UCX_PROFILE", "layer": _prof_layer, "mb": _prof_mb,
+                "event": "recv_complete_detail",
+                "recv_complete_us": round((t_phase2_end - t_phase2) * 1e6, 1),
+                "phase": "gpu_copy",
+            })
+        else:
+            tensor = data
 
         if self._send_thread is not None:
+            # Legacy: join per-send thread (not used with persistent daemon)
             self._send_thread.join(timeout=30)
             self._send_thread = None
+        t2 = time.time()
         if hasattr(self.inner, "fence"):
             self.inner.fence()
+        t3 = time.time()
         if ev is not None:
             ev.synchronize()
+        t4 = time.time()
+        _afd_host_events.append({
+            "ts_ms": round(t0 * 1000, 3),
+            "role": "UCX_PROFILE", "layer": _prof_layer, "mb": _prof_mb,
+            "event": "recv_wait_detail",
+            "recv_thread_join_us": round((t1 - t0) * 1e6, 1),
+            "send_thread_join_us": round((t2 - t1) * 1e6, 1),
+            "fence_us": round((t3 - t2) * 1e6, 1),
+            "cuda_sync_us": round((t4 - t3) * 1e6, 1),
+        })
 
         self._recv_ring[idx] = None
         self._recv_event_ring[idx] = None
@@ -870,7 +1026,11 @@ class AsyncTensorCommunicator:
 
     @torch.compiler.disable()
     def drain_sends(self):
-        """3BO: wait for all in-flight sends to complete."""
+        """Wait for all in-flight sends to complete."""
+        # With persistent sender daemon: drain the queue by waiting for it to empty
+        if self._send_queue is not None:
+            self._send_queue.join()  # blocks until all queued items are processed
+        # Legacy: join any old-style per-send threads
         for t in self._pending_sends:
             try:
                 t.join(timeout=30)
@@ -878,6 +1038,19 @@ class AsyncTensorCommunicator:
                 pass
         self._pending_sends.clear()
         self._send_thread = None
+        # Wait for all captured UCX-level send Futures.
+        for future in self._send_futures:
+            try:
+                future.result(timeout=30)
+            except Exception:
+                pass
+        self._send_futures.clear()
+        # Final fence to flush any remaining UCX operations.
+        if hasattr(self.inner, "fence"):
+            try:
+                self.inner.fence()
+            except Exception:
+                pass
 
     @torch.compiler.disable()
     def drain_recvs(self):
@@ -899,7 +1072,20 @@ class AsyncTensorCommunicator:
 
     @torch.compiler.disable()
     def recv_sync(self) -> torch.Tensor:
-        return self.inner.recv_tensor()
+        from sglang.srt.layers.afd_mixin import _afd_host_events, _afd_ctx
+
+        _prof_layer = _afd_ctx.get("layer", -1)
+        _prof_mb = _afd_ctx.get("mb", -1)
+        t0 = time.time()
+        result = self.inner.recv_tensor()
+        t1 = time.time()
+        _afd_host_events.append({
+            "ts_ms": round(t1 * 1000, 3),
+            "role": "UCX_PROFILE", "layer": _prof_layer, "mb": _prof_mb,
+            "event": "recv_sync_detail",
+            "ucx_recv_dur_us": round((t1 - t0) * 1e6, 1),
+        })
+        return result
 
 
 # --------------- Global accessors ---------------
@@ -907,8 +1093,16 @@ class AsyncTensorCommunicator:
 
 _async_communicator: Optional[AsyncTensorCommunicator] = None
 
+# Per-mb override: when the data-driven AsyncMbDriver is running, it sets
+# this to the current mb's AsyncTensorCommunicator so prepare_mlp /
+# postprocess_layer route send/recv through the right per-mb channel
+# instead of the global singleton.  See afd_async_sched.AsyncMbDriver._step.
+_per_mb_async_override: Optional[AsyncTensorCommunicator] = None
+
 
 def get_async_communicator() -> AsyncTensorCommunicator:
+    if _per_mb_async_override is not None:
+        return _per_mb_async_override
     global _async_communicator
     if _async_communicator is None:
         _async_communicator = AsyncTensorCommunicator(get_tensor_communicator())
@@ -930,6 +1124,11 @@ def get_tensor_communicator() -> FifoTensorCommunicator:
         from sglang.srt.layers.rdma_comm import UcxTensorCommunicator
 
         return UcxTensorCommunicator(perspective)
+
+    if comm_backend == "ipc":
+        from sglang.srt.layers.ipc_comm import IpcTensorCommunicator
+
+        return IpcTensorCommunicator(perspective)
 
     if comm_backend == "stepmesh" or (
         comm_backend == "auto" and os.environ.get("MLC_INTERFACE")
@@ -1044,11 +1243,24 @@ def model_forward_afd_split_inputs(
     return [_post_transform(**inp) for inp in inputs_arr]
 
 
-def _log_afd_breakdown(timing_records: list, num_layers: int, m_stage: int) -> None:
+def _log_afd_breakdown(
+    timing_records: list,
+    num_layers: int,
+    m_stage: int,
+    anchor_event: Optional[torch.cuda.Event] = None,
+    last_event: Optional[torch.cuda.Event] = None,
+    host_end: Optional[float] = None,
+) -> None:
     """Aggregate AFD per-stage CUDA events and log per-node TPOT breakdown.
 
     Called after torch.cuda.synchronize() inside model_forward_afd() so all
     recorded events have elapsed_time available.
+
+    If anchor_event/last_event/host_end are provided, computes wall-clock
+    timestamps for each sub-stage event:
+      wall_ms = host_end * 1000 + elapsed(sub_stage, last_event)
+
+    This gives cross-GPU aligned timestamps (DA and DF share the same host clock).
     """
     from sglang.srt.layers.afd_mixin import _afd_timing_enabled
 
@@ -1056,6 +1268,7 @@ def _log_afd_breakdown(timing_records: list, num_layers: int, m_stage: int) -> N
         return
 
     perspective = "attn" if afd_is_attn() else "ffn"
+    host_end_ms = host_end * 1000.0 if host_end is not None else None
 
     # Aggregate by stage and sub-stage
     agg = {
@@ -1096,6 +1309,38 @@ def _log_afd_breakdown(timing_records: list, num_layers: int, m_stage: int) -> N
         f"| nA={stage_counts['A']} nF={stage_counts['F']}"
     )
 
+    # Per-step timing output (one JSON array per forward pass)
+    steps = []
+    for rec in timing_records:
+        step = {
+            "stage": rec["stage"],
+            "perspective": rec.get("perspective", perspective),
+            "layer_id": rec.get("layer_id", -1),
+            "mb": rec.get("mb", -1),
+            "batch_size": rec.get("batch_size", -1),
+        }
+        for key, (ev_start, ev_end) in rec.get("events", {}).items():
+            if ev_start is not None and ev_end is not None:
+                step[f"{key}_ms"] = round(ev_start.elapsed_time(ev_end), 3)
+                # Wall-clock alignment: offset from last_event
+                if host_end_ms is not None and last_event is not None:
+                    step[f"{key}_wall_start_ms"] = round(
+                        host_end_ms - ev_start.elapsed_time(last_event), 3
+                    )
+                    step[f"{key}_wall_end_ms"] = round(
+                        host_end_ms - ev_end.elapsed_time(last_event), 3
+                    )
+            else:
+                step[f"{key}_ms"] = 0.0
+        steps.append(step)
+    import json as _json
+    logger.error(
+        f"[AFD_PER_STEP] perspective={perspective} "
+        f"layers={num_layers} M={m_stage} "
+        f"nsteps={len(steps)} "
+        f"steps={_json.dumps(steps)}"
+    )
+
 
 def model_forward_afd(
     layers,
@@ -1108,7 +1353,12 @@ def model_forward_afd(
     if hidden_states.shape[0] == 0:
         return hidden_states, residual
 
-    from sglang.srt.layers.afd_mixin import _afd_timing_records, _afd_timing_enabled
+    from sglang.srt.layers.afd_mixin import (
+        _afd_timing_records, _afd_timing_enabled, _afd_sched_ts,
+        _afd_host_events, _afd_ctx,
+    )
+
+    _afd_sched_ts["forward_start"] = time.time()
 
     num_layers = len(layers)
     if forward_batch.afd_children is not None:
@@ -1116,9 +1366,26 @@ def model_forward_afd(
     else:
         m_stage = 1
 
+    _async_sched_enabled = bool(
+        getattr(get_global_server_args(), "afd_async_schedule", False)
+    )
+
+    # Clean up any stale pre-issue recv state from a previous pass
+    # (e.g. when m_stage changes from M=3 to M=1 between passes).
+    # Only the legacy single-comm path uses pre-issued recvs; the data-
+    # driven driver issues recvs per-mb-per-step and never leaks state
+    # across forward passes.
+    if not _async_sched_enabled:
+        try:
+            comm = get_async_communicator()
+            comm.drain_recvs()
+        except Exception:
+            pass
+
     # Reset timing records for this forward pass
     if _afd_timing_enabled:
         _afd_timing_records.clear()
+    _afd_host_events.clear()
 
     # Detailed per-stage wall-clock timing (env-var gated)
     _detailed_timing_enabled = os.getenv("AFD_DETAILED_TIMING", "0") == "1"
@@ -1132,6 +1399,86 @@ def model_forward_afd(
         forward_batch=forward_batch,
         input_data_scatter_mode=input_data_scatter_mode,
     )
+
+    # Data-driven scheduler branch (--afd-async-schedule).
+    # Each mb advances on its own per-mb channel; scheduling decisions
+    # are based on which recv finishes first, not a static order.
+    if _async_sched_enabled:
+        from sglang.srt.layers.afd_async_sched import AsyncMbDriver
+        from sglang.srt.layers.afd_per_mb_channel import get_per_mb_channel_set
+
+        channels = get_per_mb_channel_set(m_stage)
+        driver = AsyncMbDriver(
+            perspective=get_afd_perspective(),
+            layers=layers,
+            num_layers=num_layers,
+            m_stage=m_stage,
+            channels=channels,
+            input_arrs=input_arrs,
+            detailed_timeline=(
+                _detailed_timeline if _detailed_timing_enabled else None
+            ),
+        )
+        mbs_final = driver.run()
+
+        try:
+            channels.drain()
+        except Exception:
+            logger.exception("AsyncMbDriver: channel drain failed")
+
+        _afd_sched_ts["forward_end"] = time.time()
+
+        # ── Detailed per-stage timeline logging (mirrors legacy path) ──
+        if _detailed_timing_enabled and _detailed_timeline:
+            import json as _json
+            perspective = "attn" if afd_is_attn() else "ffn"
+            tl_json = _json.dumps(_detailed_timeline)
+            logger.error(
+                f"[AFD_TIMELINE] perspective={perspective} "
+                f"layers={num_layers} M={m_stage} "
+                f"total_steps={len(_detailed_timeline)} "
+                f"timeline={tl_json}"
+            )
+
+        if len(mbs_final) == 1:
+            return mbs_final[0].hidden_states, mbs_final[0].residual
+
+        for i, m in enumerate(mbs_final):
+            if m.hidden_states.numel() == 0:
+                raise RuntimeError(
+                    f"model_forward_afd (async): mb {i} hidden_states empty"
+                )
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        total_tokens = sum(m.hidden_states.shape[0] for m in mbs_final)
+        hidden_dim = mbs_final[0].hidden_states.shape[1]
+        dtype = mbs_final[0].hidden_states.dtype
+        device = mbs_final[0].hidden_states.device
+
+        if total_tokens <= 0:
+            raise RuntimeError(
+                f"model_forward_afd (async): total_tokens={total_tokens}"
+            )
+
+        merged_hidden = torch.empty(
+            total_tokens, hidden_dim, dtype=dtype, device=device,
+        )
+        need_residual = afd_is_attn() and mbs_final[0].residual is not None
+        merged_residual = (
+            torch.empty(total_tokens, hidden_dim, dtype=dtype, device=device)
+            if need_residual
+            else None
+        )
+        offset = 0
+        for m in mbs_final:
+            n = m.hidden_states.shape[0]
+            merged_hidden[offset : offset + n] = m.hidden_states
+            if need_residual:
+                merged_residual[offset : offset + n] = m.residual
+            offset += n
+        return merged_hidden, merged_residual
 
     # G6 optimization: use StageIO NamedTuple instead of dict
     stage_outputs: Dict[AFDForwardStage, deque] = {
@@ -1150,6 +1497,9 @@ def model_forward_afd(
             input_arrs[micro_batch_idx]["forward_batch"],
             io.residual,
         )
+        if _afd_timing_records:
+            _afd_timing_records[-1]["mb"] = micro_batch_idx
+            _afd_timing_records[-1]["batch_size"] = io.hidden_states.shape[0]
         stage_outputs[AFDForwardStage.AFD_FORWARD_STAGE_A].append(StageIO(hs, res))
 
     def forward_F(layer_id: int, micro_batch_idx: int):
@@ -1159,6 +1509,9 @@ def model_forward_afd(
             input_arrs[micro_batch_idx]["forward_batch"],
             io.residual,
         )
+        if _afd_timing_records:
+            _afd_timing_records[-1]["mb"] = micro_batch_idx
+            _afd_timing_records[-1]["batch_size"] = io.hidden_states.shape[0]
         stage_outputs[AFDForwardStage.AFD_FORWARD_STAGE_F].append(StageIO(hs, res))
 
     executors = {
@@ -1179,11 +1532,28 @@ def model_forward_afd(
     #
     # On the FFN node: pre-issue after every F-stage for the next A-stage
     # so DA→DF transfer overlaps with FFN compute.
+    #
+    # NOTE: async recv is enabled for M>1 (micro-batch pipeline) where there
+    # IS overlap opportunity between recv and the next micro-batch's compute.
+    # For M=1, recv is synchronous (recv_sync) because:
+    #   1. No overlap opportunity (only one micro-batch)
+    #   2. The stream-ordered send path submits to the bridge event loop,
+    #      and concurrent recv on the same bridge could cause ordering issues.
+    #
+    # IPC backend: uses per-slot SHM flags (RING_SIZE=4) and 2-phase recv
+    # (bg-thread flag polling only, main-thread GPU copy) to avoid both
+    # flag races and bg-thread event.synchronize() overhead.
+    _async_recv_enabled = m_stage > 1
     _afd_pipe_logger = logging.getLogger("afd_pipeline")
     for i, (stage_type, *args) in enumerate(pipeline):
         stage_name = stage_type.name
         layer_id = args[0] if args else -1
         mb_id = args[1] if len(args) > 1 else -1
+
+        # Set pipeline context for host event labeling
+        _afd_ctx["layer"] = layer_id
+        _afd_ctx["mb"] = mb_id
+        _afd_ctx["stage"] = stage_name
 
         t0 = time.perf_counter() if _detailed_timing_enabled else 0
         executors[stage_type](*args)
@@ -1200,34 +1570,49 @@ def model_forward_afd(
                 "dur_ms": (t1 - t0) * 1000,
             })
 
-        # Attn node: pre-issue after every A-stage.  A-stages send data to DF
-        # via send_async; immediately start waiting for DF's F-stage response
-        # in a background thread so the pipeline loop can continue.
-        if afd_is_attn() and i + 1 < len(pipeline):
-            should_preissue = (
-                stage_type == AFDForwardStage.AFD_FORWARD_STAGE_A
-            ) or (
-                stage_type == AFDForwardStage.AFD_FORWARD_STAGE_F
-                and pipeline[i + 1][0] == AFDForwardStage.AFD_FORWARD_STAGE_F
-            )
-            if should_preissue:
-                comm = get_async_communicator()
-                if comm._pending_recv_count < comm._RING_SIZE:
-                    comm.recv_start()
+        if _async_recv_enabled:
+            if afd_is_attn() and i + 1 < len(pipeline):
+                should_preissue = False
+                if stage_type == AFDForwardStage.AFD_FORWARD_STAGE_A:
+                    # With batch schedule: A(L,0)..A(L,M-1) then F(L-1,0)..F(L-1,M-1)
+                    # Pre-issue recv after EVERY A-stage so that by the time we
+                    # reach the F-stage batch, all recvs are already in-flight.
+                    should_preissue = True
+                elif stage_type == AFDForwardStage.AFD_FORWARD_STAGE_F:
+                    # Between consecutive F-stages, pre-issue if ring has room
+                    # and there are more F-stages coming (for the NEXT layer's batch).
+                    next_stage_type = pipeline[i + 1][0]
+                    if next_stage_type == AFDForwardStage.AFD_FORWARD_STAGE_A:
+                        # Transitioning from F-batch to A-batch: pre-issue for
+                        # the F-batch that will follow the upcoming A-batch.
+                        should_preissue = True
+                    else:
+                        should_preissue = False
+                if should_preissue:
+                    comm = get_async_communicator()
+                    if comm._pending_recv_count < comm._RING_SIZE:
+                        comm.recv_start()
 
-        # FFN node: pre-issue recv for DA→FFN data before next A stage.
-        # The FFN schedule is A,F interleaved per micro-batch, so pre-issuing
-        # after every F stage keeps the ring buffer full for the next A stage.
-        if afd_is_ffn() and i + 1 < len(pipeline):
-            next_stage = pipeline[i + 1][0]
-            should_preissue = (
-                stage_type == AFDForwardStage.AFD_FORWARD_STAGE_F
-                and next_stage == AFDForwardStage.AFD_FORWARD_STAGE_A
-            )
-            if should_preissue:
-                comm = get_async_communicator()
-                if comm._pending_recv_count < comm._RING_SIZE:
-                    comm.recv_start()
+            # FFN node: pre-issue recv for DA→FFN data before next A stage.
+            # The FFN schedule is A,F interleaved per micro-batch, so pre-issuing
+            # after every F stage keeps the ring buffer full for the next A stage.
+            if afd_is_ffn() and i + 1 < len(pipeline):
+                next_stage = pipeline[i + 1][0]
+                should_preissue = (
+                    stage_type == AFDForwardStage.AFD_FORWARD_STAGE_F
+                    and next_stage == AFDForwardStage.AFD_FORWARD_STAGE_A
+                )
+                if should_preissue:
+                    comm = get_async_communicator()
+                    if comm._pending_recv_count < comm._RING_SIZE:
+                        comm.recv_start()
+
+    # ── Record wall-clock anchor: last CUDA event + host time ──────
+    _wall_anchor_last_event = None
+    _wall_anchor_host_end = None
+    if _afd_timing_enabled and torch.cuda.is_available():
+        _wall_anchor_last_event = torch.cuda.Event(enable_timing=True)
+        _wall_anchor_last_event.record()
 
     try:
         results = [
@@ -1239,12 +1624,18 @@ def model_forward_afd(
             "model_forward_afd: unexpected empty queue — potential implementation bug"
         )
 
-    # ── 3BO: drain all pending sends before returning ───────────────────
+    # ── 3BO: drain all pending sends + recvs before returning ──────
+    # drain_recvs prevents stale pre-issue state from leaking into
+    # the next forward pass when m_stage changes (e.g. M=3 → M=1).
     try:
         comm = get_async_communicator()
         comm.drain_sends()
+        comm.drain_recvs()
     except Exception:
         pass
+
+    # ── Scheduler wall-clock anchor for cross-GPU latency breakdown ─────
+    _afd_sched_ts["forward_end"] = time.time()
 
     # ── TPOT breakdown logging ──────────────────────────────────────────
     if _afd_timing_enabled and _afd_timing_records:
@@ -1252,8 +1643,35 @@ def model_forward_afd(
             torch.cuda.synchronize()
         except Exception:
             pass
-        _log_afd_breakdown(_afd_timing_records, num_layers, m_stage)
+        _wall_anchor_host_end = time.time()
+        _log_afd_breakdown(
+            _afd_timing_records, num_layers, m_stage,
+            last_event=_wall_anchor_last_event,
+            host_end=_wall_anchor_host_end,
+        )
         _afd_timing_records.clear()
+
+        # Log scheduler-level timestamps for cross-GPU latency breakdown
+        if _afd_sched_ts:
+            import json as _json2
+            ts_out = {k: round(v * 1000, 3) for k, v in _afd_sched_ts.items()}
+            logger.error(
+                f"[AFD_SCHED_TS] sched_timestamps={_json2.dumps(ts_out)}"
+            )
+            _afd_sched_ts.clear()
+
+        # Log host wall-clock events for cross-GPU pipeline breakdown
+        if _afd_host_events:
+            import json as _json3
+            perspective = "attn" if afd_is_attn() else "ffn"
+            role = "DA" if afd_is_attn() else "DF"
+            host_json = _json3.dumps(_afd_host_events)
+            logger.error(
+                f"[AFD_HOST_EVENTS] role={role} perspective={perspective} "
+                f"num_events={len(_afd_host_events)} "
+                f"events={host_json}"
+            )
+            _afd_host_events.clear()
 
     # ── Detailed per-stage timeline logging ─────────────────────────────
     if _detailed_timing_enabled and _detailed_timeline:
@@ -1374,22 +1792,35 @@ class AFDCommunicator:
         forward_batch: ForwardBatch,
         **kwargs,
     ):
+        from sglang.srt.layers.afd_mixin import _afd_host_events, _afd_ctx
+
         comm = get_async_communicator()
         if self.perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
-            # 3BO: if recv was pre-issued by the pipeline (thread running or
-            # tensor already received), just drain it. _pending_recv can be
-            # a running Thread (async) or a tensor (sync / already completed).
+            # 3BO: if recv was pre-issued by the pipeline, drain it.
+            # Otherwise fall back to blocking sync recv (no thread overhead).
+            t_recv_start = time.time()
             if comm._pending_recv is not None:
                 hidden_states = comm.recv_wait()
             else:
-                comm.recv_start()
-                hidden_states = comm.recv_wait()
+                hidden_states = comm.recv_sync()
+            t_recv_end = time.time()
+            _afd_host_events.append({
+                "ts_ms": round(t_recv_start * 1000, 3),
+                "role": "DF", "layer": self.layer_id, "mb": _afd_ctx["mb"],
+                "event": "recv_start", "stage": "A",
+            })
+            _afd_host_events.append({
+                "ts_ms": round(t_recv_end * 1000, 3),
+                "role": "DF", "layer": self.layer_id, "mb": _afd_ctx["mb"],
+                "event": "recv_end", "stage": "A",
+                "recv_dur_us": round((t_recv_end - t_recv_start) * 1e6, 1),
+            })
             return hidden_states, residual
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch, **kwargs
         )
-        # C2: send to FFN asynchronously (compute stream can proceed)
+        # C2: send to FFN — near-zero cost (~3-5μs with event pool + queue.put)
         comm.send_async(hidden_states)
         return hidden_states, residual
 
@@ -1400,19 +1831,38 @@ class AFDCommunicator:
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
+        from sglang.srt.layers.afd_mixin import _afd_host_events, _afd_ctx
+
         comm = get_async_communicator()
         if self.perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
-            # C2: send result back to Attn asynchronously
+            # C2: send result back to Attn — near-zero cost
             comm.send_async(hidden_states)
             return hidden_states, residual
 
         # R4: true overlap — recv_start was already issued by
         # postprocess_layer_start_recv if called from the pipeline;
         # otherwise fall back to blocking recv.
+        t_recv_start = time.time()
         if comm._pending_recv is not None:
             hidden_states = comm.recv_wait()
         else:
             hidden_states = comm.recv_sync()
+        # Ensure contiguity: IPC recv may produce views that downstream
+        # .view() calls (e.g. rotary embedding) cannot handle.
+        if not hidden_states.is_contiguous():
+            hidden_states = hidden_states.contiguous()
+        t_recv_end = time.time()
+        _afd_host_events.append({
+            "ts_ms": round(t_recv_start * 1000, 3),
+            "role": "DA", "layer": self.layer_id, "mb": _afd_ctx["mb"],
+            "event": "recv_start", "stage": "F",
+        })
+        _afd_host_events.append({
+            "ts_ms": round(t_recv_end * 1000, 3),
+            "role": "DA", "layer": self.layer_id, "mb": _afd_ctx["mb"],
+            "event": "recv_end", "stage": "F",
+            "recv_dur_us": round((t_recv_end - t_recv_start) * 1e6, 1),
+        })
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
         )

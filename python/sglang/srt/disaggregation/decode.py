@@ -1054,15 +1054,37 @@ class SchedulerDisaggregationDecodeMixin:
         # Eager-init UCX communicator so FFN listener is ready before
         # Attn side attempts to connect during PD warmup.
         # Both sides must init together: FFN listens, Attn connects.
-        from sglang.srt.layers.afd import get_async_communicator
-        try:
-            get_async_communicator()
-            logger.info("event_loop_afd_disagg_decode: UCX communicator ready")
-        except Exception as e:
-            logger.error("event_loop_afd_disagg_decode: AF communicator init failed: %s", e)
-            raise RuntimeError(
-                f"AF communicator init failed — cannot run AFD disagg decode without it: {e}"
-            ) from e
+        # When --afd-async-schedule is on, build per-mb channels instead.
+        if getattr(self.server_args, "afd_async_schedule", False):
+            from sglang.srt.layers.afd_per_mb_channel import (
+                get_per_mb_channel_set,
+            )
+            try:
+                m_stage = int(self.server_args.afd_micro_batch)
+                get_per_mb_channel_set(m_stage)
+                logger.info(
+                    "event_loop_afd_disagg_decode: per-mb channels ready (M=%d)",
+                    m_stage,
+                )
+            except Exception as e:
+                logger.error(
+                    "event_loop_afd_disagg_decode: per-mb channel init failed: %s",
+                    e,
+                )
+                raise RuntimeError(
+                    f"AF per-mb channel init failed — cannot run "
+                    f"AFD disagg decode without it: {e}"
+                ) from e
+        else:
+            from sglang.srt.layers.afd import get_async_communicator
+            try:
+                get_async_communicator()
+                logger.info("event_loop_afd_disagg_decode: UCX communicator ready")
+            except Exception as e:
+                logger.error("event_loop_afd_disagg_decode: AF communicator init failed: %s", e)
+                raise RuntimeError(
+                    f"AF communicator init failed — cannot run AFD disagg decode without it: {e}"
+                ) from e
 
         while True:
             recv_reqs = self.recv_requests()
@@ -1105,6 +1127,9 @@ class SchedulerDisaggregationDecodeMixin:
 
             if batch:
                 SchedulerAFDMixin.afd_send_batch_info(self, batch)
+                # Record ZMQ-send wall-clock for cross-GPU latency breakdown
+                from sglang.srt.layers.afd_mixin import _afd_sched_ts
+                _afd_sched_ts["zmq_sent"] = time.time()
                 SchedulerAFDMixin.afd_prepare_overlap(self, batch)
                 self._afd_dvfs_before_batch(batch)
                 result = self.run_batch(batch)

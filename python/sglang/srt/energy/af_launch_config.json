@@ -11,7 +11,7 @@
     "hidden_size": 5120,
     "gpu_mem_gb": 80.0
   },
-  "gpu_indices": [0,1,2,3],
+  "gpu_indices": [0,1,4,5],
 
   "disaggregation": {
     "bootstrap_port": 18999,
@@ -64,7 +64,7 @@
     },
     {
       "name": "PF",
-      "gpu": 2,
+      "gpu": 4,
       "perspective": "ffn",
       "disagg_mode": "prefill",
       "port": 50011,
@@ -74,7 +74,7 @@
     },
     {
       "name": "PA",
-      "gpu": 3,
+      "gpu": 5,
       "perspective": "attn",
       "disagg_mode": "prefill",
       "port": 50010,

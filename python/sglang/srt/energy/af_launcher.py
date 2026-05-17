@@ -133,16 +133,28 @@ def _build_server_env(
     """Build the environment dict for a server process."""
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices or str(mod["gpu"])
-    env["AFD_UCX_BASE_PORT"] = str(mod["ucx_base_port"])
     env["AFD_SCHED_PORT"] = str(mod["sched_port"])
     env["SGLANG_DISABLE_REQUEST_LOGGING"] = "true"
-    env["UCX_LOG_LEVEL"] = "fatal"
-    env["UCX_WARN_UNUSED_ENV_VARS"] = "n"
-    env["AFD_UCX_TLS"] = "rc,tcp,cuda_copy,cuda_ipc"
 
-    ffn_host = mod.get("ffn_host")
-    if ffn_host:
-        env["AFD_UCX_FFN_HOST"] = ffn_host
+    comm_backend = cfg["afd"].get("comm_backend", "ucx")
+
+    if comm_backend == "ipc":
+        # IPC mode: peer device, sync send toggle
+        ipc_sync = cfg["afd"].get("ipc_sync_send", "0")
+        env["AFD_IPC_SYNC_SEND"] = ipc_sync
+        # Peer GPU index: set per module in launch_all()
+        peer_idx = mod.get("ipc_peer_gpu")
+        if peer_idx is not None:
+            env["AFD_IPC_PEER_DEVICE"] = str(peer_idx)
+    else:
+        # UCX mode
+        env["AFD_UCX_BASE_PORT"] = str(mod["ucx_base_port"])
+        env["UCX_LOG_LEVEL"] = "fatal"
+        env["UCX_WARN_UNUSED_ENV_VARS"] = "n"
+        env["AFD_UCX_TLS"] = "rc,tcp,cuda_copy,cuda_ipc"
+        ffn_host = mod.get("ffn_host")
+        if ffn_host:
+            env["AFD_UCX_FFN_HOST"] = ffn_host
 
     return env
 
@@ -374,7 +386,40 @@ def launch_all(cfg: dict, start_with_workload: bool = False) -> int:
 
             # Allocated GPUs for this module
             allocated_gpus = gpu_alloc[name]
-            cuda_visible = ",".join(str(g) for g in allocated_gpus)
+
+            # For IPC backend, expose both GPUs in the A↔F pair so
+            # cross-device cudaMemcpyPeer works (see ipc_comm.py).
+            # Modules in the same disagg_mode+afd_sched_port pair
+            # share the same CUDA_VISIBLE_DEVICES.
+            is_ipc = cfg["afd"].get("comm_backend") == "ipc"
+            pair_cuda_visible: Optional[str] = None
+            base_gpu_id: Optional[int] = None
+            if is_ipc:
+                # Find all modules in the same pair (same disagg_mode + sched_port)
+                pair_gpus: list[int] = []
+                for m2 in modules:
+                    if (m2["disagg_mode"] == mod["disagg_mode"]
+                            and m2.get("sched_port") == mod.get("sched_port")):
+                        pair_gpus.extend(gpu_alloc[m2["name"]])
+                pair_gpus = sorted(set(pair_gpus))
+                pair_cuda_visible = ",".join(str(g) for g in pair_gpus)
+                # Find local GPU index within the pair
+                base_gpu_id = pair_gpus.index(allocated_gpus[0])
+                # Compute peer GPU index (the OTHER GPU in the pair)
+                for m2 in modules:
+                    if (m2["name"] != mod["name"]
+                            and m2["disagg_mode"] == mod["disagg_mode"]
+                            and m2.get("sched_port") == mod.get("sched_port")):
+                        peer_gpus = gpu_alloc[m2["name"]]
+                        if peer_gpus:
+                            mod["ipc_peer_gpu"] = pair_gpus.index(peer_gpus[0])
+                            break
+                logger.info(
+                    "  [IPC] %s pair GPUs=%s base_gpu_id=%d peer_gpu=%s",
+                    name, pair_cuda_visible, base_gpu_id, mod.get("ipc_peer_gpu"),
+                )
+
+            cuda_visible = pair_cuda_visible if pair_cuda_visible else ",".join(str(g) for g in allocated_gpus)
 
             # Lock GPU frequencies BEFORE launching the server process
             if freq_mhz is not None:
@@ -387,6 +432,8 @@ def launch_all(cfg: dict, start_with_workload: bool = False) -> int:
                 extra = []
             extra += stats_extra
             cmd = _build_server_cmd(cfg, mod, extra, tp_override=tp_override)
+            if is_ipc and base_gpu_id is not None:
+                cmd += ["--base-gpu-id", str(base_gpu_id)]
             env = _build_server_env(cfg, mod, cuda_visible_devices=cuda_visible)
 
             # Pass physical NVML GPU index for DVFS (first GPU in allocation)

@@ -1382,16 +1382,39 @@ class Scheduler(
 
         # Eager-init AF communicator (UCX/StepMesh) so FFN listener is
         # ready before Attn attempts to connect.
-        from sglang.srt.layers.afd import get_async_communicator
-        try:
-            get_async_communicator()
-            logger.info("event_loop_afd: AF communicator ready (%s)",
-                        get_afd_perspective())
-        except Exception as e:
-            logger.error("event_loop_afd: AF communicator init failed: %s", e)
-            raise RuntimeError(
-                f"AF communicator init failed in event_loop_afd: {e}"
-            ) from e
+        # When --afd-async-schedule is on, eager-init the per-mb channels
+        # instead of the legacy single comm, for the same reason: the FFN
+        # side must be listening on every per-mb endpoint before the Attn
+        # side connects on its first forward.
+        if getattr(self.server_args, "afd_async_schedule", False):
+            from sglang.srt.layers.afd_per_mb_channel import (
+                get_per_mb_channel_set,
+            )
+            try:
+                m_stage = int(self.server_args.afd_micro_batch)
+                get_per_mb_channel_set(m_stage)
+                logger.info(
+                    "event_loop_afd: per-mb AF channels ready (%s, M=%d)",
+                    get_afd_perspective(), m_stage,
+                )
+            except Exception as e:
+                logger.error(
+                    "event_loop_afd: per-mb AF channel init failed: %s", e
+                )
+                raise RuntimeError(
+                    f"AF per-mb channel init failed in event_loop_afd: {e}"
+                ) from e
+        else:
+            from sglang.srt.layers.afd import get_async_communicator
+            try:
+                get_async_communicator()
+                logger.info("event_loop_afd: AF communicator ready (%s)",
+                            get_afd_perspective())
+            except Exception as e:
+                logger.error("event_loop_afd: AF communicator init failed: %s", e)
+                raise RuntimeError(
+                    f"AF communicator init failed in event_loop_afd: {e}"
+                ) from e
 
         # S2: use Poller instead of busy-wait
         afd_poller = None
@@ -1458,6 +1481,8 @@ class Scheduler(
             if afd_is_ffn():
                 extra_reqs = _recv_afd_messages()
                 if extra_reqs:
+                    from sglang.srt.layers.afd_mixin import _afd_sched_ts
+                    _afd_sched_ts["zmq_recv"] = time.time()
                     recv_reqs = recv_reqs + extra_reqs
                 # Re-broadcast so all TP ranks see the merged requests.
                 # Must be outside `if extra_reqs` — all ranks must participate.
@@ -1529,8 +1554,16 @@ class Scheduler(
             if batch:
                 # Attn side: notify FFN about current batch
                 SchedulerAFDMixin.afd_send_batch_info(self, batch)
+                # Record ZMQ-send wall-clock for cross-GPU latency breakdown
+                if afd_is_attn():
+                    from sglang.srt.layers.afd_mixin import _afd_sched_ts
+                    _afd_sched_ts["zmq_sent"] = time.time()
 
                 is_decode = batch.forward_mode.is_decode()
+                bsz = batch.batch_size()
+                perspective = "FFN" if afd_is_ffn() else "ATTN"
+                print(f"[AFD_DBG] === ITER {_afd_loop_iter} {perspective} batch={bsz} max_running={self.max_running_requests} ===", flush=True)
+
                 self._tier1_record_batch_start(is_prefill=not is_decode)
                 self._afd_dvfs_before_batch(batch)
                 _prepare_afd_overlap(batch)
@@ -2039,6 +2072,9 @@ class Scheduler(
         filtered_reqs = []
         for recv_req in recv_reqs:
             if isinstance(recv_req, AFDReqInput):
+                if not hasattr(self, "_afd_pending_batch_infos"):
+                    from collections import deque
+                    self._afd_pending_batch_infos = deque()
                 self._afd_pending_batch_infos.append(recv_req)
                 continue
 

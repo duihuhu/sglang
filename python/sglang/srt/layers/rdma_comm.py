@@ -140,6 +140,16 @@ class _AsyncBridge:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result()
 
+    def submit_callable(self, fn):
+        """Submit a synchronous callable to run on the bridge thread.
+
+        The callable is wrapped in a coroutine and scheduled on the event loop.
+        Returns a concurrent.futures.Future that resolves when fn() completes.
+        """
+        async def _wrapper():
+            return fn()
+        return asyncio.run_coroutine_threadsafe(_wrapper(), self._loop)
+
     def stop(self):
         if self._loop is not None and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -302,6 +312,7 @@ class _UcxP2PCommunicator:
         self._listener = None
         self._connected = threading.Event()
         self._last_recv_buf: Optional[torch.Tensor] = None
+        self._send_lock: Optional[asyncio.Lock] = None  # created lazily on bridge loop
 
     def connect(self):
         self._bridge.run(self._init_connection())
@@ -355,14 +366,23 @@ class _UcxP2PCommunicator:
         torch.cuda.current_stream().synchronize()
         self._bridge.run(self._async_send(x, original_num_tokens))
 
-    def send_nonblocking(self, x: torch.Tensor, original_num_tokens: int = 0):
+    def send_nonblocking(self, x: torch.Tensor, original_num_tokens: int = 0,
+                          _prof_layer: int = -1, _prof_mb: int = -1):
         """Fire-and-forget send: submits to bridge, returns a Future.
 
         Caller must ensure GPU data is ready (e.g., via CUDA event)
         before the bridge thread reads the tensor.
         """
+        if _prof_layer < 0:
+            try:
+                from sglang.srt.layers.afd_mixin import _afd_ctx
+                _prof_layer = _afd_ctx.get("layer", -1)
+                _prof_mb = _afd_ctx.get("mb", -1)
+            except Exception:
+                pass
         return asyncio.run_coroutine_threadsafe(
-            self._async_send(x, original_num_tokens), self._bridge._loop
+            self._async_send(x, original_num_tokens, _prof_layer, _prof_mb),
+            self._bridge._loop
         )
 
     def send_wait(self, future):
@@ -370,25 +390,103 @@ class _UcxP2PCommunicator:
         if future is not None:
             future.result()
 
+    def send_nonblocking_stream_ordered(self, x: torch.Tensor,
+                                         comm_stream,
+                                         original_num_tokens: int = 0,
+                                         _prof_layer: int = -1,
+                                         _prof_mb: int = -1):
+        """Stream-ordered fire-and-forget send.
+
+        comm_stream already has a wait_event queued for the compute kernel.
+        We do comm_stream.synchronize() on the CALLER thread (not the bridge
+        event loop) to avoid blocking the asyncio loop.  Since wait_event is
+        already queued, this sync is near-zero cost (~5μs) once the compute
+        kernel finishes.  Then we submit the pure-async UCX send to the bridge.
+        """
+        import time as _time
+        try:
+            from sglang.srt.layers.afd_mixin import _afd_host_events as _host_ev
+        except Exception:
+            _host_ev = None
+
+        # Sync on caller thread — does NOT block the bridge event loop
+        t0 = _time.time()
+        comm_stream.synchronize()  # ~5μs: confirms wait_event resolved
+        t1 = _time.time()
+        if _host_ev is not None:
+            _host_ev.append({
+                "ts_ms": round(t0 * 1000, 3),
+                "role": "UCX_INNER", "layer": _prof_layer, "mb": _prof_mb,
+                "event": "async_send_brk",
+                "stream_sync_us": round((t1 - t0) * 1e6, 1),
+            })
+
+        # GPU data is now guaranteed ready — submit pure async send to bridge
+        return asyncio.run_coroutine_threadsafe(
+            self._async_send(x, original_num_tokens, _prof_layer, _prof_mb),
+            self._bridge._loop
+        )
+
     def recv(self) -> Tuple[torch.Tensor, int]:
         """Returns (tensor, original_num_tokens)."""
         return self._bridge.run(self._async_recv())
 
-    async def _async_send(self, x: torch.Tensor, original_num_tokens: int = 0):
-        meta = _encode_meta(x, original_num_tokens)
-        await self._endpoint.send(meta)
-        await self._endpoint.send(x.contiguous())
+    async def _async_send(self, x: torch.Tensor, original_num_tokens: int = 0,
+                          _prof_layer: int = -1, _prof_mb: int = -1):
+        # Lazily create the lock on the event loop thread
+        if self._send_lock is None:
+            self._send_lock = asyncio.Lock()
+        async with self._send_lock:
+            t0 = time.time()
+            meta = _encode_meta(x, original_num_tokens)
+            t1 = time.time()
+            await self._endpoint.send(meta)
+            t2 = time.time()
+            await self._endpoint.send(x.contiguous())
+            t3 = time.time()
+            try:
+                from sglang.srt.layers.afd_mixin import _afd_host_events
+                _afd_host_events.append({
+                    "ts_ms": round(t0 * 1000, 3),
+                    "role": "UCX_INNER", "layer": _prof_layer, "mb": _prof_mb,
+                    "event": "async_send_breakdown",
+                    "encode_meta_us": round((t1 - t0) * 1e6, 1),
+                    "send_meta_us": round((t2 - t1) * 1e6, 1),
+                    "send_data_us": round((t3 - t2) * 1e6, 1),
+                    "total_us": round((t3 - t0) * 1e6, 1),
+                })
+            except Exception:
+                pass
 
     async def _async_recv(self) -> Tuple[torch.Tensor, int]:
-        if self._last_recv_buf is not None:
-            self._pool.put(self._last_recv_buf)
-        meta = np.empty(_META_SLOTS, dtype=np.int64)
-        await self._endpoint.recv(meta)
-        shape, dtype, original_num_tokens = _decode_meta(meta)
-        buf = self._pool.get(shape, dtype, self._device)
-        await self._endpoint.recv(buf)
-        self._last_recv_buf = buf
-        return buf, original_num_tokens
+        # Lazily create recv lock on the event loop thread
+        if not hasattr(self, "_recv_lock_async") or self._recv_lock_async is None:
+            self._recv_lock_async = asyncio.Lock()
+        async with self._recv_lock_async:
+            if self._last_recv_buf is not None:
+                self._pool.put(self._last_recv_buf)
+            t0 = time.time()
+            meta = np.empty(_META_SLOTS, dtype=np.int64)
+            await self._endpoint.recv(meta)
+            t1 = time.time()
+            shape, dtype, original_num_tokens = _decode_meta(meta)
+            buf = self._pool.get(shape, dtype, self._device)
+            await self._endpoint.recv(buf)
+            t2 = time.time()
+            self._last_recv_buf = buf
+            try:
+                from sglang.srt.layers.afd_mixin import _afd_host_events
+                _afd_host_events.append({
+                    "ts_ms": round(t0 * 1000, 3),
+                    "role": "UCX_INNER", "layer": -1, "mb": -1,
+                    "event": "async_recv_breakdown",
+                    "recv_meta_us": round((t1 - t0) * 1e6, 1),
+                    "recv_data_us": round((t2 - t1) * 1e6, 1),
+                    "total_us": round((t2 - t0) * 1e6, 1),
+                })
+            except Exception:
+                pass
+            return buf, original_num_tokens
 
     def close(self):
         if self._endpoint is not None:
@@ -433,12 +531,22 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
       AFD_UCX_TIMEOUT    : connection timeout in seconds (default 60)
     """
 
-    def __init__(self, afd_perspective: AFDPerspective):
+    def __init__(self, afd_perspective: AFDPerspective,
+                 mb_id: Optional[int] = None):
         super().__init__()
         self._perspective = afd_perspective
         self._is_ffn = afd_perspective == AFDPerspective.AFD_PERSPECTIVE_FFN
 
         self._base_port = int(os.environ.get("AFD_UCX_BASE_PORT", "25000"))
+        # mb_id-based stride avoids port collisions when multiple
+        # UcxTensorCommunicators coexist in the same process (used by
+        # --afd-async-schedule).  None means "legacy single comm" — leave
+        # the base port untouched so existing fixtures still work.
+        self._mb_id: Optional[int] = mb_id
+        if self._mb_id is not None:
+            # 1024-port stride is far larger than any realistic
+            # peer_ffn_rank fanout.
+            self._base_port += (self._mb_id + 1) * 1024
         self._ffn_host = os.environ.get("AFD_UCX_FFN_HOST", "127.0.0.1")
         self._timeout = int(os.environ.get("AFD_UCX_TIMEOUT", "60"))
         self._device = f"cuda:{torch.cuda.current_device()}"
@@ -667,6 +775,49 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
         if future is not None:
             self._p2p.send_wait(future)
             self._last_send_future = None
+
+    def send_tensor_nonblocking_stream_ordered(self, x: torch.Tensor,
+                                                comm_stream, _prof_layer=-1,
+                                                _prof_mb=-1):
+        """Stream-ordered nonblocking send: comm_stream already has wait_event queued.
+
+        The bridge thread does a lightweight comm_stream.synchronize() (near-zero
+        cost since wait_event resolves as soon as compute kernel finishes) then
+        fires the UCX send.  This eliminates the 38-288μs CPU event.synchronize()
+        overhead from the old daemon-thread approach.
+        """
+        self._last_send_future = None
+
+        if self._local_tp <= 1:
+            self._last_send_future = self._p2p.send_nonblocking_stream_ordered(
+                x, comm_stream, _prof_layer=_prof_layer, _prof_mb=_prof_mb
+            )
+            return
+
+        if self._K == 1:
+            if self._is_rep:
+                self._last_send_future = self._p2p.send_nonblocking_stream_ordered(
+                    x, comm_stream, _prof_layer=_prof_layer, _prof_mb=_prof_mb
+                )
+            return
+
+        num_tokens = x.shape[0]
+
+        if self._is_rep:
+            chunk = (num_tokens + self._K - 1) // self._K
+            start = self._nic_group * chunk
+            end = min(start + chunk, num_tokens)
+            shard = x[start:end].contiguous()
+            if shard.shape[0] < chunk:
+                pad = torch.zeros(
+                    chunk - shard.shape[0], *x.shape[1:],
+                    dtype=x.dtype, device=x.device,
+                )
+                shard = torch.cat([shard, pad], dim=0)
+            self._last_send_future = self._p2p.send_nonblocking_stream_ordered(
+                shard, comm_stream, original_num_tokens=num_tokens,
+                _prof_layer=_prof_layer, _prof_mb=_prof_mb
+            )
 
     # ---- recv_tensor ----
 

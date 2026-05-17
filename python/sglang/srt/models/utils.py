@@ -235,6 +235,8 @@ def apply_qk_norm(
         and not envs.SGLANG_ENABLE_DETERMINISTIC_INFERENCE.get()
         and can_use_fused_inplace_qknorm(head_dim, q.dtype)
     ):
+        q = q.contiguous()
+        k = k.contiguous()
         fused_inplace_qknorm(
             q=q.view(batch_size, -1, head_dim),
             k=k.view(batch_size, -1, head_dim),

@@ -637,6 +637,7 @@ class ServerArgs:
     afd_grouped_stepmesh: bool = False
     afd_comm_backend: Optional[str] = None
     afd_enable_overlap_schedule: bool = False
+    afd_async_schedule: bool = False
 
     # Energy-aware DVFS (Tier 2)
     afd_energy_model_dir: Optional[str] = None
@@ -5480,10 +5481,11 @@ class ServerArgs:
         parser.add_argument(
             "--afd-comm-backend",
             type=str,
-            choices=["auto", "ucx", "stepmesh", "zmq"],
+            choices=["auto", "ucx", "ipc", "stepmesh", "zmq"],
             default=ServerArgs.afd_comm_backend,
             help="Communication backend for AFD Attn-FFN tensor transfer. "
             "'ucx': UCX-Py RDMA (requires ucp). "
+            "'ipc': CUDA IPC + SHM flags (single-node NVLink). "
             "'stepmesh': StepMesh via fserver_lib (requires MLC_INTERFACE). "
             "'zmq': ZMQ + optional NVLink broadcast. "
             "'auto': select based on available env vars (AFD_UCX_TLS -> ucx, MLC_INTERFACE -> stepmesh, else zmq). "
@@ -5496,6 +5498,16 @@ class ServerArgs:
             help="Enable CPU/GPU overlap scheduling in AFD event loop. "
             "CPU scheduling runs in parallel with GPU batch execution for ~5-10%% throughput improvement. "
             "Requires --afd-perspective.",
+        )
+        parser.add_argument(
+            "--afd-async-schedule",
+            action="store_true",
+            default=ServerArgs.afd_async_schedule,
+            help="Use the data-driven AFD scheduler with M independent per-mb "
+            "channels.  Each micro-batch advances independently on its own "
+            "send/recv pair, so quicker mbs are not blocked by slower ones at "
+            "layer boundaries.  Replaces AFDStageScheduleGenerator. "
+            "Requires --afd-perspective and --afd-comm-backend in {ucx,ipc,zmq}.",
         )
         parser.add_argument(
             "--afd-energy-model-dir",

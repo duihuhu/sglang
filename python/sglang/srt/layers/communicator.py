@@ -13,6 +13,8 @@
 # ==============================================================================
 import logging
 from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial

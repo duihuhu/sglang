@@ -29,6 +29,19 @@ _is_npu = is_npu()
 _afd_timing_records: list = []  # list of dicts with per-stage timing breakdown
 _afd_timing_enabled: bool = True
 
+# Scheduler-level wall-clock anchors for cross-GPU latency breakdown
+_afd_sched_ts: dict = {}  # keys: zmq_sent, zmq_recv, forward_start, forward_end
+
+# Host wall-clock events for send/recv pipeline breakdown
+# Each entry: {"ts_ms": float, "role": "DA"|"DF", "layer": int, "mb": int,
+#               "event": str, "stage": "A"|"F"}
+_afd_host_events: list = []
+
+# Pipeline context for host event labeling (set by model_forward_afd loop)
+# Mutable dict so assignments are visible across all importers
+_afd_ctx: dict = {"mb": -1, "layer": -1, "stage": ""}
+
+
 
 class AFDDecoderLayerMixin:
     """Mixin that adds AFD (A/F disaggregation) capability to any DecoderLayer.
@@ -191,6 +204,11 @@ class AFDDecoderLayerMixin:
             ev_mlp_end = torch.cuda.Event(enable_timing=True)
             ev_mlp_start.record()
 
+        is_attn = get_afd_perspective() == AFDPerspective.AFD_PERSPECTIVE_ATTN
+        bsz = hidden_states.shape[0]
+        hidden_dim = hidden_states.shape[1]
+        dtype_sz = hidden_states.element_size()
+
         hidden_states = self._run_mlp(hidden_states, forward_batch)
 
         if ev_mlp_end is not None:
@@ -198,6 +216,11 @@ class AFDDecoderLayerMixin:
             ev_post_start = torch.cuda.Event(enable_timing=True)
             ev_post_end = torch.cuda.Event(enable_timing=True)
             ev_post_start.record()
+
+        if is_attn:
+            _layer_id = getattr(self, "layer_id", -1)
+            tx_kb = bsz * hidden_dim * dtype_sz / 1024
+            print(f"[AFD_DBG] L{_layer_id:>2} batch={bsz:>2} | DA→DF {tx_kb:>5.0f}KB | DA←DF {tx_kb:>5.0f}KB", flush=True)
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
@@ -208,7 +231,7 @@ class AFDDecoderLayerMixin:
             _afd_timing_records.append({
                 "stage": "F",
                 "layer_id": getattr(self, "layer_id", -1),
-                "perspective": "attn" if get_afd_perspective() == AFDPerspective.AFD_PERSPECTIVE_ATTN else "ffn",
+                "perspective": "attn" if is_attn else "ffn",
                 "events": {
                     "mlp": (ev_mlp_start, ev_mlp_end),
                     "postprocess": (ev_post_start, ev_post_end),
