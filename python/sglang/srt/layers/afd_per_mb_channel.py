@@ -212,7 +212,7 @@ class MultiMbChannelSet:
 # --------------- backend factory -------------------------------------
 
 
-def _make_inner_comm_for_mb(mb_id: int):
+def _make_inner_comm_for_mb(mb_id: int, defer_connect: bool = False):
     """Construct one backend ``FifoTensorCommunicator`` keyed by mb_id.
 
     The mb_id is forwarded to the backend so SHM paths / TCP ports
@@ -251,7 +251,8 @@ def _make_inner_comm_for_mb(mb_id: int):
 
     if comm_backend == "ucx":
         from sglang.srt.layers.rdma_comm import UcxTensorCommunicator
-        return UcxTensorCommunicator(perspective, mb_id=mb_id)
+        return UcxTensorCommunicator(perspective, mb_id=mb_id,
+                                     defer_connect=defer_connect)
 
     if comm_backend == "ipc":
         from sglang.srt.layers.ipc_comm import IpcTensorCommunicator
@@ -328,15 +329,75 @@ def get_per_mb_channel_set(num_mb: int) -> MultiMbChannelSet:
     from sglang.srt.layers.afd import AsyncTensorCommunicator
 
     channels: List[PerMbChannel] = []
-    for mb_id in range(max_mb):
-        t0 = time.time()
-        inner = _make_inner_comm_for_mb(mb_id)
-        async_comm = AsyncTensorCommunicator(inner)
-        channels.append(PerMbChannel(mb_id, async_comm))
-        logger.info(
-            "afd_per_mb_channel: built channel mb=%d in %.1fms",
-            mb_id, (time.time() - t0) * 1000,
-        )
+
+    if max_mb > 1:
+        # Two-phase channel creation for FFN side to avoid deadlock:
+        # Phase 1: FFN creates all listeners (non-blocking), Attn connects.
+        # Phase 2: FFN waits for all connections to complete.
+        #
+        # For Attn side, connect() already retries, so serial is fine.
+        from sglang.srt.layers.afd import get_afd_perspective
+        from sglang.srt.layers.afd_type import AFDPerspective
+        perspective = get_afd_perspective()
+        is_ffn = (perspective == AFDPerspective.AFD_PERSPECTIVE_FFN)
+
+        if is_ffn:
+            # Phase 1: Create all inner comms with defer_connect=True
+            # This only creates the _p2p object without calling connect(),
+            # then we manually start_listen() on each.
+            inners = []
+            for mb_id in range(max_mb):
+                t0 = time.time()
+                inner = _make_inner_comm_for_mb(mb_id, defer_connect=True)
+                inner.start_listen()
+                inners.append((mb_id, inner, t0))
+                logger.info(
+                    "afd_per_mb_channel: FFN mb=%d listener started", mb_id
+                )
+
+            # Phase 2: Wait for all connections from Attn side
+            for mb_id, inner, t0 in inners:
+                inner.wait_connected()
+                async_comm = AsyncTensorCommunicator(inner)
+                channels.append(PerMbChannel(mb_id, async_comm))
+                logger.info(
+                    "afd_per_mb_channel: built channel mb=%d in %.1fms",
+                    mb_id, (time.time() - t0) * 1000,
+                )
+        else:
+            # Attn side: two-phase — create all comms with defer_connect,
+            # then connect them serially (UCX retries until FFN listens).
+            inners = []
+            for mb_id in range(max_mb):
+                t0 = time.time()
+                inner = _make_inner_comm_for_mb(mb_id, defer_connect=True)
+                inners.append((mb_id, inner, t0))
+                logger.info(
+                    "afd_per_mb_channel: Attn mb=%d created (deferred)", mb_id
+                )
+
+            # Now connect each serially
+            for mb_id, inner, t0 in inners:
+                if inner._p2p is not None:
+                    inner._p2p.connect()
+                inner._warmup_buffer_pool()
+                logger.info("UcxTensorCommunicator: ready (K=%d)", inner._K)
+                async_comm = AsyncTensorCommunicator(inner)
+                channels.append(PerMbChannel(mb_id, async_comm))
+                logger.info(
+                    "afd_per_mb_channel: built channel mb=%d in %.1fms",
+                    mb_id, (time.time() - t0) * 1000,
+                )
+    else:
+        for mb_id in range(max_mb):
+            t0 = time.time()
+            inner = _make_inner_comm_for_mb(mb_id)
+            async_comm = AsyncTensorCommunicator(inner)
+            channels.append(PerMbChannel(mb_id, async_comm))
+            logger.info(
+                "afd_per_mb_channel: built channel mb=%d in %.1fms",
+                mb_id, (time.time() - t0) * 1000,
+            )
 
     _per_mb_channel_set = MultiMbChannelSet(num_mb=max_mb, channels=channels)
     if max_mb == num_mb:

@@ -355,8 +355,11 @@ if __name__ == "__main__":
     configs = [
         (1, "ucx", False, "M1_UCX_noopt"),
         (1, "ucx", True, "M1_UCX_opt"),
+        (1, "ipc", False, "M1_IPC_noopt"),
+        (1, "ipc", True, "M1_IPC_opt"),
         (3, "ucx", False, "M3_UCX_noopt"),
         (3, "ucx", True, "M3_UCX_opt"),
+        # IPC+M=3 skipped: deadlocks in PD mode with concurrent requests
     ]
 
     all_results = []

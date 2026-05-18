@@ -108,6 +108,62 @@ class AFDStageScheduleGenerator:
             )
         return schedule
 
+    @staticmethod
+    def attn_stage_interleaved(
+        num_layers: int, m_stage: int
+    ) -> "AFDStageScheduleGenerator.Schedule":
+        """Interleaved schedule: mb0 advances to next layer as soon as its
+        F-stage completes, without waiting for mb1/mb2.
+
+        For M=3, 3 layers the schedule is:
+          A(0,0) A(0,1) A(0,2)
+          F(0,0) A(1,0) F(0,1) A(1,1) F(0,2) A(1,2)
+          F(1,0) A(2,0) F(1,1) A(2,1) F(1,2) A(2,2)
+          F(2,0) F(2,1) F(2,2)
+
+        This ensures each mb advances to the next layer immediately after
+        receiving its FFN result, achieving compute-communication decoupling.
+        The FIFO channel guarantees correct ordering since both DA and DF
+        process mbs in the same 0,1,2 order within each layer.
+        """
+        schedule = []
+        if m_stage == 1:
+            # M=1: no interleaving possible, same as batch schedule
+            for layer_id in range(num_layers):
+                schedule.append((AFDForwardStage.AFD_FORWARD_STAGE_A, layer_id, 0))
+                schedule.append((AFDForwardStage.AFD_FORWARD_STAGE_F, layer_id, 0))
+            return schedule
+
+        if num_layers == 1:
+            return [
+                (AFDForwardStage.AFD_FORWARD_STAGE_A, 0, m) for m in range(m_stage)
+            ] + [
+                (AFDForwardStage.AFD_FORWARD_STAGE_F, 0, m) for m in range(m_stage)
+            ]
+
+        # Layer 0: only A-stages
+        for m in range(m_stage):
+            schedule.append((AFDForwardStage.AFD_FORWARD_STAGE_A, 0, m))
+
+        # Layers 1..N-1: interleave F(prev,m) with A(cur,m)
+        for layer_id in range(1, num_layers):
+            for m in range(m_stage):
+                # Receive FFN result for previous layer, mb=m
+                schedule.append(
+                    (AFDForwardStage.AFD_FORWARD_STAGE_F, layer_id - 1, m)
+                )
+                # Immediately compute Attn for current layer, mb=m
+                schedule.append(
+                    (AFDForwardStage.AFD_FORWARD_STAGE_A, layer_id, m)
+                )
+
+        # Final F-stages for last layer
+        for m in range(m_stage):
+            schedule.append(
+                (AFDForwardStage.AFD_FORWARD_STAGE_F, num_layers - 1, m)
+            )
+        return schedule
+
 
 # --------------- Tensor communicators ---------------
 
@@ -767,6 +823,11 @@ class AsyncTensorCommunicator:
         self.comm_stream = (
             torch.cuda.Stream() if torch.cuda.is_available() else None
         )
+        # Per-slot CUDA streams for truly parallel recv GPU transfers
+        self._recv_streams: list = [
+            torch.cuda.Stream() if torch.cuda.is_available() else None
+            for _ in range(self._RING_SIZE)
+        ]
         # 3BO ring buffer for concurrent recvs
         self._recv_ring: list = [None] * self._RING_SIZE
         self._recv_event_ring: list = [None] * self._RING_SIZE
@@ -914,9 +975,12 @@ class AsyncTensorCommunicator:
                 self._recv_ring[idx] = slot_info
                 self._recv_event_ring[idx] = None
             elif self.comm_stream is not None:
-                with torch.cuda.stream(self.comm_stream):
+                # Use per-slot stream so multiple recvs can have their
+                # GPU memcpy in parallel (no serialization on a single stream).
+                slot_stream = self._recv_streams[idx]
+                with torch.cuda.stream(slot_stream):
                     tensor = self.inner.recv_tensor()
-                    event = self.comm_stream.record_event()
+                    event = slot_stream.record_event()
                 t1 = time.time()
                 _afd_host_events.append({
                     "ts_ms": round(t0 * 1000, 3),
@@ -939,6 +1003,7 @@ class AsyncTensorCommunicator:
                 self._recv_ring[idx] = tensor
                 self._recv_event_ring[idx] = event
 
+        # Use a new thread for each recv (simple, no deadlock risk)
         thread = threading.Thread(
             target=_deferred_recv, daemon=True, name="ucx-deferred-recv",
         )
@@ -1401,9 +1466,11 @@ def model_forward_afd(
     )
 
     # Data-driven scheduler branch (--afd-async-schedule).
-    # Each mb advances on its own per-mb channel; scheduling decisions
-    # are based on which recv finishes first, not a static order.
-    if _async_sched_enabled:
+    # With the interleaved schedule, we no longer need per-mb channels or
+    # the AsyncMbDriver.  The interleaved schedule is selected above and
+    # executed by the same pipeline loop below.  This branch is kept as
+    # dead code for reference but disabled.
+    if False and _async_sched_enabled:
         from sglang.srt.layers.afd_async_sched import AsyncMbDriver
         from sglang.srt.layers.afd_per_mb_channel import get_per_mb_channel_set
 
@@ -1525,6 +1592,14 @@ def model_forward_afd(
         else AFDStageScheduleGenerator.ffn_stage(num_layers, m_stage)
     )
 
+    # Use interleaved schedule if --afd-async-schedule is set and M>1.
+    # This avoids the per-mb channel complexity while achieving the same
+    # goal: mb0 advances to next layer immediately after its F-stage.
+    if _async_sched_enabled and afd_is_attn() and m_stage > 1:
+        pipeline = AFDStageScheduleGenerator.attn_stage_interleaved(
+            num_layers, m_stage
+        )
+
     # 3BO: with async recv (background-threaded UCX recv), pre-issue after
     # EVERY A-stage on the Attn node.  The background thread blocks on UCX
     # while the main pipeline loop continues launching compute, overlapping
@@ -1545,6 +1620,44 @@ def model_forward_afd(
     # flag races and bg-thread event.synchronize() overhead.
     _async_recv_enabled = m_stage > 1
     _afd_pipe_logger = logging.getLogger("afd_pipeline")
+
+    # === Precompute preissue schedule (eliminates O(n) sum() per iteration) ===
+    _preissue_after: list = [False] * len(pipeline)
+    if _async_recv_enabled:
+        if afd_is_attn():
+            # For attn node: preissue recv after each A-stage, up to RING_SIZE
+            # pending at any time. Walk the schedule once to decide.
+            _comm = get_async_communicator()
+            _ring_size = _comm._RING_SIZE
+            _pending_sim = 0  # simulated pending count
+            for _pi, (_ps, *_pargs) in enumerate(pipeline):
+                if _ps == AFDForwardStage.AFD_FORWARD_STAGE_F:
+                    _pending_sim = max(0, _pending_sim - 1)
+                elif _ps == AFDForwardStage.AFD_FORWARD_STAGE_A:
+                    if _pending_sim < _ring_size:
+                        # Check there's at least one F-stage after this point
+                        _has_f_after = any(
+                            s == AFDForwardStage.AFD_FORWARD_STAGE_F
+                            for s, *_ in pipeline[_pi + 1:]
+                        )
+                        if _has_f_after:
+                            _preissue_after[_pi] = True
+                            _pending_sim += 1
+        elif afd_is_ffn():
+            # For FFN node: preissue after each F-stage if next is A-stage
+            _comm = get_async_communicator()
+            _ring_size = _comm._RING_SIZE
+            _pending_sim = 0
+            for _pi, (_ps, *_pargs) in enumerate(pipeline):
+                if _ps == AFDForwardStage.AFD_FORWARD_STAGE_A:
+                    _pending_sim = max(0, _pending_sim - 1)
+                elif _ps == AFDForwardStage.AFD_FORWARD_STAGE_F:
+                    if _pi + 1 < len(pipeline):
+                        _next_s = pipeline[_pi + 1][0]
+                        if _next_s == AFDForwardStage.AFD_FORWARD_STAGE_A and _pending_sim < _ring_size:
+                            _preissue_after[_pi] = True
+                            _pending_sim += 1
+
     for i, (stage_type, *args) in enumerate(pipeline):
         stage_name = stage_type.name
         layer_id = args[0] if args else -1
@@ -1570,42 +1683,11 @@ def model_forward_afd(
                 "dur_ms": (t1 - t0) * 1000,
             })
 
-        if _async_recv_enabled:
-            if afd_is_attn() and i + 1 < len(pipeline):
-                should_preissue = False
-                if stage_type == AFDForwardStage.AFD_FORWARD_STAGE_A:
-                    # With batch schedule: A(L,0)..A(L,M-1) then F(L-1,0)..F(L-1,M-1)
-                    # Pre-issue recv after EVERY A-stage so that by the time we
-                    # reach the F-stage batch, all recvs are already in-flight.
-                    should_preissue = True
-                elif stage_type == AFDForwardStage.AFD_FORWARD_STAGE_F:
-                    # Between consecutive F-stages, pre-issue if ring has room
-                    # and there are more F-stages coming (for the NEXT layer's batch).
-                    next_stage_type = pipeline[i + 1][0]
-                    if next_stage_type == AFDForwardStage.AFD_FORWARD_STAGE_A:
-                        # Transitioning from F-batch to A-batch: pre-issue for
-                        # the F-batch that will follow the upcoming A-batch.
-                        should_preissue = True
-                    else:
-                        should_preissue = False
-                if should_preissue:
-                    comm = get_async_communicator()
-                    if comm._pending_recv_count < comm._RING_SIZE:
-                        comm.recv_start()
-
-            # FFN node: pre-issue recv for DA→FFN data before next A stage.
-            # The FFN schedule is A,F interleaved per micro-batch, so pre-issuing
-            # after every F stage keeps the ring buffer full for the next A stage.
-            if afd_is_ffn() and i + 1 < len(pipeline):
-                next_stage = pipeline[i + 1][0]
-                should_preissue = (
-                    stage_type == AFDForwardStage.AFD_FORWARD_STAGE_F
-                    and next_stage == AFDForwardStage.AFD_FORWARD_STAGE_A
-                )
-                if should_preissue:
-                    comm = get_async_communicator()
-                    if comm._pending_recv_count < comm._RING_SIZE:
-                        comm.recv_start()
+        # Preissue recv using precomputed schedule (no sum() traversal)
+        if _preissue_after[i]:
+            comm = get_async_communicator()
+            if comm._pending_recv_count < comm._RING_SIZE:
+                comm.recv_start()
 
     # ── Record wall-clock anchor: last CUDA event + host time ──────
     _wall_anchor_last_event = None

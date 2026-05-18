@@ -311,7 +311,6 @@ class _UcxP2PCommunicator:
         self._endpoint = None
         self._listener = None
         self._connected = threading.Event()
-        self._last_recv_buf: Optional[torch.Tensor] = None
         self._send_lock: Optional[asyncio.Lock] = None  # created lazily on bridge loop
 
     def connect(self):
@@ -319,6 +318,20 @@ class _UcxP2PCommunicator:
         if not self._connected.wait(timeout=self._timeout):
             raise TimeoutError(
                 f"UCX P2P connection not established within {self._timeout}s"
+            )
+
+    def start_listen(self):
+        """FFN only: start listener without waiting for peer connection."""
+        if not self._is_ffn:
+            raise RuntimeError("start_listen() is only for FFN side")
+        self._bridge.run(self._init_connection())
+
+    def wait_connected(self, timeout: Optional[float] = None):
+        """Wait for peer to connect (after start_listen or connect)."""
+        t = timeout if timeout is not None else self._timeout
+        if not self._connected.wait(timeout=t):
+            raise TimeoutError(
+                f"UCX P2P connection not established within {t}s"
             )
 
     async def _init_connection(self):
@@ -459,12 +472,11 @@ class _UcxP2PCommunicator:
                 pass
 
     async def _async_recv(self) -> Tuple[torch.Tensor, int]:
-        # Lazily create recv lock on the event loop thread
+        # Recv lock is needed because meta+data are two separate messages
+        # that must be received atomically (in order) on the same endpoint.
         if not hasattr(self, "_recv_lock_async") or self._recv_lock_async is None:
             self._recv_lock_async = asyncio.Lock()
         async with self._recv_lock_async:
-            if self._last_recv_buf is not None:
-                self._pool.put(self._last_recv_buf)
             t0 = time.time()
             meta = np.empty(_META_SLOTS, dtype=np.int64)
             await self._endpoint.recv(meta)
@@ -473,7 +485,6 @@ class _UcxP2PCommunicator:
             buf = self._pool.get(shape, dtype, self._device)
             await self._endpoint.recv(buf)
             t2 = time.time()
-            self._last_recv_buf = buf
             try:
                 from sglang.srt.layers.afd_mixin import _afd_host_events
                 _afd_host_events.append({
@@ -532,7 +543,8 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
     """
 
     def __init__(self, afd_perspective: AFDPerspective,
-                 mb_id: Optional[int] = None):
+                 mb_id: Optional[int] = None,
+                 defer_connect: bool = False):
         super().__init__()
         self._perspective = afd_perspective
         self._is_ffn = afd_perspective == AFDPerspective.AFD_PERSPECTIVE_FFN
@@ -583,13 +595,43 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
                 pool=self._pool,
                 device=self._device,
             )
-            self._p2p.connect()
+            if not defer_connect:
+                self._p2p.connect()
         else:
             logger.info(
                 "Rank %d: non-representative, will get data via NVLink",
                 self._local_rank,
             )
 
+        if not defer_connect:
+            self._warmup_buffer_pool()
+            logger.info("UcxTensorCommunicator: ready (K=%d)", self._K)
+
+    def start_listen(self):
+        """FFN only: bind listener ports without waiting for Attn to connect.
+
+        Call wait_connected() later to block until the peer arrives.
+        """
+        if not self._is_ffn:
+            raise RuntimeError("start_listen() is only for FFN side")
+        if self._is_rep:
+            self._p2p = _UcxP2PCommunicator(
+                is_ffn=self._is_ffn,
+                local_rank=self._local_rank,
+                peer_ffn_rank=self._nic_group,
+                base_port=self._base_port,
+                ffn_host=self._ffn_host,
+                timeout=self._timeout,
+                bridge=self._bridge,
+                pool=self._pool,
+                device=self._device,
+            )
+            self._p2p.start_listen()
+
+    def wait_connected(self, timeout=None):
+        """Block until peer connects (after start_listen)."""
+        if self._p2p is not None:
+            self._p2p.wait_connected(timeout)
         self._warmup_buffer_pool()
         logger.info("UcxTensorCommunicator: ready (K=%d)", self._K)
 

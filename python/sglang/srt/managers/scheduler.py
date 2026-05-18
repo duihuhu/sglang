@@ -1387,22 +1387,23 @@ class Scheduler(
         # side must be listening on every per-mb endpoint before the Attn
         # side connects on its first forward.
         if getattr(self.server_args, "afd_async_schedule", False):
-            from sglang.srt.layers.afd_per_mb_channel import (
-                get_per_mb_channel_set,
-            )
+            # Interleaved schedule uses the same single shared channel as
+            # the batch schedule — no per-mb channels needed.  Just init
+            # the regular communicator.
+            from sglang.srt.layers.afd import get_async_communicator
             try:
-                m_stage = int(self.server_args.afd_micro_batch)
-                get_per_mb_channel_set(m_stage)
+                get_async_communicator()
                 logger.info(
-                    "event_loop_afd: per-mb AF channels ready (%s, M=%d)",
-                    get_afd_perspective(), m_stage,
+                    "event_loop_afd: AF communicator ready (interleaved, %s, M=%d)",
+                    get_afd_perspective(),
+                    int(self.server_args.afd_micro_batch),
                 )
             except Exception as e:
                 logger.error(
-                    "event_loop_afd: per-mb AF channel init failed: %s", e
+                    "event_loop_afd: AF communicator init failed: %s", e
                 )
                 raise RuntimeError(
-                    f"AF per-mb channel init failed in event_loop_afd: {e}"
+                    f"AF communicator init failed in event_loop_afd: {e}"
                 ) from e
         else:
             from sglang.srt.layers.afd import get_async_communicator
