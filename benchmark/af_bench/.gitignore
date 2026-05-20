@@ -1,0 +1,9 @@
+# Ignore generated chart images
+*.png
+*.svg
+
+# Ignore config and result JSON files
+*.json
+
+# Ignore log files
+*.log

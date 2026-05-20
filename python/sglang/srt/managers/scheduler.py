@@ -1449,8 +1449,14 @@ class Scheduler(
                 _split_seq_indices_m_way,
             )
 
+            # In PD+AF prefill mode, disable M>1 for EXTEND batches
+            is_pd_prefill = disagg_mode == DisaggregationMode.PREFILL
+
             forward_mode = batch.forward_mode
             if forward_mode == ForwardMode.EXTEND:
+                if is_pd_prefill:
+                    batch.afd_split_seq_index = None
+                    return
                 extend_lens = batch.extend_lens
                 split_indices = _split_seq_indices_m_way(
                     len(extend_lens), m, extend_lens

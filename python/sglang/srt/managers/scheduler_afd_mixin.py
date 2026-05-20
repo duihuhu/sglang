@@ -108,17 +108,30 @@ class SchedulerAFDMixin:
         from sglang.srt.batch_overlap.afd_overlap import _split_seq_indices_m_way
         from sglang.srt.layers.afd import get_afd_micro_batch
         from sglang.srt.model_executor.forward_batch_info import ForwardMode
+        from sglang.srt.disaggregation.utils import DisaggregationMode
 
         m = get_afd_micro_batch()
         if batch.batch_size() < m:
             batch.afd_split_seq_index = None
             return
 
+        # Check if we're in PD+AF prefill mode
+        is_pd_prefill = getattr(self, "disaggregation_mode", None) == (
+            DisaggregationMode.PREFILL
+        )
+
         forward_mode = batch.forward_mode
         if forward_mode == ForwardMode.EXTEND:
+            if is_pd_prefill:
+                # In PD+AF disaggregation, prefill batches are small and FFN
+                # round-trip dominates. Microbatch splitting adds 3x communication
+                # overhead without compute savings. Disable for PD+AF prefill.
+                batch.afd_split_seq_index = None
+                return
             extend_lens = batch.extend_lens
             split_indices = _split_seq_indices_m_way(len(extend_lens), m, extend_lens)
         elif forward_mode.is_decode() or forward_mode.is_target_verify():
+            # Decode phase: allow M>1 pipeline overlap (both pure AF and PD+AF decode)
             split_indices = _split_seq_indices_m_way(batch.batch_size(), m, None)
         else:
             return

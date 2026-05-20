@@ -638,6 +638,7 @@ class ServerArgs:
     afd_comm_backend: Optional[str] = None
     afd_enable_overlap_schedule: bool = False
     afd_async_schedule: bool = False
+    afd_disagg_interleave_poll: bool = False
 
     # Energy-aware DVFS (Tier 2)
     afd_energy_model_dir: Optional[str] = None
@@ -5508,6 +5509,13 @@ class ServerArgs:
             "send/recv pair, so quicker mbs are not blocked by slower ones at "
             "layer boundaries.  Replaces AFDStageScheduleGenerator. "
             "Requires --afd-perspective and --afd-comm-backend in {ucx,ipc,zmq}.",
+        )
+        parser.add_argument(
+            "--afd-disagg-interleave-poll",
+            action="store_true",
+            default=ServerArgs.afd_disagg_interleave_poll,
+            help="In PD+AF mode, poll Mooncake KV transfer after each decode "
+            "forward pass to reduce bootstrap/transfer latency under M>1.",
         )
         parser.add_argument(
             "--afd-energy-model-dir",
