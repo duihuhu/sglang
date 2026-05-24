@@ -6,6 +6,7 @@ Provides:
 """
 
 import logging
+import os
 import time
 from typing import Optional, Tuple
 
@@ -27,7 +28,7 @@ _is_npu = is_npu()
 # ── AFD TPOT breakdown timing ──────────────────────────────────────────────
 # Global accumulator reset per forward pass from model_forward_afd()
 _afd_timing_records: list = []  # list of dicts with per-stage timing breakdown
-_afd_timing_enabled: bool = True
+_afd_timing_enabled: bool = os.environ.get("AFD_TIMING", "0") == "1"
 
 # Scheduler-level wall-clock anchors for cross-GPU latency breakdown
 _afd_sched_ts: dict = {}  # keys: zmq_sent, zmq_recv, forward_start, forward_end
@@ -140,11 +141,22 @@ class AFDDecoderLayerMixin:
         """Attention stage: prepare_attn -> attn -> prepare_mlp."""
         global _afd_timing_records, _afd_timing_enabled
 
+        if not _afd_timing_enabled:
+            hidden_states, residual = self.layer_communicator.prepare_attn(
+                hidden_states, residual, forward_batch
+            )
+            if hidden_states.shape[0] != 0:
+                hidden_states = self._run_attn(positions, hidden_states, forward_batch)
+            hidden_states, residual = self.layer_communicator.prepare_mlp(
+                hidden_states, residual, forward_batch
+            )
+            return hidden_states, residual
+
         ev_prep_attn_start = ev_prep_attn_end = None
         ev_attn_start = ev_attn_end = None
         ev_prep_mlp_start = ev_prep_mlp_end = None
 
-        if _afd_timing_enabled and torch.cuda.is_available():
+        if torch.cuda.is_available():
             ev_prep_attn_start = torch.cuda.Event(enable_timing=True)
             ev_prep_attn_end = torch.cuda.Event(enable_timing=True)
             ev_prep_attn_start.record()
@@ -196,10 +208,17 @@ class AFDDecoderLayerMixin:
         """FFN stage: mlp -> postprocess_layer."""
         global _afd_timing_records, _afd_timing_enabled
 
+        if not _afd_timing_enabled:
+            hidden_states = self._run_mlp(hidden_states, forward_batch)
+            hidden_states, residual = self.layer_communicator.postprocess_layer(
+                hidden_states, residual, forward_batch
+            )
+            return hidden_states, residual
+
         ev_mlp_start = ev_mlp_end = None
         ev_post_start = ev_post_end = None
 
-        if _afd_timing_enabled and torch.cuda.is_available():
+        if torch.cuda.is_available():
             ev_mlp_start = torch.cuda.Event(enable_timing=True)
             ev_mlp_end = torch.cuda.Event(enable_timing=True)
             ev_mlp_start.record()
@@ -216,11 +235,6 @@ class AFDDecoderLayerMixin:
             ev_post_start = torch.cuda.Event(enable_timing=True)
             ev_post_end = torch.cuda.Event(enable_timing=True)
             ev_post_start.record()
-
-        if is_attn:
-            _layer_id = getattr(self, "layer_id", -1)
-            tx_kb = bsz * hidden_dim * dtype_sz / 1024
-            print(f"[AFD_DBG] L{_layer_id:>2} batch={bsz:>2} | DA→DF {tx_kb:>5.0f}KB | DA←DF {tx_kb:>5.0f}KB", flush=True)
 
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch

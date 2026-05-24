@@ -1,5 +1,7 @@
 # Adapted from qwen2.py
 import logging
+import os
+import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -320,6 +322,11 @@ class Qwen3DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
         post_residual_addition: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        _detail = os.environ.get("SGLANG_LAYER_PROFILE", "0") == "2"
+        if _detail:
+            torch.cuda.synchronize()
+            _t0 = time.time()
+
         # Self Attention
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states,
@@ -327,12 +334,19 @@ class Qwen3DecoderLayer(nn.Module):
             forward_batch,
             post_residual_addition=post_residual_addition,
         )
+        if _detail:
+            torch.cuda.synchronize()
+            _t1 = time.time()
+
         if hidden_states.shape[0] != 0:
             hidden_states = self.self_attn(
                 positions=positions,
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
+        if _detail:
+            torch.cuda.synchronize()
+            _t2 = time.time()
 
         # Fully Connected
         hidden_states, residual = self.layer_communicator.prepare_mlp(
@@ -350,12 +364,34 @@ class Qwen3DecoderLayer(nn.Module):
                 else None
             ),
         )
+        if _detail:
+            torch.cuda.synchronize()
+            _t3 = time.time()
+
         hidden_states = self.mlp(hidden_states)
         if _is_npu and get_cmo_stream():
             wait_cmo_stream()
+        if _detail:
+            torch.cuda.synchronize()
+            _t4 = time.time()
+
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
         )
+        if _detail:
+            torch.cuda.synchronize()
+            _t5 = time.time()
+            _lid = getattr(self, '_layer_idx', getattr(self, 'layer_idx', -1))
+            forward_batch._layer_details = getattr(forward_batch, '_layer_details', [])
+            forward_batch._layer_details.append({
+                'layer': _lid,
+                'prep_attn_ms': (_t1 - _t0) * 1000,
+                'attn_ms': (_t2 - _t1) * 1000,
+                'prep_mlp_ms': (_t3 - _t2) * 1000,
+                'mlp_ms': (_t4 - _t3) * 1000,
+                'postprocess_ms': (_t5 - _t4) * 1000,
+                'total_ms': (_t5 - _t0) * 1000,
+            })
         return hidden_states, residual
 
 
@@ -410,6 +446,12 @@ class Qwen3Model(Qwen2Model):
                 input_data_scatter_mode=ScatterMode.model_input_output(),
             )
         else:
+            _layer_profile = os.environ.get("SGLANG_LAYER_PROFILE", "0") in ("1", "2")
+            if _layer_profile:
+                import torch.cuda
+                torch.cuda.synchronize()
+                _lp_start = time.time()
+                _lp_times = []
             for i in range(self.start_layer, self.end_layer):
                 if i in self.layers_to_capture:
                     aux_hidden_states.append(
@@ -424,6 +466,41 @@ class Qwen3Model(Qwen2Model):
                     forward_batch,
                     residual,
                 )
+                if _layer_profile:
+                    torch.cuda.synchronize()
+                    _lp_now = time.time()
+                    _lp_times.append(_lp_now - _lp_start)
+                    _lp_start = _lp_now
+            if _layer_profile and _lp_times:
+                _bs = hidden_states.shape[0]
+                _total = sum(_lp_times) * 1000
+                _mean = _total / len(_lp_times)
+                import logging as _logging
+                _logging.getLogger("sglang").info(
+                    f"[LAYER_PROFILE] layers={len(_lp_times)} bs={_bs} "
+                    f"total={_total:.2f}ms mean={_mean:.3f}ms "
+                    f"per_layer=[{','.join(f'{t*1000:.2f}' for t in _lp_times[:5])}..."
+                    f"{','.join(f'{t*1000:.2f}' for t in _lp_times[-3:])}]"
+                )
+                # Detail mode: output per-layer attn/mlp breakdown
+                _details = getattr(forward_batch, '_layer_details', None)
+                if _details:
+                    _attn_sum = sum(d['attn_ms'] for d in _details)
+                    _mlp_sum = sum(d['mlp_ms'] for d in _details)
+                    _prep_attn_sum = sum(d['prep_attn_ms'] for d in _details)
+                    _prep_mlp_sum = sum(d['prep_mlp_ms'] for d in _details)
+                    _post_sum = sum(d['postprocess_ms'] for d in _details)
+                    _logging.getLogger("sglang").info(
+                        f"[LAYER_DETAIL] bs={_bs} layers={len(_details)} "
+                        f"prep_attn={_prep_attn_sum:.2f}ms "
+                        f"attn={_attn_sum:.2f}ms "
+                        f"prep_mlp={_prep_mlp_sum:.2f}ms "
+                        f"mlp={_mlp_sum:.2f}ms "
+                        f"postprocess={_post_sum:.2f}ms "
+                        f"| per_layer_mean: attn={_attn_sum/len(_details):.3f}ms "
+                        f"mlp={_mlp_sum/len(_details):.3f}ms"
+                    )
+                    forward_batch._layer_details = []
         if not self.pp_group.is_last_rank:
             from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
 

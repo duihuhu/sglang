@@ -52,6 +52,8 @@ _VALID_TP = [1, 2, 4, 8]
 _VALID_FREQS = [210, 450, 690, 930, 1170, 1410]
 _BETA_BALANCE = 0.8       # hard-prune when |t_A - t_F| > 0.8 × max(t_A, t_F)
 _BYTES_PER_ELEMENT = 2    # bfloat16
+_DEFAULT_M = 2            # default microbatch count for pipeline bubble estimation
+_P_IDLE_W = 80.0          # idle power (W) for a GPU waiting in pipeline bubble
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -105,6 +107,17 @@ class _PoolCandidate:
 
     def __post_init__(self):
         self.e_total_mj = self.e_a_mj + self.e_f_mj
+
+    def e_bubble_mj(self, M: int = _DEFAULT_M) -> float:
+        """Pipeline bubble energy: idle power × wait time × (M-1)/M.
+
+        The faster side waits for the slower side. During the wait, the idle
+        GPU consumes P_idle at its own frequency.
+        """
+        if M <= 1:
+            return 0.0
+        t_wait_us = abs(self.t_a_us - self.t_f_us)
+        return _P_IDLE_W * t_wait_us / 1_000_000.0 * 1000.0 * (M - 1) / M
 
 
 @dataclass
@@ -323,7 +336,7 @@ class Tier1Solver:
                 if t_max > 0 and abs(m.t_a_us - m.t_f_us) > beta * t_max:
                     continue
 
-                thpt = self._pair_throughput(bs, t_layer, self.num_layers)
+                thpt = self._pair_throughput(bs, t_layer, self.num_layers, phase)
                 candidates.append(_PoolCandidate(
                     tp=tp, freq=freq,
                     t_a_us=m.t_a_us, t_f_us=m.t_f_us,
@@ -337,14 +350,19 @@ class Tier1Solver:
     @staticmethod
     def _pair_throughput(
         bs: int, t_layer_us: float, num_layers: int,
+        phase: str = "prefill",
     ) -> float:
-        """Estimated request throughput (req/s) for one pipeline pair.
+        """Estimated throughput/capacity for one pipeline pair.
 
-        For prefill (M=1): one batch of `bs` requests in L × t_layer time.
-        For decode (M=1): the pair processes all active requests simultaneously;
-          throughput is modeled as the number of requests the pair can sustain
-          within the TPOT SLO — proportional to bs / (L × t_layer).
+        For prefill: throughput = bs / (L × t_layer) in req/s.
+            One batch of bs requests takes L × t_layer seconds.
+        For decode: capacity = bs (concurrent requests per pair).
+            Each iteration serves the entire batch; the constraint is
+            k_D × bs ≥ (1+α) × N_active. We return bs directly so that
+            _select_for_pool can compare k × capacity vs demand.
         """
+        if phase == "decode":
+            return float(bs)
         batch_time_s = num_layers * t_layer_us / 1_000_000.0
         if batch_time_s <= 0:
             return float("inf")
@@ -419,6 +437,7 @@ class Tier1Solver:
         cand_df: list[_PoolCandidate],
         workload: WorkloadProfile,
         alpha: float,
+        M: int = _DEFAULT_M,
     ) -> Optional[Tier1Solution]:
         """Enumerate viable (k_P, k_D) and select min-energy assignment."""
         best_solution: Optional[Tier1Solution] = None
@@ -459,9 +478,12 @@ class Tier1Solver:
                     continue
 
                 # Total energy per layer (weighted by pair count)
+                # Includes E_bubble: idle power during pipeline stall
+                e_bubble_p = self._pair_bubble_energy(sel_pa, sel_pf, M)
+                e_bubble_d = self._pair_bubble_energy(sel_da, sel_df, M)
                 e_total = (
-                    k_p * (sel_pa.e_total_mj + sel_pf.e_total_mj)
-                    + k_d * (sel_da.e_total_mj + sel_df.e_total_mj)
+                    k_p * (sel_pa.e_total_mj + sel_pf.e_total_mj + e_bubble_p)
+                    + k_d * (sel_da.e_total_mj + sel_df.e_total_mj + e_bubble_d)
                 )
 
                 if e_total < best_energy:
@@ -480,6 +502,23 @@ class Tier1Solver:
                     best_solution = sol
 
         return best_solution
+
+    @staticmethod
+    def _pair_bubble_energy(
+        cand_a: _PoolCandidate, cand_f: _PoolCandidate, M: int,
+    ) -> float:
+        """Compute pipeline bubble energy for an A/F pair.
+
+        E_bubble = P_idle × |t_A - t_F| × (M-1)/M  (mJ)
+
+        The faster side idles while waiting for the slower side to finish.
+        This penalizes configurations with large A/F latency imbalance.
+        """
+        if M <= 1:
+            return 0.0
+        t_wait_us = abs(cand_a.t_a_us - cand_f.t_f_us)
+        e_bubble_j = _P_IDLE_W * t_wait_us / 1_000_000.0 * (M - 1) / M
+        return e_bubble_j * 1000.0  # convert J to mJ
 
     @staticmethod
     def _select_for_pool(

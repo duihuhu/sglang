@@ -1,0 +1,479 @@
+{
+  "freq_switch_overhead": {
+    "210": {
+      "mean_us": 5359.404799999999,
+      "p99_us": 11196.659790000002
+    },
+    "450": {
+      "mean_us": 7587.1557,
+      "p99_us": 11386.11321
+    },
+    "690": {
+      "mean_us": 5200.1344,
+      "p99_us": 8122.95577
+    },
+    "930": {
+      "mean_us": 6445.5571,
+      "p99_us": 9226.97044
+    },
+    "1170": {
+      "mean_us": 6884.167200000001,
+      "p99_us": 9571.712580000001
+    },
+    "1410": {
+      "mean_us": 1206.6131,
+      "p99_us": 4683.65779
+    }
+  },
+  "idle_power": {
+    "210": 112.90519343190222,
+    "450": 114.06447031771275,
+    "690": 116.00152092498213,
+    "930": 119.22024665051241,
+    "1170": 127.11190915727241,
+    "1410": 155.33478630595522
+  },
+  "prefill": [
+    {
+      "freq_mhz": 210,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 1060.9078153502196,
+      "energy_mj": 172640.33333333334,
+      "power_w": 162.72887317390766,
+      "throughput_tok_s": 482.60555025790063
+    },
+    {
+      "freq_mhz": 210,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 1024,
+      "latency_ms": 2017.5540823644649,
+      "energy_mj": 317381.6666666667,
+      "power_w": 157.31011596710826,
+      "throughput_tok_s": 507.5452544002821
+    },
+    {
+      "freq_mhz": 210,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 512,
+      "latency_ms": 3647.0790919847786,
+      "energy_mj": 578665.3333333334,
+      "power_w": 158.6654192954224,
+      "throughput_tok_s": 561.5452663203574
+    },
+    {
+      "freq_mhz": 210,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 1024,
+      "latency_ms": 7336.740652332082,
+      "energy_mj": 1156570.6666666667,
+      "power_w": 157.64093641486906,
+      "throughput_tok_s": 558.2860556339866
+    },
+    {
+      "freq_mhz": 450,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 516.9885503128171,
+      "energy_mj": 101370.66666666667,
+      "power_w": 196.07913290406483,
+      "throughput_tok_s": 990.3507528168686
+    },
+    {
+      "freq_mhz": 450,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 1024,
+      "latency_ms": 982.1008003006378,
+      "energy_mj": 196338.33333333334,
+      "power_w": 199.91668194673176,
+      "throughput_tok_s": 1042.6628302171591
+    },
+    {
+      "freq_mhz": 450,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 512,
+      "latency_ms": 1768.3853429431717,
+      "energy_mj": 360311.3333333333,
+      "power_w": 203.7515945103104,
+      "throughput_tok_s": 1158.118623959786
+    },
+    {
+      "freq_mhz": 450,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 1024,
+      "latency_ms": 3535.1858503029994,
+      "energy_mj": 720621.6666666666,
+      "power_w": 203.84265415774465,
+      "throughput_tok_s": 1158.6378123936352
+    },
+    {
+      "freq_mhz": 690,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 347.0552299792568,
+      "energy_mj": 87693.33333333333,
+      "power_w": 252.67832252110043,
+      "throughput_tok_s": 1475.2695126669084
+    },
+    {
+      "freq_mhz": 690,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 1024,
+      "latency_ms": 655.4483496583998,
+      "energy_mj": 159538.66666666666,
+      "power_w": 243.4038727076107,
+      "throughput_tok_s": 1562.2893863928077
+    },
+    {
+      "freq_mhz": 690,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 512,
+      "latency_ms": 1183.3951143392671,
+      "energy_mj": 294534.3333333333,
+      "power_w": 248.88925918693067,
+      "throughput_tok_s": 1730.6138712119607
+    },
+    {
+      "freq_mhz": 690,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 1024,
+      "latency_ms": 2359.0843320513764,
+      "energy_mj": 580725.3333333334,
+      "power_w": 246.16556748030922,
+      "throughput_tok_s": 1736.2668830233224
+    },
+    {
+      "freq_mhz": 930,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 259.1281437004606,
+      "energy_mj": 76135.66666666667,
+      "power_w": 293.8147342060836,
+      "throughput_tok_s": 1975.8563955594375
+    },
+    {
+      "freq_mhz": 930,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 1024,
+      "latency_ms": 485.25558031784993,
+      "energy_mj": 145196.33333333334,
+      "power_w": 299.2162052793447,
+      "throughput_tok_s": 2110.2281798166323
+    },
+    {
+      "freq_mhz": 930,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 512,
+      "latency_ms": 874.337941640988,
+      "energy_mj": 261283.66666666666,
+      "power_w": 298.8360154842192,
+      "throughput_tok_s": 2342.3437351423204
+    },
+    {
+      "freq_mhz": 930,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 1024,
+      "latency_ms": 1743.226002358521,
+      "energy_mj": 517204.3333333333,
+      "power_w": 296.693792218321,
+      "throughput_tok_s": 2349.666649337643
+    },
+    {
+      "freq_mhz": 1170,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 209.7116829827428,
+      "energy_mj": 70835.33333333333,
+      "power_w": 337.7748551050558,
+      "throughput_tok_s": 2441.4471941562388
+    },
+    {
+      "freq_mhz": 1170,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 1024,
+      "latency_ms": 393.6580419540405,
+      "energy_mj": 141731.33333333334,
+      "power_w": 360.0366770860493,
+      "throughput_tok_s": 2601.2424258299584
+    },
+    {
+      "freq_mhz": 1170,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 512,
+      "latency_ms": 721.054803347215,
+      "energy_mj": 260622.0,
+      "power_w": 361.445480690461,
+      "throughput_tok_s": 2840.2834160357306
+    },
+    {
+      "freq_mhz": 1170,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 1024,
+      "latency_ms": 1416.1001569591463,
+      "energy_mj": 522268.6666666667,
+      "power_w": 368.80771751918803,
+      "throughput_tok_s": 2892.4507774898634
+    },
+    {
+      "freq_mhz": 1410,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 178.82906971499324,
+      "energy_mj": 84718.33333333333,
+      "power_w": 473.73916035212955,
+      "throughput_tok_s": 2863.069191244992
+    },
+    {
+      "freq_mhz": 1410,
+      "phase": "prefill",
+      "bs": 1,
+      "seq_len": 1024,
+      "latency_ms": 338.3181116078049,
+      "energy_mj": 172308.66666666666,
+      "power_w": 509.30961351077593,
+      "throughput_tok_s": 3026.7371591003425
+    },
+    {
+      "freq_mhz": 1410,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 512,
+      "latency_ms": 629.3950433221956,
+      "energy_mj": 314358.6666666667,
+      "power_w": 499.4616179488124,
+      "throughput_tok_s": 3253.918221519266
+    },
+    {
+      "freq_mhz": 1410,
+      "phase": "prefill",
+      "bs": 4,
+      "seq_len": 1024,
+      "latency_ms": 1260.6296550172071,
+      "energy_mj": 630100.6666666666,
+      "power_w": 499.8301159733277,
+      "throughput_tok_s": 3249.1699554252446
+    }
+  ],
+  "decode": [
+    {
+      "freq_mhz": 210,
+      "phase": "decode",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 197.63794918253552,
+      "energy_mj": 31783.25,
+      "power_w": 160.8155221781089,
+      "throughput_tok_s": 5.059757015978822
+    },
+    {
+      "freq_mhz": 210,
+      "phase": "decode",
+      "bs": 8,
+      "seq_len": 512,
+      "latency_ms": 211.4424208411947,
+      "energy_mj": 33874.375,
+      "power_w": 160.2061443736571,
+      "throughput_tok_s": 37.83535947125982
+    },
+    {
+      "freq_mhz": 450,
+      "phase": "decode",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 120.16246087296167,
+      "energy_mj": 21950.90625,
+      "power_w": 182.67690334011192,
+      "throughput_tok_s": 8.322066581652496
+    },
+    {
+      "freq_mhz": 450,
+      "phase": "decode",
+      "bs": 8,
+      "seq_len": 512,
+      "latency_ms": 126.73490481392946,
+      "energy_mj": 23957.875,
+      "power_w": 189.03927876203198,
+      "throughput_tok_s": 63.12388849579755
+    },
+    {
+      "freq_mhz": 690,
+      "phase": "decode",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 88.77381718775723,
+      "energy_mj": 18279.46875,
+      "power_w": 205.91058635384348,
+      "throughput_tok_s": 11.264582640228179
+    },
+    {
+      "freq_mhz": 690,
+      "phase": "decode",
+      "bs": 8,
+      "seq_len": 512,
+      "latency_ms": 103.11934443598147,
+      "energy_mj": 20986.53125,
+      "power_w": 203.51691881661304,
+      "throughput_tok_s": 77.58001220582388
+    },
+    {
+      "freq_mhz": 930,
+      "phase": "decode",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 84.68977083975915,
+      "energy_mj": 18049.25,
+      "power_w": 213.12196055118446,
+      "throughput_tok_s": 11.807801462730277
+    },
+    {
+      "freq_mhz": 930,
+      "phase": "decode",
+      "bs": 8,
+      "seq_len": 512,
+      "latency_ms": 85.25329512485769,
+      "energy_mj": 19108.25,
+      "power_w": 224.13503163736976,
+      "throughput_tok_s": 93.8380151557028
+    },
+    {
+      "freq_mhz": 1170,
+      "phase": "decode",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 83.26895418576896,
+      "energy_mj": 19375.375,
+      "power_w": 232.6842601718581,
+      "throughput_tok_s": 12.009277764784327
+    },
+    {
+      "freq_mhz": 1170,
+      "phase": "decode",
+      "bs": 8,
+      "seq_len": 512,
+      "latency_ms": 85.15069621353177,
+      "energy_mj": 20031.6875,
+      "power_w": 235.24983811954613,
+      "throughput_tok_s": 93.95108150306204
+    },
+    {
+      "freq_mhz": 1410,
+      "phase": "decode",
+      "bs": 1,
+      "seq_len": 512,
+      "latency_ms": 84.19761643745005,
+      "energy_mj": 23668.4375,
+      "power_w": 281.10579018092693,
+      "throughput_tok_s": 11.876820773696064
+    },
+    {
+      "freq_mhz": 1410,
+      "phase": "decode",
+      "bs": 8,
+      "seq_len": 512,
+      "latency_ms": 85.46745396597544,
+      "energy_mj": 24818.0625,
+      "power_w": 290.3802716514764,
+      "throughput_tok_s": 93.60288190151068
+    }
+  ],
+  "e2e_baseline": {
+    "mode": "baseline",
+    "total_energy_mj": 4219677,
+    "elapsed_s": 14.630999627988786,
+    "n_requests": 5,
+    "ttft_p50_ms": 136.9728189893067,
+    "ttft_p99_ms": 171.0817604418844,
+    "tpot_p50_us": 85309.6810169518,
+    "tpot_p99_us": 87136.76630752161,
+    "n_tpot_violations": 160,
+    "slo_satisfaction_pct": 0.0,
+    "avg_power_w": 288.40660975261386,
+    "freq_history": []
+  },
+  "e2e_tier2": {
+    "mode": "tier2",
+    "total_energy_mj": 4179907,
+    "elapsed_s": 14.919982491992414,
+    "n_requests": 5,
+    "ttft_p50_ms": 159.77775305509567,
+    "ttft_p99_ms": 204.26445880904794,
+    "tpot_p50_us": 83852.56107430905,
+    "tpot_p99_us": 84733.78180991858,
+    "n_tpot_violations": 160,
+    "slo_satisfaction_pct": 0.0,
+    "avg_power_w": 280.1549534152178,
+    "freq_history": [
+      [
+        "prefill",
+        1170,
+        1170
+      ],
+      [
+        "decode",
+        1410,
+        1410
+      ],
+      [
+        "prefill",
+        1170,
+        1170
+      ],
+      [
+        "decode",
+        1410,
+        1410
+      ],
+      [
+        "prefill",
+        1170,
+        1170
+      ],
+      [
+        "decode",
+        1410,
+        1410
+      ],
+      [
+        "prefill",
+        1170,
+        1170
+      ],
+      [
+        "decode",
+        1410,
+        1410
+      ],
+      [
+        "prefill",
+        1170,
+        1170
+      ],
+      [
+        "decode",
+        1410,
+        1410
+      ]
+    ]
+  }
+}

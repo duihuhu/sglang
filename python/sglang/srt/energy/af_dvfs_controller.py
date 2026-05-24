@@ -75,6 +75,8 @@ class AFDVFSController:
         tp_f: Optional[int] = None,
         t_comm_us: float = 0.0,
         freqs: Optional[list[int]] = None,
+        baseline_f_a: Optional[int] = None,
+        baseline_f_f: Optional[int] = None,
     ):
         self.predictor = predictor
         self.num_layers = num_layers
@@ -82,7 +84,12 @@ class AFDVFSController:
         self.tp_f = tp_f if tp_f is not None else tp_a
         self.t_comm_us = t_comm_us
         self.freqs = freqs or VALID_FREQS
-        self._decode_state = DecodeWindowState()
+        self._baseline_f_a = baseline_f_a or F_MAX
+        self._baseline_f_f = baseline_f_f or F_MAX
+        self._decode_state = DecodeWindowState(
+            cur_f_a=self._baseline_f_a,
+            cur_f_f=self._baseline_f_f,
+        )
         self._stats_switch_up = 0
         self._stats_switch_down = 0
         self._stats_fallback = 0
@@ -321,7 +328,28 @@ class AFDVFSController:
 
     def reset_decode_state(self):
         """Reset decode window state (e.g. when batch changes completely)."""
-        self._decode_state = DecodeWindowState()
+        self._decode_state = DecodeWindowState(
+            cur_f_a=self._baseline_f_a,
+            cur_f_f=self._baseline_f_f,
+        )
+
+    def update_baseline(self, f_a: int, f_f: int):
+        """Update baseline frequencies from Tier 1 re-planning output.
+
+        Called when Tier 1 produces a new solution with updated baseline
+        frequencies. Tier 2 will use these as the starting point for
+        subsequent decode windows.
+        """
+        self._baseline_f_a = f_a
+        self._baseline_f_f = f_f
+        logger.info("DVFS baseline updated: f_a=%d f_f=%d", f_a, f_f)
+
+    @property
+    def is_energy_saving(self) -> bool:
+        """True if Tier 2 is currently running below baseline frequency."""
+        st = self._decode_state
+        return (st.cur_f_a < self._baseline_f_a
+                or st.cur_f_f < self._baseline_f_f)
 
     # ── Utility ────────────────────────────────────────────────────
 

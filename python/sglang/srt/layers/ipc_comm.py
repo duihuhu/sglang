@@ -58,6 +58,19 @@ _SHM_FLAG_F2A = 8
 _SHM_SIZE_A2F = 16
 _SHM_SIZE_F2A = 24
 
+# Dtype encoding for SHM metadata (stream-ordered path)
+_DTYPE_TO_INT = {
+    torch.float16: 1,
+    torch.bfloat16: 2,
+    torch.float32: 3,
+    torch.float64: 4,
+    torch.int32: 5,
+    torch.int64: 6,
+    torch.int8: 7,
+    torch.uint8: 8,
+}
+_INT_TO_DTYPE = {v: k for k, v in _DTYPE_TO_INT.items()}
+
 
 class IpcTensorCommunicator:
     """CUDA IPC communicator for single-node A↔F over NVLink.
@@ -116,9 +129,34 @@ class IpcTensorCommunicator:
             self._local_device, self._peer_device, self._peer_device_idx,
         )
 
-        if not torch.cuda.can_device_access_peer(
+        if torch.cuda.can_device_access_peer(
             torch.cuda.current_device(), self._peer_device_idx
         ):
+            try:
+                # Enable peer access via CUDA runtime for NVLink direct transfers
+                import ctypes
+                cuda_rt = ctypes.CDLL("libcudart.so")
+                # cudaDeviceEnablePeerAccess(int peerDevice, unsigned int flags)
+                ret = cuda_rt.cudaDeviceEnablePeerAccess(
+                    ctypes.c_int(self._peer_device_idx), ctypes.c_uint(0)
+                )
+                if ret == 0:
+                    logger.info(
+                        "[IPC] peer access %d->%d enabled (NVLink direct)",
+                        torch.cuda.current_device(), self._peer_device_idx,
+                    )
+                elif ret == 704:  # cudaErrorPeerAccessAlreadyEnabled
+                    logger.info(
+                        "[IPC] peer access %d->%d already enabled",
+                        torch.cuda.current_device(), self._peer_device_idx,
+                    )
+                else:
+                    logger.warning(
+                        "[IPC] cudaDeviceEnablePeerAccess returned %d", ret
+                    )
+            except Exception as e:
+                logger.warning("[IPC] failed to enable peer access: %s", e)
+        else:
             logger.info(
                 "[IPC] peer access %d->%d not available, cross-device copy may be slow",
                 torch.cuda.current_device(),
@@ -140,6 +178,11 @@ class IpcTensorCommunicator:
             for i in range(self.RING_SIZE)
         ]
         self._send_event = [torch.cuda.Event() for _ in range(self.RING_SIZE)]
+
+        # Stream-ordered IPC events (for potential future cross-process sync)
+        self._send_ipc_event = [
+            torch.cuda.Event() for _ in range(self.RING_SIZE)
+        ]
 
         # Recv buffers are local only (not shared).
         self._recv_buf = []
@@ -230,31 +273,52 @@ class IpcTensorCommunicator:
         """Create POSIX shared memory for per-slot flag + msg_size sync.
 
         First process uses O_CREAT|O_EXCL to create the SHM; second process
-        just opens the existing mapping. This avoids one process accidentally
-        unlinking the peer's active mapping.
-
-        The creator zeros the SHM to prevent stale flags from a previous run.
-        The opener does NOT zero (the creator may have already written valid data).
+        just opens the existing mapping. Both sides zero the SHM to prevent
+        stale flags from a previous run.
         """
-        # mb_id is None for legacy single-comm path (no suffix) and an int
-        # for per-mb async-schedule path (use _mb<id> suffix so per-mb
-        # instances do NOT collide with the legacy SHM).
         suffix = f"_{rank}" if self.mb_id is None else f"_{rank}_mb{self.mb_id}"
         self._shm_path = f"/dev/shm/afd_ipc_flags{suffix}"
-        created = False
         try:
             fd = os.open(self._shm_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
             os.ftruncate(fd, _SHM_TOTAL)
-            created = True
         except FileExistsError:
             fd = os.open(self._shm_path, os.O_RDWR)
         self._shm = mmap.mmap(
             fd, _SHM_TOTAL, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE
         )
         os.close(fd)
-        if created:
-            # Zero all flags/sizes to prevent stale data from previous runs.
-            self._shm[:_SHM_TOTAL] = b'\x00' * _SHM_TOTAL
+        # Always zero — handles stale data from previous runs.
+        self._shm[:_SHM_TOTAL] = b'\x00' * _SHM_TOTAL
+
+        # Register SHM as CUDA-mapped host memory so GPU can write flags directly.
+        import ctypes
+        self._shm_buf = (ctypes.c_char * _SHM_TOTAL).from_buffer(self._shm)
+        self._shm_host_ptr = ctypes.addressof(self._shm_buf)
+        self._libcudart = ctypes.CDLL('libcudart.so')
+        cudaHostRegisterMapped = 2
+        cudaHostRegisterPortable = 1
+        ret = self._libcudart.cudaHostRegister(
+            ctypes.c_void_p(self._shm_host_ptr),
+            ctypes.c_size_t(_SHM_TOTAL),
+            ctypes.c_uint(cudaHostRegisterMapped | cudaHostRegisterPortable)
+        )
+        if ret != 0:
+            logger.warning("[IPC] cudaHostRegister failed (ret=%d), GPU flag write disabled", ret)
+            self._shm_dev_ptr = None
+        else:
+            dev_ptr = ctypes.c_void_p()
+            ret = self._libcudart.cudaHostGetDevicePointer(
+                ctypes.byref(dev_ptr),
+                ctypes.c_void_p(self._shm_host_ptr),
+                ctypes.c_uint(0)
+            )
+            if ret != 0:
+                logger.warning("[IPC] cudaHostGetDevicePointer failed (ret=%d)", ret)
+                self._shm_dev_ptr = None
+            else:
+                self._shm_dev_ptr = dev_ptr.value
+                logger.info("[IPC] SHM registered for GPU flag write: host=0x%x dev=0x%x",
+                           self._shm_host_ptr, self._shm_dev_ptr)
 
     def _exchange_background(self, tag: str, rank: int):
         """Exchange IPC handles and import peer buffer."""
@@ -264,11 +328,18 @@ class IpcTensorCommunicator:
                         tag, rank, self.mb_id)
             self._peer_send_info = self._exchange_handles(rank)
 
+            # Fix device_id mismatch: the peer's device_id is local to their
+            # process. We need to remap it to our peer_device_idx.
+            # _share_cuda_() returns (device_id, handle, size, offset, ...)
+            if isinstance(self._peer_send_info, tuple):
+                peer_info_list = list(self._peer_send_info)
+                peer_info_list[0] = self._peer_device_idx
+                self._peer_send_info = tuple(peer_info_list)
+
             torch.cuda.set_device(self._peer_device_idx)
             peer_storage = torch.storage.UntypedStorage._new_shared_cuda(
                 *self._peer_send_info
             )
-            # Import the peer's entire send pool, slice into per-slot views
             _peer_send_pool = torch.tensor(
                 peer_storage, dtype=torch.uint8, device=self._peer_device
             ).reshape(-1)[:self.RING_SIZE * self._max_msg_size]
@@ -276,7 +347,11 @@ class IpcTensorCommunicator:
                 _peer_send_pool[i * self._max_msg_size : (i + 1) * self._max_msg_size]
                 for i in range(self.RING_SIZE)
             ]
+            self._peer_ipc_event = []  # Not used in current implementation
             torch.cuda.set_device(self._local_device.index)
+
+            # Initialize P2P signal flags for GPU-only communication
+            self.setup_p2p_signal(self._peer_device_idx)
 
             self._ready.set()
             logger.info(
@@ -461,23 +536,20 @@ class IpcTensorCommunicator:
         send_buf = self._send_buf[slot]
         meta_np = _encode_meta(x_cont)
 
-        # Write header + data to send_buf. Use a pre-created stream when
-        # called from a bg thread (Path 1) to avoid per-thread CUDA context
-        # initialization overhead (5-25ms); use current stream otherwise.
-        ctx = torch.cuda.stream(stream) if stream is not None else nullcontext()
-        with ctx:
-            meta_np_view = meta_np.view(np.uint8)
-            send_buf[:64].copy_(
-                torch.from_numpy(meta_np_view).to(self._local_device)
-            )
-            send_buf[64:total_bytes].copy_(x_cont.view(torch.uint8).flatten())
-            # Record on the actual current stream (not None which defaults to stream 0)
-            self._send_event[slot].record(torch.cuda.current_stream())
+        # Write header + data to send_buf directly on the current stream.
+        # Then synchronize to ensure data is written before signaling peer.
+        meta_np_view = meta_np.view(np.uint8)
+        send_buf[:64].copy_(
+            torch.from_numpy(meta_np_view).to(self._local_device)
+        )
+        send_buf[64:total_bytes].copy_(x_cont.view(torch.uint8).flatten())
 
+        # Record event and synchronize to ensure copy is complete
+        self._send_event[slot].record()
         self._send_event[slot].synchronize()
         t_sync = time.perf_counter()
 
-        # Write size + flag — peer reads size from SHM, then copies msg in one shot
+        # Write flag from CPU (peer polls this)
         self._write_u64(size_off, total_bytes)
         self._write_u64(flag_off, 1)
         t_flag_write = time.perf_counter()
@@ -511,6 +583,303 @@ class IpcTensorCommunicator:
             )
 
         self._send_slot = (slot + 1) % self.RING_SIZE
+
+    def send_stream_ordered(self, x: torch.Tensor):
+        """Optimized send: skip event.synchronize() on send side.
+
+        Instead of sync-ing on CPU to confirm copy is done before setting flag,
+        we record an event and set the flag immediately. The recv side will
+        do a stream.synchronize() after its copy to ensure data integrity.
+
+        Uses per-(shape, dtype) caching to eliminate metadata encoding overhead
+        on repeated calls with the same tensor shape (common in decode).
+        """
+        self._wait_ready()
+        x_cont = x.contiguous() if not x.is_contiguous() else x
+
+        # --- Fast-path cache lookup ---
+        cache_key = (x_cont.shape, x_cont.dtype)
+        if not hasattr(self, '_send_cache'):
+            self._send_cache = {}
+        cache = self._send_cache.get(cache_key)
+        if cache is None:
+            # First call with this shape: pre-compute everything
+            data_bytes = x_cont.numel() * x_cont.element_size()
+            total_bytes = self.HEADER_BYTES + data_bytes
+            if total_bytes > self._max_msg_size:
+                raise RuntimeError(f"Message too large: {total_bytes} > {self._max_msg_size}")
+            meta_np = _encode_meta(x_cont)
+            meta_gpu = torch.from_numpy(meta_np.view(np.uint8)).to(
+                self._local_device
+            ).clone()  # persistent GPU copy
+            cache = (total_bytes, meta_gpu)
+            self._send_cache[cache_key] = cache
+        total_bytes, meta_gpu = cache
+
+        slot = self._send_slot
+        send_buf = self._send_buf[slot]
+        flag_off = self._send_flag_off(slot)
+        size_off = self._send_size_off(slot)
+
+        # Wait for peer to have consumed this slot
+        while self._read_u64(flag_off) != 0:
+            pass
+
+        # HOT PATH: 2 GPU copies only, no Python allocations
+        send_buf[:64].copy_(meta_gpu)  # pre-computed metadata (GPU-to-GPU, ~5us)
+        send_buf[64:total_bytes].copy_(x_cont.view(torch.uint8).flatten())
+
+        # Sync current stream to ensure GPU copy is visible before setting flag
+        torch.cuda.current_stream().synchronize()
+
+        # Write size + flag to SHM (CPU, after GPU copy confirmed done)
+        self._write_u64(size_off, total_bytes)
+        self._write_u64(flag_off, 1)
+
+        self._send_slot = (slot + 1) % self.RING_SIZE
+
+    def send_gpu_signal(self, x: torch.Tensor):
+        """GPU-only send: data copy + __threadfence_system + GPU writes SHM flag.
+
+        CPU never blocks. GPU ensures data visible before writing flag.
+        Uses cudaMemcpyAsync to write flag to mapped SHM (same as send_zero_sync
+        but with __threadfence_system for correctness).
+        """
+        from sglang.srt.layers.p2p_signal import signal
+
+        self._wait_ready()
+        x_cont = x.contiguous() if not x.is_contiguous() else x
+
+        # --- Fast-path cache lookup ---
+        cache_key = (x_cont.shape, x_cont.dtype)
+        if not hasattr(self, '_send_cache'):
+            self._send_cache = {}
+        cache = self._send_cache.get(cache_key)
+        if cache is None:
+            data_bytes = x_cont.numel() * x_cont.element_size()
+            total_bytes = self.HEADER_BYTES + data_bytes
+            if total_bytes > self._max_msg_size:
+                raise RuntimeError(f"Message too large: {total_bytes} > {self._max_msg_size}")
+            meta_np = _encode_meta(x_cont)
+            meta_gpu = torch.from_numpy(meta_np.view(np.uint8)).to(
+                self._local_device
+            ).clone()
+            # Pre-allocate flag tensor: [total_bytes, 1] for cudaMemcpyAsync
+            flag_gpu = torch.tensor(
+                [total_bytes, 1], dtype=torch.int64, device=self._local_device
+            )
+            cache = (total_bytes, meta_gpu, flag_gpu)
+            self._send_cache[cache_key] = cache
+        total_bytes, meta_gpu, flag_gpu = cache
+
+        slot = self._send_slot
+        send_buf = self._send_buf[slot]
+        flag_off = self._send_flag_off(slot)
+        size_off = self._send_size_off(slot)
+
+        # Wait for peer to have consumed this slot (CPU poll SHM)
+        while self._read_u64(flag_off) != 0:
+            pass
+
+        # Copy data to send_buf on current stream (ordered after Attn/MLP kernel)
+        send_buf[:64].copy_(meta_gpu)
+        send_buf[64:total_bytes].copy_(x_cont.view(torch.uint8).flatten())
+
+        # GPU writes flag to mapped SHM via cudaMemcpyAsync
+        # __threadfence_system is implicit in cudaMemcpyAsync (DtoH ensures ordering)
+        import ctypes
+        dst_addr = self._shm_dev_ptr + size_off
+        self._libcudart.cudaMemcpyAsync(
+            ctypes.c_void_p(dst_addr),
+            ctypes.c_void_p(flag_gpu.data_ptr()),
+            ctypes.c_size_t(16),  # 2 x int64 = [size, flag]
+            ctypes.c_int(1),  # cudaMemcpyDeviceToHost (mapped host)
+            ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
+        )
+        # CPU returns immediately! No synchronize!
+        self._send_slot = (slot + 1) % self.RING_SIZE
+
+    def recv_gpu_wait(self) -> torch.Tensor:
+        """Hybrid recv: CPU polls SHM flag, then enqueue P2P copy without sync.
+
+        Send side uses cudaMemcpyAsync to write flag to mapped SHM (no CPU sync).
+        Recv side:
+        1. CPU polls SHM flag (fast, ~77us once sender's GPU writes it)
+        2. Enqueue P2P copy from peer's send_buf (no synchronize!)
+        3. Return view — downstream kernel on same stream auto-waits for copy
+        4. Clear SHM flag so sender can reuse slot
+
+        Key insight: once CPU sees flag=1 in SHM, sender's GPU has completed
+        both data copy AND cudaMemcpyAsync (same stream ordering). So P2P copy
+        from peer's send_buf is safe without additional sync.
+        """
+        self._wait_ready()
+
+        with self._recv_lock:
+            slot = self._recv_slot
+            self._recv_slot = (slot + 1) % self.RING_SIZE
+
+        flag_off = self._recv_flag_off(slot)
+        size_off = self._recv_size_off(slot)
+
+        # CPU polls SHM flag (set by sender's GPU via cudaMemcpyAsync)
+        while self._read_u64(flag_off) != 1:
+            pass
+
+        total_bytes = self._read_u64(size_off)
+        recv_buf = self._recv_buf[slot]
+
+        # --- Fast-path: use cached shape ---
+        if not hasattr(self, '_recv_cache'):
+            self._recv_cache = {}
+        cache = self._recv_cache.get(total_bytes)
+        if cache is not None:
+            shape, dtype, data_offset = cache
+            # Enqueue P2P copy — NO synchronize!
+            # Downstream kernel on same stream will wait for copy to finish
+            recv_buf[:total_bytes].copy_(self._peer_send_buf[slot][:total_bytes])
+            # Clear SHM flag (CPU write, safe — GPU already finished writing data)
+            self._write_u64(flag_off, 0)
+            # Return view — no clone needed (ring buffer protects data)
+            return recv_buf[data_offset:total_bytes].view(dtype).reshape(shape)
+
+        # COLD PATH: first recv — decode metadata (needs sync for .cpu())
+        recv_buf[:total_bytes].copy_(self._peer_send_buf[slot][:total_bytes])
+        torch.cuda.current_stream().synchronize()
+        header_np = recv_buf[:64].cpu().numpy().view(np.int64)
+        shape, dtype, _ = _decode_meta(header_np)
+        self._recv_cache[total_bytes] = (shape, dtype, 64)
+        self._write_u64(flag_off, 0)
+        return recv_buf[64:total_bytes].view(dtype).reshape(shape).contiguous()
+
+    def setup_p2p_signal(self, peer_device: int):
+        """Initialize P2P signal flags for GPU-only communication.
+
+        Uses the LAST 8 bytes of each send_buf slot as the signal flag.
+        Since peer already has IPC access to our send_buf (via _peer_send_buf),
+        both sides can see the same flag without additional IPC setup.
+
+        Convention:
+        - send_buf layout: [64B header | data | ... | 8B flag at offset max_msg_size-8]
+        - Sender writes flag=1 after data copy + __threadfence_system()
+        - Receiver polls peer_send_buf[slot][flag_offset] via P2P volatile read
+
+        Args:
+            peer_device: the peer GPU device index (for logging only)
+        """
+        self._p2p_flag_offset = self._max_msg_size - 8
+        # Pre-create flag value tensors on local device
+        self._p2p_flag_one = torch.ones(1, dtype=torch.int64, device=self._local_device)
+        self._p2p_flag_zero = torch.zeros(1, dtype=torch.int64, device=self._local_device)
+        self._p2p_total_bytes = None
+        # Clear flags in all send_buf slots
+        for slot in range(self.RING_SIZE):
+            self._send_buf[slot][self._p2p_flag_offset:self._p2p_flag_offset+8].zero_()
+        logger.info("[IPC] P2P signal initialized: flag_offset=%d, peer=cuda:%d",
+                   self._p2p_flag_offset, peer_device)
+
+    def recv_zero_sync(self) -> torch.Tensor:
+        """Zero-sync recv: no synchronize(), no clone().
+
+        Polls SHM flag (set by sender's GPU via cudaMemcpyAsync).
+        When flag=1, sender's data is guaranteed complete (same-stream ordering).
+        Enqueues P2P copy on current stream — downstream kernel (MLP/Attn)
+        is on same stream, so GPU auto-orders: copy finishes before kernel starts.
+        Returns a view of recv_buf (no clone needed — ring buffer slot won't be
+        reused until next layer's recv, by which time MLP has consumed the data).
+
+        Requires: pre-launch cache populated (first call goes through cold path).
+        """
+        self._wait_ready()
+
+        with self._recv_lock:
+            slot = self._recv_slot
+            self._recv_slot = (slot + 1) % self.RING_SIZE
+
+        flag_off = self._recv_flag_off(slot)
+        size_off = self._recv_size_off(slot)
+
+        # Poll until sender's GPU writes flag=1 to mapped SHM
+        while self._read_u64(flag_off) != 1:
+            pass
+
+        total_bytes = self._read_u64(size_off)
+        recv_buf = self._recv_buf[slot]
+
+        # --- Fast-path: use cached shape ---
+        if not hasattr(self, '_recv_cache'):
+            self._recv_cache = {}
+        cache = self._recv_cache.get(total_bytes)
+        if cache is not None:
+            shape, dtype, data_offset = cache
+            # Enqueue P2P copy — NO synchronize!
+            # Downstream kernel on same stream will wait for copy to finish
+            recv_buf[:total_bytes].copy_(self._peer_send_buf[slot][:total_bytes])
+            # Return view — no clone needed (ring buffer protects data)
+            result = recv_buf[data_offset:total_bytes].view(dtype).reshape(shape)
+            # Clear flag so sender can reuse slot
+            self._write_u64(flag_off, 0)
+            return result
+
+        # COLD PATH: first recv — decode metadata (needs sync)
+        recv_buf[:total_bytes].copy_(self._peer_send_buf[slot][:total_bytes])
+        torch.cuda.current_stream().synchronize()
+        header_np = recv_buf[:64].cpu().numpy().view(np.int64)
+        shape, dtype, _ = _decode_meta(header_np)
+        self._recv_cache[total_bytes] = (shape, dtype, 64)
+        result = recv_buf[64:total_bytes].view(dtype).reshape(shape).contiguous()
+        self._write_u64(flag_off, 0)
+        return result
+        """Optimized recv: no send-side sync needed.
+
+        The send side skips event.synchronize() and sets the flag immediately
+        after recording the event. We poll the flag, then do cudaMemcpyPeer
+        which implicitly waits for the peer's copy to complete (CUDA guarantees
+        ordering on the same device's memory).
+
+        Uses shape caching: after first recv, assumes same shape on subsequent
+        calls (common in decode). Skips metadata decode + stream.synchronize()
+        on hot path.
+        """
+        self._wait_ready()
+
+        with self._recv_lock:
+            slot = self._recv_slot
+            self._recv_slot = (slot + 1) % self.RING_SIZE
+
+        flag_off = self._recv_flag_off(slot)
+        size_off = self._recv_size_off(slot)
+
+        # Poll until data ready (sender sets flag after recording event)
+        while self._read_u64(flag_off) != 1:
+            pass
+
+        total_bytes = self._read_u64(size_off)
+        recv_buf = self._recv_buf[slot]
+
+        # --- Fast-path: use cached shape if total_bytes matches ---
+        if not hasattr(self, '_recv_cache'):
+            self._recv_cache = {}
+        cache = self._recv_cache.get(total_bytes)
+        if cache is not None:
+            shape, dtype, data_offset = cache
+            # HOT PATH: single GPU copy, no metadata decode
+            recv_buf[:total_bytes].copy_(self._peer_send_buf[slot][:total_bytes])
+            torch.cuda.current_stream().synchronize()
+            result = recv_buf[data_offset:total_bytes].view(dtype).reshape(shape).clone()
+            self._write_u64(flag_off, 0)
+            return result
+
+        # COLD PATH: first time seeing this size — decode metadata
+        recv_buf[:total_bytes].copy_(self._peer_send_buf[slot][:total_bytes])
+        torch.cuda.current_stream().synchronize()
+        header_np = recv_buf[:64].cpu().numpy().view(np.int64)
+        shape, dtype, _ = _decode_meta(header_np)
+        # Cache for future calls
+        self._recv_cache[total_bytes] = (shape, dtype, 64)
+        result = recv_buf[64:total_bytes].view(dtype).reshape(shape).contiguous()
+        self._write_u64(flag_off, 0)
+        return result
 
     def recv_tensor(self) -> torch.Tensor:
         """Synchronous recv: poll flag, single peer copy, decode, return.

@@ -5482,7 +5482,7 @@ class ServerArgs:
         parser.add_argument(
             "--afd-comm-backend",
             type=str,
-            choices=["auto", "ucx", "ipc", "stepmesh", "zmq"],
+            choices=["auto", "ucx", "ipc", "ipc_cpp", "nccl_p2p", "stepmesh", "zmq"],
             default=ServerArgs.afd_comm_backend,
             help="Communication backend for AFD Attn-FFN tensor transfer. "
             "'ucx': UCX-Py RDMA (requires ucp). "

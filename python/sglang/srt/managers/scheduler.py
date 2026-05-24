@@ -1634,7 +1634,14 @@ class Scheduler(
         self._tier1_last_monitor_time = now
 
         # Build MonitoringWindow from collector and feed to monitor
-        window = self._tier1_collector.build_window()
+        is_saving = (
+            hasattr(self, "_af_dvfs_ctrl")
+            and self._af_dvfs_ctrl is not None
+            and self._af_dvfs_ctrl.is_energy_saving
+        )
+        window = self._tier1_collector.build_window(
+            is_tier2_energy_saving=is_saving,
+        )
         if window is None:
             return  # not enough data yet
 
@@ -1735,13 +1742,48 @@ class Scheduler(
             if self._tier1_monitor is not None:
                 self._tier1_monitor.reset_reference({})
 
-            # TODO: drain-then-switch transition
-            # 1. Drain current batches
-            # 2. Reconfigure pools (k_P, k_D, tp_*, f_*)
-            # 3. Resume with new config
+            # ── Transition: apply new configuration ──
+            self._apply_tier1_transition(old, new_solution)
 
         except Exception as e:
             logger.error("Tier 1 re-plan failed: %s", e)
+
+    def _apply_tier1_transition(self, old: "Tier1Solution", new: "Tier1Solution"):
+        """Apply Tier 1 configuration transition based on what changed.
+
+        Three scenarios per design doc Section 1.5:
+          1. Frequency-only change: apply immediately (~6ms)
+          2. TP change: requires drain-then-switch (stop new requests,
+             wait for active to finish, restart with new TP)
+          3. k_P/k_D change: P/D rebalance (shrink then expand)
+
+        Currently implements scenario 1 (freq change) and updates Tier 2
+        baseline. Scenarios 2/3 log a warning — full drain-then-switch
+        requires orchestrator-level coordination beyond the scheduler.
+        """
+        freq_only = (
+            old.tp_pa == new.tp_pa and old.tp_pf == new.tp_pf
+            and old.tp_da == new.tp_da and old.tp_df == new.tp_df
+            and old.k_p == new.k_p and old.k_d == new.k_d
+        )
+
+        if freq_only:
+            logger.info("[Tier1] Transition: frequency-only change, applying immediately")
+            self._apply_freq(new.f_da, new.f_df)
+            if hasattr(self, "_af_dvfs_ctrl") and self._af_dvfs_ctrl is not None:
+                self._af_dvfs_ctrl.update_baseline(new.f_da, new.f_df)
+        else:
+            logger.warning(
+                "[Tier1] Transition: TP or k change detected "
+                "(tp_pa %d→%d, tp_da %d→%d, k_p %d→%d, k_d %d→%d). "
+                "Drain-then-switch required — upgrading to max freq as "
+                "interim measure. Full transition requires orchestrator.",
+                old.tp_pa, new.tp_pa, old.tp_da, new.tp_da,
+                old.k_p, new.k_p, old.k_d, new.k_d,
+            )
+            self._apply_freq(1410, 1410)
+            if hasattr(self, "_af_dvfs_ctrl") and self._af_dvfs_ctrl is not None:
+                self._af_dvfs_ctrl.update_baseline(1410, 1410)
 
     def _afd_get_next_batch(self, disagg_mode):
         """Select the correct batch scheduling function based on disagg mode.

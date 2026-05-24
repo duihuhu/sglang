@@ -69,10 +69,17 @@ def _find_so() -> str:
             / "test_motivation" / "dvfs" / "libdvfs_ctrl.so")
     )
 
-    # 3. relative to cwd
-    candidates.append("benchmark/test_motivation/dvfs/libdvfs_ctrl.so")
+    # 3. relative to this file: ../../../../benchmark/test_motivation/hucc/dvfs/
+    candidates.append(
+        str(this_dir / ".." / ".." / ".." / ".." / "benchmark"
+            / "test_motivation" / "hucc" / "dvfs" / "libdvfs_ctrl.so")
+    )
 
-    # 4. system library path
+    # 4. relative to cwd
+    candidates.append("benchmark/test_motivation/dvfs/libdvfs_ctrl.so")
+    candidates.append("benchmark/test_motivation/hucc/dvfs/libdvfs_ctrl.so")
+
+    # 5. system library path
     candidates.append("libdvfs_ctrl.so")
 
     for p in candidates:

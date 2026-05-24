@@ -339,8 +339,13 @@ class WorkloadMetricsCollector:
 
     # ── Window building ──────────────────────────────────────────────────
 
-    def build_window(self) -> Optional[MonitoringWindow]:
+    def build_window(self, is_tier2_energy_saving: bool = False) -> Optional[MonitoringWindow]:
         """Build a MonitoringWindow from all data accumulated since last reset.
+
+        Args:
+            is_tier2_energy_saving: Whether Tier 2 is currently running below
+                baseline frequency for energy saving. Suppresses A/F utilization
+                imbalance false positives in WorkloadMonitor.
 
         Returns None if the window has not yet elapsed or there is no data.
         """
@@ -463,6 +468,7 @@ class WorkloadMetricsCollector:
             p_util=p_util,
             d_util=d_util,
             load_distribution=load_dist,
+            is_tier2_energy_saving=is_tier2_energy_saving,
             active_requests=n_active,
             tpot_p99_us=tpot_p99,
             ttft_p99_ms=ttft_p99 / 1000.0,
