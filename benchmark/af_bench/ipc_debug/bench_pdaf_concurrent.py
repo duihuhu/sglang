@@ -114,7 +114,7 @@ def run_pdaf(comm_backend, label):
             if peer_device is not None:
                 env["AFD_IPC_PEER_DEVICE"] = str(peer_device)
         if comm_backend == "ipc_cpp":
-            env["AFD_IPC_SYNC_MODE"] = "cpu_flag"
+            env["AFD_IPC_SYNC_MODE"] = "ipc_event"
 
         cmd = [PYTHON, "-m", "sglang.launch_server",
             "--model-path", MODEL, "--tp", "1",
@@ -192,32 +192,37 @@ def cleanup_procs(procs):
 
 
 def bench_concurrent(url, concurrency, n_requests, input_len=INPUT_LEN, output_len=OUTPUT_LEN):
-    """Run concurrent requests, measure throughput + latency."""
+    """Run concurrent requests, measure real TPOT via streaming."""
     import requests as req_lib
     import numpy as np
 
     prompt = "Hello world. " * (input_len // 3)
-    results = []
 
     def send_one(i):
-        payload = {"text": prompt, "sampling_params": {"max_new_tokens": output_len, "temperature": 0.0}}
+        payload = {"text": prompt, "sampling_params": {"max_new_tokens": output_len, "temperature": 0.0}, "stream": True}
         t0 = time.perf_counter()
+        first_token_time = None
+        token_count = 0
         try:
-            resp = req_lib.post(f"{url}/generate", json=payload, timeout=300)
+            resp = req_lib.post(f"{url}/generate", json=payload, stream=True, timeout=300)
+            for chunk in resp.iter_lines():
+                if chunk:
+                    token_count += 1
+                    if first_token_time is None:
+                        first_token_time = time.perf_counter()
             t_end = time.perf_counter()
-            data = resp.json()
-            output_tokens = len(data.get("text", "").split()) if data.get("text") else output_len
-            # Use meta if available
-            meta = data.get("meta_info", {})
-            ttft = meta.get("prompt_tokens_details", {}).get("time_to_first_token_ms")
-            if ttft is None:
-                ttft = (t_end - t0) * 1000 * 0.3  # rough estimate
-            return {
-                "success": True,
-                "latency_ms": (t_end - t0) * 1000,
-                "output_tokens": output_tokens,
-                "ttft_ms": ttft,
-            }
+            if first_token_time and token_count > 1:
+                ttft = (first_token_time - t0) * 1000
+                tpot = (t_end - first_token_time) * 1000 / (token_count - 1)
+                return {
+                    "success": True,
+                    "latency_ms": (t_end - t0) * 1000,
+                    "ttft_ms": ttft,
+                    "tpot_ms": tpot,
+                    "output_tokens": token_count,
+                }
+            else:
+                return {"success": False, "error": "no tokens"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -232,7 +237,8 @@ def bench_concurrent(url, concurrency, n_requests, input_len=INPUT_LEN, output_l
     if not ok:
         return None
 
-    latencies = np.array([r["latency_ms"] for r in ok])
+    tpots = np.array([r["tpot_ms"] for r in ok])
+    ttfts = np.array([r["ttft_ms"] for r in ok])
     total_output_tokens = sum(r["output_tokens"] for r in ok)
     throughput = total_output_tokens / wall_s
 
@@ -241,9 +247,11 @@ def bench_concurrent(url, concurrency, n_requests, input_len=INPUT_LEN, output_l
         "n_requests": n_requests,
         "n_ok": len(ok),
         "throughput_tok_s": round(throughput, 1),
-        "latency_mean_ms": round(np.mean(latencies), 1),
-        "latency_p50_ms": round(np.median(latencies), 1),
-        "latency_p95_ms": round(np.percentile(latencies, 95), 1),
+        "tpot_mean_ms": round(np.mean(tpots), 1),
+        "tpot_p50_ms": round(np.median(tpots), 1),
+        "tpot_p95_ms": round(np.percentile(tpots, 95), 1),
+        "ttft_mean_ms": round(np.mean(ttfts), 1),
+        "ttft_p50_ms": round(np.median(ttfts), 1),
         "wall_s": round(wall_s, 1),
     }
 
@@ -260,7 +268,7 @@ def main():
     concurrency_levels = [1, 4, 16, 32, 64]
     n_requests_map = {1: 10, 4: 40, 16: 80, 32: 128, 64: 192}
 
-    backends = ["ipc_cpp", "ipc"]
+    backends = ["ipc_cpp"]
     all_results = {}
 
     for backend in backends:
@@ -282,8 +290,8 @@ def main():
             r = bench_concurrent(url, conc, n_req)
             if r:
                 all_results[backend][conc] = r
-                log.info("    throughput=%.1f tok/s  latency_p50=%.1fms  ok=%d/%d",
-                         r["throughput_tok_s"], r["latency_p50_ms"], r["n_ok"], r["n_requests"])
+                log.info("    TPOT_p50=%.1fms  TTFT_p50=%.1fms  throughput=%.1f tok/s  ok=%d/%d",
+                         r["tpot_p50_ms"], r["ttft_p50_ms"], r["throughput_tok_s"], r["n_ok"], r["n_requests"])
             else:
                 log.warning("    FAILED")
 
@@ -292,42 +300,22 @@ def main():
     # Print comparison
     print()
     print("=" * 120)
-    print("  RESULTS: PD+AF 4-GPU Multi-Concurrency")
+    print("  RESULTS: PD+AF 4-GPU Multi-Concurrency (ipc_event mode)")
     print(f"  Input={INPUT_LEN}, Output={OUTPUT_LEN}")
     print("=" * 120)
     print()
-    print(f"{'Conc':<6} | {'C++ Thru(tok/s)':>16} {'C++ P50(ms)':>12} {'C++ P95(ms)':>12} | "
-          f"{'Py Thru(tok/s)':>16} {'Py P50(ms)':>12} {'Py P95(ms)':>12} | {'Thru Δ':>12} {'P50 Δ':>12}")
+    print(f"{'Conc':<6} | {'Thru(tok/s)':>12} {'TPOT_mean':>12} {'TPOT_p50':>12} {'TPOT_p95':>12} {'TTFT_mean':>12} {'TTFT_p50':>12} | {'ok':>6}")
     print("-" * 120)
 
     for conc in concurrency_levels:
         cpp = all_results.get("ipc_cpp", {}).get(conc)
-        py = all_results.get("ipc", {}).get(conc)
 
         if cpp:
-            cpp_thru = f"{cpp['throughput_tok_s']:.0f}"
-            cpp_p50 = f"{cpp['latency_p50_ms']:.0f}"
-            cpp_p95 = f"{cpp['latency_p95_ms']:.0f}"
+            print(f"{conc:<6} | {cpp['throughput_tok_s']:>12.1f} {cpp['tpot_mean_ms']:>10.1f}ms {cpp['tpot_p50_ms']:>10.1f}ms "
+                  f"{cpp['tpot_p95_ms']:>10.1f}ms {cpp['ttft_mean_ms']:>10.1f}ms {cpp['ttft_p50_ms']:>10.1f}ms | "
+                  f"{cpp['n_ok']:>4}/{cpp['n_requests']}")
         else:
-            cpp_thru = cpp_p50 = cpp_p95 = "N/A"
-
-        if py:
-            py_thru = f"{py['throughput_tok_s']:.0f}"
-            py_p50 = f"{py['latency_p50_ms']:.0f}"
-            py_p95 = f"{py['latency_p95_ms']:.0f}"
-        else:
-            py_thru = py_p50 = py_p95 = "N/A"
-
-        if cpp and py:
-            thru_delta = (cpp['throughput_tok_s'] - py['throughput_tok_s']) / py['throughput_tok_s'] * 100
-            p50_delta = cpp['latency_p50_ms'] - py['latency_p50_ms']
-            thru_str = f"{thru_delta:+.1f}%"
-            p50_str = f"{p50_delta:+.0f}ms"
-        else:
-            thru_str = p50_str = "N/A"
-
-        print(f"{conc:<6} | {cpp_thru:>16} {cpp_p50:>12} {cpp_p95:>12} | "
-              f"{py_thru:>16} {py_p50:>12} {py_p95:>12} | {thru_str:>12} {p50_str:>12}")
+            print(f"{conc:<6} | {'N/A':>12} {'N/A':>12} {'N/A':>12} {'N/A':>12} {'N/A':>12} {'N/A':>12} | {'N/A':>6}")
 
     print("=" * 120)
 

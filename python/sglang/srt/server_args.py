@@ -638,6 +638,7 @@ class ServerArgs:
     afd_comm_backend: Optional[str] = None
     afd_enable_overlap_schedule: bool = False
     afd_async_schedule: bool = False
+    afd_async_pipeline: bool = False
     afd_disagg_interleave_poll: bool = False
 
     # Energy-aware DVFS (Tier 2)
@@ -5509,6 +5510,15 @@ class ServerArgs:
             "send/recv pair, so quicker mbs are not blocked by slower ones at "
             "layer boundaries.  Replaces AFDStageScheduleGenerator. "
             "Requires --afd-perspective and --afd-comm-backend in {ucx,ipc,zmq}.",
+        )
+        parser.add_argument(
+            "--afd-async-pipeline",
+            action="store_true",
+            default=ServerArgs.afd_async_pipeline,
+            help="Enable cross-layer async pipeline for M>1 micro-batch. "
+            "Uses per-mb CUDA streams and event-based dependencies to overlap "
+            "Attention compute with FFN compute across layers. "
+            "Requires --afd-micro-batch >= 2.",
         )
         parser.add_argument(
             "--afd-disagg-interleave-poll",

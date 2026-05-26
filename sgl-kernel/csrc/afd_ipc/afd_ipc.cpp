@@ -521,6 +521,12 @@ void AfdIpcComm::send_cached(const void* data_ptr, size_t data_bytes,
                              cudaStream_t stream) {
     CUDA_CHECK(cudaSetDevice(local_device_));
 
+    if (data_bytes > MAX_MSG_SIZE) {
+        throw std::runtime_error(
+            "AfdIpcComm::send_cached: data_bytes=" + std::to_string(data_bytes) +
+            " exceeds MAX_MSG_SIZE=" + std::to_string(MAX_MSG_SIZE));
+    }
+
     int slot = send_slot_;
 
     // Wait for peer to consume this slot
@@ -660,6 +666,88 @@ void* AfdIpcComm::recv_cached(size_t* out_data_bytes, cudaStream_t stream) {
         CUDA_CHECK(cudaMemsetAsync(local_signal_flags_ + slot, 0,
                                    sizeof(int64_t), stream));
     }
+
+    recv_slot_ = (slot + 1) % RING_SIZE;
+
+    return recv_buf;
+}
+
+void AfdIpcComm::send_gpu_only(const void* data_ptr, size_t data_bytes,
+                                cudaStream_t stream) {
+    CUDA_CHECK(cudaSetDevice(local_device_));
+
+    if (data_bytes > MAX_MSG_SIZE) {
+        throw std::runtime_error(
+            "AfdIpcComm::send_gpu_only: data_bytes=" + std::to_string(data_bytes) +
+            " exceeds MAX_MSG_SIZE=" + std::to_string(MAX_MSG_SIZE));
+    }
+
+    int slot = send_slot_;
+
+    // CPU poll for slot free (sender is typically ahead, so this is fast)
+    volatile uint64_t* flag_ptr = (volatile uint64_t*)((char*)shm_ptr_ + flag_offset(slot, true));
+    while (*flag_ptr != 0) {}
+
+    char* send_buf = (char*)send_pool_ + (size_t)slot * MAX_MSG_SIZE;
+
+    // GPU copy data (stream-ordered, non-blocking)
+    CUDA_CHECK(cudaMemcpyAsync(send_buf, data_ptr, data_bytes,
+                               cudaMemcpyDeviceToDevice, stream));
+
+    // GPU signal: threadfence_system + write peer's device memory flag via P2P
+    if (peer_signal_flags_) {
+        launch_signal_kernel(
+            (volatile int64_t*)(peer_signal_flags_ + slot), 1, stream);
+    }
+
+    // Write SHM metadata (CPU, for fallback/debugging)
+    write_meta_shm(slot, cached_meta_);
+    write_size(slot, data_bytes);
+    write_flag(slot, 1);
+
+    send_slot_ = (slot + 1) % RING_SIZE;
+}
+
+void* AfdIpcComm::recv_gpu_only(size_t* out_data_bytes, cudaStream_t stream) {
+    int slot = recv_slot_;
+
+    CUDA_CHECK(cudaSetDevice(local_device_));
+
+    // NO CPU POLL! GPU kernel spins on local device memory flag.
+    // The sender's signal_kernel writes this flag via P2P after data copy.
+    if (local_signal_flags_) {
+        launch_wait_kernel(
+            (volatile int64_t*)(local_signal_flags_ + slot), 1, stream);
+    } else {
+        // Fallback: CPU poll if GPU signal flags not set up
+        while (read_flag(slot) != 1) {}
+    }
+
+    size_t data_bytes = cached_total_bytes_;
+    if (data_bytes == 0) {
+        // First call or cache miss: read from SHM (requires CPU poll fallback)
+        while (read_flag(slot) != 1) {}
+        data_bytes = read_size(slot);
+    }
+
+    // P2P copy from peer's send_buf to local recv_buf
+    char* peer_buf = (char*)peer_send_pool_ + (size_t)slot * MAX_MSG_SIZE;
+    char* recv_buf = (char*)recv_pool_ + (size_t)slot * MAX_MSG_SIZE;
+
+    CUDA_CHECK(cudaMemcpyPeerAsync(recv_buf, local_device_, peer_buf, peer_device_,
+                                   data_bytes, stream));
+
+    // Reset GPU signal flag for next use
+    if (local_signal_flags_) {
+        CUDA_CHECK(cudaMemsetAsync(local_signal_flags_ + slot, 0,
+                                   sizeof(int64_t), stream));
+    }
+
+    // Clear SHM flag (CPU, non-blocking write for slot reuse)
+    volatile uint64_t* flag_ptr = (volatile uint64_t*)((char*)shm_ptr_ + flag_offset(slot, false));
+    *flag_ptr = 0;
+
+    if (out_data_bytes) *out_data_bytes = data_bytes;
 
     recv_slot_ = (slot + 1) % RING_SIZE;
 

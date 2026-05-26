@@ -42,6 +42,7 @@ def get_module():
             os.path.join(_CSRC_DIR, "afd_ipc.cpp"),
             os.path.join(_CSRC_DIR, "afd_ipc_kernels.cu"),
             os.path.join(_CSRC_DIR, "afd_ipc_pybind.cpp"),
+            os.path.join(_CSRC_DIR, "afd_pipeline_driver.cpp"),
         ],
         extra_include_paths=[_CSRC_DIR],
         extra_cflags=["-O3", "-std=c++17"],

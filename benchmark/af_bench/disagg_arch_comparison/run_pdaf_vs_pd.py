@@ -11,7 +11,7 @@ Usage:
   python run_pdaf_vs_pd.py --phase 2          # Concurrency sweep only
   python run_pdaf_vs_pd.py --skip-pd          # Skip PD baseline (use cached results)
 """
-import asyncio, json, logging, os, socket, subprocess, sys, time, urllib.request
+import asyncio, aiohttp, json, logging, os, socket, subprocess, sys, time, urllib.request
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("pdaf_vs_pd")
@@ -23,11 +23,11 @@ BOOTSTRAP = 18999
 UCX_TLS = "rc,tcp,cuda_copy,cuda_ipc"
 ALL_PORTS = [30000, 30001, 50000, 50010, 50011, 50020, 50021]
 
-OUTPUT_TOKENS = 128
+OUTPUT_TOKENS = 1024
 INPUT_LENS = [128, 256, 512, 1024, 2048]
-CONCURRENCIES = [1, 2, 4, 8, 16, 32]
+CONCURRENCIES = [256]
 N_REQUESTS_SINGLE = 10
-N_REQUESTS_CONC = 40
+N_REQUESTS_CONC = 0  # will be set per-concurrency level below
 
 
 # ── process utils ──────────────────────────────────────────────────────────
@@ -127,7 +127,7 @@ def start_pd_tp1(dev_p, dev_d, name=""):
     p_cmd = [PYTHON, '-m', 'sglang.launch_server',
         '--model-path', MODEL, '--tp', '1',
         '--host', '127.0.0.1', '--port', '50010',
-        '--mem-fraction-static', '0.85', '--max-running-requests', '64',
+        '--mem-fraction-static', '0.85',
         '--disaggregation-mode', 'prefill',
         '--disaggregation-transfer-backend', 'mooncake',
         '--disaggregation-bootstrap-port', str(BOOTSTRAP),
@@ -145,7 +145,7 @@ def start_pd_tp1(dev_p, dev_d, name=""):
     d_cmd = [PYTHON, '-m', 'sglang.launch_server',
         '--model-path', MODEL, '--tp', '1',
         '--host', '127.0.0.1', '--port', '50020',
-        '--mem-fraction-static', '0.85', '--max-running-requests', '64',
+        '--mem-fraction-static', '0.85',
         '--disaggregation-mode', 'decode',
         '--disaggregation-transfer-backend', 'mooncake',
         '--disaggregation-bootstrap-port', str(BOOTSTRAP),
@@ -202,18 +202,20 @@ def start_pdaf_m1_cpp(pa_dev, pf_dev, da_dev, df_dev, name=""):
     extra = [
         '--skip-server-warmup', '--disable-cuda-graph', '--disable-piecewise-cuda-graph',
         '--afd-micro-batch', '1',
-        '--max-running-requests', '96',
         '--afd-disagg-interleave-poll',
         '--disable-radix-cache',
     ]
 
-    def _start(name, gpu, perspective, disagg_mode, port, ucx_base, sched_port, ffn_host=None, visible_gpus=None):
+    def _start(name, gpu, perspective, disagg_mode, port, ucx_base, sched_port, ffn_host=None, visible_gpus=None, base_gpu_id=0, peer_device=None):
         env = env_base.copy()
         env['CUDA_VISIBLE_DEVICES'] = visible_gpus if visible_gpus else str(gpu)
         env['AFD_UCX_BASE_PORT'] = str(ucx_base)
         env['AFD_SCHED_PORT'] = str(sched_port)
         env['SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT'] = '600'
         env['SGLANG_DISAGGREGATION_WAITING_TIMEOUT'] = '600'
+        env['AFD_IPC_SYNC_MODE'] = 'ipc_event'
+        if peer_device is not None:
+            env['AFD_IPC_PEER_DEVICE'] = str(peer_device)
         if ffn_host:
             env['AFD_UCX_FFN_HOST'] = ffn_host
         cmd = [PYTHON, '-m', 'sglang.launch_server',
@@ -226,6 +228,7 @@ def start_pdaf_m1_cpp(pa_dev, pf_dev, da_dev, df_dev, name=""):
             '--disaggregation-transfer-backend', 'mooncake',
             '--disaggregation-bootstrap-port', str(BOOTSTRAP),
             '--disaggregation-ib-device', 'mlx5_4',
+            '--base-gpu-id', str(base_gpu_id),
         ] + extra
         fh = open(os.path.join(HERE, f'{prefix}pdaf_{name}.log'), 'w')
         p = subprocess.Popen(cmd, env=env, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True)
@@ -235,18 +238,18 @@ def start_pdaf_m1_cpp(pa_dev, pf_dev, da_dev, df_dev, name=""):
     s_vis = f'{pf_dev},{pa_dev}'
     d_vis = f'{df_dev},{da_dev}'
 
-    _start('pf', pf_dev, 'ffn', 'prefill', pf_port, ucx_p, sched_p, visible_gpus=s_vis)
+    _start('pf', pf_dev, 'ffn', 'prefill', pf_port, ucx_p, sched_p, visible_gpus=s_vis, base_gpu_id=0, peer_device=1)
     time.sleep(2)
-    _start('pa', pa_dev, 'attn', 'prefill', pa_port, ucx_p, sched_p, ffn_host='127.0.0.1', visible_gpus=s_vis)
+    _start('pa', pa_dev, 'attn', 'prefill', pa_port, ucx_p, sched_p, ffn_host='127.0.0.1', visible_gpus=s_vis, base_gpu_id=1, peer_device=0)
 
     if not wait_port('127.0.0.1', pa_port, timeout=300) or not wait_port('127.0.0.1', pf_port, timeout=300):
         log.error('PD+AF C++ IPC: prefill servers failed')
         cleanup_procs(procs)
         return None
 
-    _start('df', df_dev, 'ffn', 'decode', df_port, ucx_d, sched_d, visible_gpus=d_vis)
+    _start('df', df_dev, 'ffn', 'decode', df_port, ucx_d, sched_d, visible_gpus=d_vis, base_gpu_id=0, peer_device=1)
     time.sleep(2)
-    _start('da', da_dev, 'attn', 'decode', da_port, ucx_d, sched_d, ffn_host='127.0.0.1', visible_gpus=d_vis)
+    _start('da', da_dev, 'attn', 'decode', da_port, ucx_d, sched_d, ffn_host='127.0.0.1', visible_gpus=d_vis, base_gpu_id=1, peer_device=0)
 
     if not wait_port('127.0.0.1', da_port) or not wait_port('127.0.0.1', df_port):
         log.error('PD+AF C++ IPC: decode servers failed')
@@ -306,7 +309,8 @@ async def measure_single(url, input_len, output_len, n=10):
             if first_token_time and token_count > 1:
                 total = time.perf_counter() - t0
                 tpot = (total - first_token_time) / (token_count - 1)
-                results.append({'ttft_ms': first_token_time * 1000, 'tpot_ms': tpot * 1000, 'tokens': token_count})
+                throughput = token_count / total
+                results.append({'ttft_ms': first_token_time * 1000, 'tpot_ms': tpot * 1000, 'tokens': token_count, 'throughput_tok_s': throughput})
     if not results:
         return None
     return {
@@ -314,6 +318,7 @@ async def measure_single(url, input_len, output_len, n=10):
         'mean_ttft_ms': round(sum(r['ttft_ms'] for r in results) / len(results), 1),
         'mean_tpot_ms': round(sum(r['tpot_ms'] for r in results) / len(results), 1),
         'p50_tpot_ms': round(sorted(r['tpot_ms'] for r in results)[len(results)//2], 1),
+        'mean_throughput_tok_s': round(sum(r['throughput_tok_s'] for r in results) / len(results), 1),
     }
 
 
@@ -323,6 +328,18 @@ async def measure_concurrent(url, input_len, output_len, concurrency, n_total):
     payload = {'text': prompt, 'sampling_params': {'max_new_tokens': output_len, 'temperature': 0.0}, 'stream': True}
     sem = asyncio.Semaphore(concurrency)
     timeout = aiohttp.ClientTimeout(total=300)
+    running_samples = []
+
+    async def poll_running(session, stop_event):
+        """Poll running requests count during benchmark."""
+        while not stop_event.is_set():
+            try:
+                async with session.get(f'{url}/v1/models', timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                    pass
+            except Exception:
+                pass
+            running_samples.append(concurrency - sem._value)
+            await asyncio.sleep(0.5)
 
     async def single(session):
         async with sem:
@@ -350,19 +367,32 @@ async def measure_concurrent(url, input_len, output_len, concurrency, n_total):
                 return {'tpot_ms': tpot * 1000, 'ttft_ms': first_token_time * 1000, 'tokens': token_count}
             return None
 
+    wall_start = time.perf_counter()
+    stop_event = asyncio.Event()
     async with aiohttp.ClientSession(timeout=timeout) as session:
+        poll_task = asyncio.create_task(poll_running(session, stop_event))
         tasks = [single(session) for _ in range(n_total)]
         raw = await asyncio.gather(*tasks)
+        stop_event.set()
+        await poll_task
+    wall_s = time.perf_counter() - wall_start
 
     results = [r for r in raw if r is not None]
     if not results:
         return None
     tpots = sorted(r['tpot_ms'] for r in results)
+    total_output_tokens = sum(r['tokens'] for r in results)
+    throughput = total_output_tokens / wall_s
+    max_running = max(running_samples) if running_samples else 0
+    avg_running = round(sum(running_samples) / len(running_samples), 1) if running_samples else 0
     return {
         'n_ok': len(results),
         'mean_tpot_ms': round(sum(r['tpot_ms'] for r in results) / len(results), 1),
         'p50_tpot_ms': round(tpots[len(tpots)//2], 1),
         'mean_ttft_ms': round(sum(r['ttft_ms'] for r in results) / len(results), 1),
+        'throughput_tok_s': round(throughput, 1),
+        'max_running': max_running,
+        'avg_running': avg_running,
     }
 
 
@@ -375,7 +405,7 @@ def run_single_sweep(url, label=""):
         r = asyncio.run(measure_single(url, il, OUTPUT_TOKENS, n=N_REQUESTS_SINGLE))
         if r:
             data[il] = r
-            log.info(f'  in={il}: TTFT={r["mean_ttft_ms"]}ms TPOT={r["mean_tpot_ms"]}ms (n={r["n_ok"]})')
+            log.info(f'  in={il}: TTFT={r["mean_ttft_ms"]}ms TPOT={r["mean_tpot_ms"]}ms Thru={r["mean_throughput_tok_s"]}tok/s (n={r["n_ok"]})')
         else:
             log.warning(f'  in={il}: FAILED')
     return data
@@ -387,10 +417,11 @@ def run_conc_sweep(url, label=""):
     log.info(f'--- {tag}Concurrency sweep (in=512, out={OUTPUT_TOKENS}) ---')
     data = {}
     for conc in CONCURRENCIES:
-        r = asyncio.run(measure_concurrent(url, 512, OUTPUT_TOKENS, conc, N_REQUESTS_CONC))
+        n_req = max(conc, 40)
+        r = asyncio.run(measure_concurrent(url, 16, OUTPUT_TOKENS, conc, n_req))
         if r:
             data[conc] = r
-            log.info(f'  conc={conc}: TPOT={r["mean_tpot_ms"]}ms TTFT={r["mean_ttft_ms"]}ms (n={r["n_ok"]})')
+            log.info(f'  conc={conc}: TPOT={r["mean_tpot_ms"]}ms TTFT={r["mean_ttft_ms"]}ms Thru={r["throughput_tok_s"]}tok/s running_max={r["max_running"]} running_avg={r["avg_running"]} (n={r["n_ok"]}/{n_req})')
         else:
             log.warning(f'  conc={conc}: FAILED')
     return data
@@ -459,33 +490,48 @@ def main():
 
     if args.phase in (0, 1):
         print('\n--- Phase 1: Single Request (concurrency=1, out=%d) ---' % OUTPUT_TOKENS)
-        print(f'{"Input":<8} {"PD TP=1 TTFT":<14} {"PD TP=1 TPOT":<14} {"C++ IPC TTFT":<14} {"C++ IPC TPOT":<14} {"TPOT Delta":<14}')
-        print('-' * 80)
+        print(f'{"Input":<8} {"PD TTFT":<10} {"PD TPOT":<10} {"PD Thru":<12} {"AF TTFT":<10} {"AF TPOT":<10} {"AF Thru":<12} {"TPOT Δ":<14}')
+        print('-' * 90)
         pd_single = results.get('pd_tp1', {}).get('single', {})
         af_single = results.get('pdaf_cpp_ipc', {}).get('single', {})
         for il in INPUT_LENS:
             pd = pd_single.get(il)
             af = af_single.get(il)
+            pd_ttft = f'{pd["mean_ttft_ms"]:.1f}ms' if pd else 'N/A'
+            pd_tpot = f'{pd["mean_tpot_ms"]:.1f}ms' if pd else 'N/A'
+            pd_thru = f'{pd["mean_throughput_tok_s"]:.1f}tok/s' if pd and 'mean_throughput_tok_s' in pd else 'N/A'
+            af_ttft = f'{af["mean_ttft_ms"]:.1f}ms' if af else 'N/A'
+            af_tpot = f'{af["mean_tpot_ms"]:.1f}ms' if af else 'N/A'
+            af_thru = f'{af["mean_throughput_tok_s"]:.1f}tok/s' if af and 'mean_throughput_tok_s' in af else 'N/A'
             if pd and af:
                 delta = af['mean_tpot_ms'] - pd['mean_tpot_ms']
                 pct = (delta / pd['mean_tpot_ms']) * 100
-                print(f'{il:<8} {pd["mean_ttft_ms"]:<14} {pd["mean_tpot_ms"]:<14} '
-                      f'{af["mean_ttft_ms"]:<14} {af["mean_tpot_ms"]:<14} '
-                      f'{delta:+.1f}ms ({pct:+.1f}%)')
+                delta_str = f'{delta:+.1f}ms ({pct:+.1f}%)'
+            else:
+                delta_str = 'N/A'
+            print(f'{il:<8} {pd_ttft:<10} {pd_tpot:<10} {pd_thru:<12} {af_ttft:<10} {af_tpot:<10} {af_thru:<12} {delta_str:<14}')
 
     if args.phase in (0, 2):
         print('\n--- Phase 2: Concurrency Sweep (in=512, out=%d) ---' % OUTPUT_TOKENS)
-        print(f'{"Conc":<6} {"PD TP=1 TPOT":<14} {"C++ IPC TPOT":<14} {"Overhead":<12} {"PD TTFT":<12} {"AF TTFT":<12}')
-        print('-' * 70)
+        print(f'{"Conc":<6} {"PD TPOT":<10} {"AF TPOT":<10} {"Overhead":<10} {"PD Thru":<12} {"AF Thru":<12} {"PD TTFT":<10} {"AF TTFT":<10}')
+        print('-' * 85)
         pd_conc = results.get('pd_tp1', {}).get('conc', {})
         af_conc = results.get('pdaf_cpp_ipc', {}).get('conc', {})
         for conc in CONCURRENCIES:
             pd = pd_conc.get(conc)
             af = af_conc.get(conc)
+            pd_tpot = f'{pd["mean_tpot_ms"]:.1f}ms' if pd else 'N/A'
+            af_tpot = f'{af["mean_tpot_ms"]:.1f}ms' if af else 'N/A'
+            pd_thru = f'{pd["throughput_tok_s"]:.1f}' if pd and 'throughput_tok_s' in pd else 'N/A'
+            af_thru = f'{af["throughput_tok_s"]:.1f}' if af and 'throughput_tok_s' in af else 'N/A'
+            pd_ttft = f'{pd["mean_ttft_ms"]:.1f}ms' if pd else 'N/A'
+            af_ttft = f'{af["mean_ttft_ms"]:.1f}ms' if af else 'N/A'
             if pd and af:
                 overhead = (af['mean_tpot_ms'] / pd['mean_tpot_ms'] - 1) * 100
-                print(f'{conc:<6} {pd["mean_tpot_ms"]:<14} {af["mean_tpot_ms"]:<14} '
-                      f'+{overhead:.1f}%{"":>5} {pd["mean_ttft_ms"]:<12} {af["mean_ttft_ms"]:<12}')
+                overhead_str = f'+{overhead:.1f}%'
+            else:
+                overhead_str = 'N/A'
+            print(f'{conc:<6} {pd_tpot:<10} {af_tpot:<10} {overhead_str:<10} {pd_thru:<12} {af_thru:<12} {pd_ttft:<10} {af_ttft:<10}')
 
     # Save results
     out_path = os.path.join(HERE, 'results.json')

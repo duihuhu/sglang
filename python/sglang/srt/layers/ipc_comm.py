@@ -972,6 +972,113 @@ class IpcTensorCommunicator:
 
         return result
 
+    # --- Async pipeline stream-ordered API ---
+
+    def send_on_stream(self, x: torch.Tensor, stream: torch.cuda.Stream) -> torch.cuda.Event:
+        """Stream-ordered send for async pipeline.
+
+        Enqueues data copy on the given stream, records a completion event,
+        then sets SHM flag after stream sync. Returns the event that fires
+        when the send buffer is populated and visible to the peer.
+
+        Unlike send_stream_ordered (which uses current stream), this allows
+        the caller to specify which stream to use, enabling multi-stream
+        pipeline overlap.
+        """
+        self._wait_ready()
+        x_cont = x.contiguous() if not x.is_contiguous() else x
+
+        cache_key = (x_cont.shape, x_cont.dtype)
+        if not hasattr(self, '_send_cache'):
+            self._send_cache = {}
+        cache = self._send_cache.get(cache_key)
+        if cache is None:
+            data_bytes = x_cont.numel() * x_cont.element_size()
+            total_bytes = self.HEADER_BYTES + data_bytes
+            if total_bytes > self._max_msg_size:
+                raise RuntimeError(
+                    f"send_on_stream: msg too large: {total_bytes} > {self._max_msg_size}"
+                )
+            meta_np = _encode_meta(x_cont)
+            meta_gpu = torch.from_numpy(meta_np.view(np.uint8)).to(
+                self._local_device
+            ).clone()
+            cache = (total_bytes, meta_gpu)
+            self._send_cache[cache_key] = cache
+        total_bytes, meta_gpu = cache
+
+        slot = self._send_slot
+        send_buf = self._send_buf[slot]
+        flag_off = self._send_flag_off(slot)
+        size_off = self._send_size_off(slot)
+
+        while self._read_u64(flag_off) != 0:
+            pass
+
+        with torch.cuda.stream(stream):
+            send_buf[:64].copy_(meta_gpu)
+            send_buf[64:total_bytes].copy_(x_cont.view(torch.uint8).flatten())
+
+        ev = torch.cuda.Event()
+        ev.record(stream)
+        ev.synchronize()
+
+        self._write_u64(size_off, total_bytes)
+        self._write_u64(flag_off, 1)
+        self._send_slot = (slot + 1) % self.RING_SIZE
+        return ev
+
+    def recv_poll_and_enqueue(
+        self, stream: torch.cuda.Stream
+    ) -> Tuple[torch.Tensor, torch.cuda.Event]:
+        """Non-blocking recv for async pipeline.
+
+        CPU polls SHM flag (fast spin, ~77us in ipc_event mode), then
+        enqueues P2P copy on the given stream. Returns (tensor, event) where
+        the event fires when data is ready for consumption on that stream.
+
+        The caller should use stream.wait_event(event) on the compute stream
+        before using the tensor, establishing a GPU-only dependency.
+        """
+        self._wait_ready()
+
+        with self._recv_lock:
+            slot = self._recv_slot
+            self._recv_slot = (slot + 1) % self.RING_SIZE
+
+        flag_off = self._recv_flag_off(slot)
+        size_off = self._recv_size_off(slot)
+
+        while self._read_u64(flag_off) != 1:
+            pass
+
+        total_bytes = self._read_u64(size_off)
+        recv_buf = self._recv_buf[slot]
+
+        if not hasattr(self, '_recv_cache'):
+            self._recv_cache = {}
+        cache = self._recv_cache.get(total_bytes)
+
+        with torch.cuda.stream(stream):
+            recv_buf[:total_bytes].copy_(self._peer_send_buf[slot][:total_bytes])
+
+        if cache is not None:
+            shape, dtype, data_offset = cache
+            result = recv_buf[data_offset:total_bytes].view(dtype).reshape(shape)
+        else:
+            ev_tmp = torch.cuda.Event()
+            ev_tmp.record(stream)
+            ev_tmp.synchronize()
+            header_np = recv_buf[:64].cpu().numpy().view(np.int64)
+            shape, dtype, _ = _decode_meta(header_np)
+            self._recv_cache[total_bytes] = (shape, dtype, 64)
+            result = recv_buf[64:total_bytes].view(dtype).reshape(shape)
+
+        ev = torch.cuda.Event()
+        ev.record(stream)
+        self._write_u64(flag_off, 0)
+        return result, ev
+
     def fence(self):
         """Wait for all pending nonblocking sends to complete.
 

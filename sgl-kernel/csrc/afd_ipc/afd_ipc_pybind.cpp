@@ -12,6 +12,7 @@
 #include <c10/cuda/CUDAStream.h>
 
 #include "afd_ipc.h"
+#include "afd_pipeline_driver.h"
 
 namespace py = pybind11;
 
@@ -149,6 +150,11 @@ public:
 
         // Return view into recv buffer — NO clone!
         // Safe because ring has 4 slots and AF pipeline consumes immediately.
+        // Cache shape/dtype for recv_tensor_gpu()
+        cached_recv_shape_ = shape;
+        cached_recv_dtype_ = dtype;
+        cached_recv_bytes_ = data_bytes;
+        meta_cached_recv_ = true;
         return torch::from_blob(data_ptr, shape, options);
     }
 
@@ -158,6 +164,57 @@ public:
     void reset_cache() {
         meta_cached_send_ = false;
         meta_cached_recv_ = false;
+    }
+
+    /**
+     * GPU-only send: no CPU blocking. Uses GPU signal kernel to notify peer.
+     * CPU only enqueues CUDA ops on the current stream and returns immediately.
+     */
+    void send_tensor_gpu(torch::Tensor x) {
+        TORCH_CHECK(x.is_cuda(), "Tensor must be on CUDA device");
+        auto x_cont = x.contiguous();
+
+        cudaStream_t stream = c10::cuda::getCurrentCUDAStream(
+            x_cont.device().index()).stream();
+
+        size_t data_bytes = x_cont.numel() * x_cont.element_size();
+
+        if (!meta_cached_send_ || data_bytes != cached_send_bytes_) {
+            TensorMeta meta = encode_tensor_meta(x_cont);
+            comm_->cache_meta(meta, data_bytes);
+            cached_send_meta_ = meta;
+            cached_send_bytes_ = data_bytes;
+            meta_cached_send_ = true;
+        }
+
+        comm_->send_gpu_only(x_cont.data_ptr(), data_bytes, stream);
+    }
+
+    /**
+     * GPU-only recv: no CPU blocking. Uses GPU wait kernel to poll device memory.
+     * CPU only enqueues wait_kernel + memcpy on the current stream.
+     * Returns a view into the recv buffer (stream-ordered, safe to use on same stream).
+     */
+    torch::Tensor recv_tensor_gpu() {
+        cudaStream_t stream = c10::cuda::getCurrentCUDAStream(
+            comm_->local_device()).stream();
+
+        size_t data_bytes;
+        void* data_ptr = comm_->recv_gpu_only(&data_bytes, stream);
+
+        if (!meta_cached_recv_) {
+            // First call: need to get shape from SHM (fallback)
+            // After first recv_tensor() call, shape is cached
+            throw std::runtime_error(
+                "recv_tensor_gpu: metadata not cached. "
+                "Call recv_tensor() first to establish shape cache.");
+        }
+
+        auto options = torch::TensorOptions()
+            .dtype(cached_recv_dtype_)
+            .device(torch::kCUDA, comm_->local_device());
+
+        return torch::from_blob(data_ptr, cached_recv_shape_, options);
     }
 
     std::string sync_mode() const {
@@ -171,6 +228,9 @@ public:
 
     int local_device() const { return comm_->local_device(); }
     int peer_device() const { return comm_->peer_device(); }
+
+    // Expose raw comm for PipelineDriver
+    AfdIpcComm* raw_comm() { return comm_.get(); }
 
 private:
     std::unique_ptr<AfdIpcComm> comm_;
@@ -207,6 +267,11 @@ PYBIND11_MODULE(afd_ipc_cpp, m) {
              "Send tensor to peer (cached hot path after first call)")
         .def("recv_tensor", &PyAfdIpcComm::recv_tensor,
              "Receive tensor from peer (cached hot path after first call)")
+        .def("send_tensor_gpu", &PyAfdIpcComm::send_tensor_gpu,
+             py::arg("x"),
+             "GPU-only send: no CPU blocking, uses GPU signal kernel")
+        .def("recv_tensor_gpu", &PyAfdIpcComm::recv_tensor_gpu,
+             "GPU-only recv: no CPU blocking, uses GPU wait kernel")
         .def("reset_cache", &PyAfdIpcComm::reset_cache,
              "Reset metadata cache (call on shape change)")
         .def("sync_mode", &PyAfdIpcComm::sync_mode,
@@ -219,6 +284,28 @@ PYBIND11_MODULE(afd_ipc_cpp, m) {
         .value("CPU_FLAG", SyncMode::CPU_FLAG)
         .value("IPC_EVENT", SyncMode::IPC_EVENT)
         .value("GPU_SIGNAL", SyncMode::GPU_SIGNAL);
+
+    // Pipeline Driver: batch send/recv for M micro-batches
+    py::class_<PipelineDriver>(m, "PipelineDriver")
+        .def(py::init([](PyAfdIpcComm& comm_wrapper, int num_mb, bool use_gpu_signal) {
+            // Access the raw AfdIpcComm* from the wrapper
+            // We need to expose it — add a getter
+            return std::make_unique<PipelineDriver>(
+                comm_wrapper.raw_comm(), num_mb, use_gpu_signal);
+        }), py::arg("comm"), py::arg("num_mb"), py::arg("use_gpu_signal") = true)
+        .def("send_recv_layer", [](PipelineDriver& self,
+                                    std::vector<int64_t> send_ptrs_int,
+                                    std::vector<size_t> send_sizes,
+                                    int64_t stream_int) {
+            std::vector<void*> send_ptrs;
+            for (auto p : send_ptrs_int) send_ptrs.push_back(reinterpret_cast<void*>(p));
+            cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_int);
+            auto recv_ptrs = self.send_recv_layer(send_ptrs, send_sizes, stream);
+            std::vector<int64_t> result;
+            for (auto p : recv_ptrs) result.push_back(reinterpret_cast<int64_t>(p));
+            return result;
+        }, py::arg("send_ptrs"), py::arg("send_sizes"), py::arg("stream"),
+           "Batch send M tensors + recv M tensors in one C++ call");
 }
 
 }  // namespace afd_ipc

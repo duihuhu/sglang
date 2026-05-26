@@ -25,6 +25,7 @@ setup(
                 os.path.join(CSRC, "afd_ipc.cpp"),
                 os.path.join(CSRC, "afd_ipc_kernels.cu"),
                 os.path.join(CSRC, "afd_ipc_pybind.cpp"),
+                os.path.join(CSRC, "afd_pipeline_driver.cpp"),
             ],
             include_dirs=[CSRC],
             extra_compile_args={

@@ -163,6 +163,24 @@ class CppIpcTensorCommunicator:
     recv_zero_sync = recv_tensor
     recv_gpu_wait = recv_tensor
 
+    def send_tensor_gpu_only(self, x: torch.Tensor):
+        """GPU-only send: no CPU blocking. Uses GPU signal kernel.
+
+        CPU only enqueues CUDA ops and returns immediately.
+        Requires gpu_signal mode or peer_signal_flags to be set up.
+        """
+        self._wait_ready()
+        self._comm.send_tensor_gpu(x)
+
+    def recv_tensor_gpu_only(self) -> torch.Tensor:
+        """GPU-only recv: no CPU blocking. Uses GPU wait kernel.
+
+        CPU only enqueues wait_kernel + memcpy and returns immediately.
+        Requires prior recv_tensor() call to cache shape metadata.
+        """
+        self._wait_ready()
+        return self._comm.recv_tensor_gpu()
+
     def reset_cache(self):
         """Reset metadata cache (call when tensor shape changes)."""
         self._comm.reset_cache()

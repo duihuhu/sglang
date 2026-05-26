@@ -1582,6 +1582,50 @@ def model_forward_afd(
             offset += n
         return merged_hidden, merged_residual
 
+    # ── Cross-layer async pipeline (--afd-async-pipeline) ──────────────────
+    _async_pipeline_enabled = (
+        m_stage > 1
+        and (
+            bool(getattr(get_global_server_args(), "afd_async_pipeline", False))
+            or os.environ.get("AFD_ASYNC_PIPELINE", "0") == "1"
+        )
+    )
+    if _async_pipeline_enabled:
+        from sglang.srt.layers.afd_async_pipeline import AsyncPipelineExecutor
+
+        executor = AsyncPipelineExecutor(
+            layers=layers,
+            m_stage=m_stage,
+            input_arrs=input_arrs,
+            perspective=get_afd_perspective(),
+        )
+        mb_results = executor.run()
+
+        _afd_sched_ts["forward_end"] = time.time()
+
+        if len(mb_results) == 1:
+            return mb_results[0][0], mb_results[0][1]
+
+        total_tokens = sum(hs.shape[0] for hs, _ in mb_results)
+        hidden_dim = mb_results[0][0].shape[1]
+        dtype = mb_results[0][0].dtype
+        device = mb_results[0][0].device
+
+        merged_hidden = torch.empty(total_tokens, hidden_dim, dtype=dtype, device=device)
+        need_residual = afd_is_attn() and mb_results[0][1] is not None
+        merged_residual = (
+            torch.empty(total_tokens, hidden_dim, dtype=dtype, device=device)
+            if need_residual else None
+        )
+        offset = 0
+        for hs, res in mb_results:
+            n = hs.shape[0]
+            merged_hidden[offset:offset + n] = hs
+            if need_residual and res is not None:
+                merged_residual[offset:offset + n] = res
+            offset += n
+        return merged_hidden, merged_residual
+
     # G6 optimization: use StageIO NamedTuple instead of dict
     stage_outputs: Dict[AFDForwardStage, deque] = {
         AFDForwardStage.AFD_FORWARD_STAGE_A: deque(),

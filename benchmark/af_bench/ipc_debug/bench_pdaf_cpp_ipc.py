@@ -123,7 +123,7 @@ def run_pdaf(comm_backend, label):
 
         if comm_backend == "ipc_cpp":
             env["AFD_IPC_PEER_DEVICE"] = str(peer_device) if peer_device is not None else "0"
-            env["AFD_IPC_SYNC_MODE"] = "cpu_flag"
+            env["AFD_IPC_SYNC_MODE"] = "ipc_event"
 
         cmd = [PYTHON, "-m", "sglang.launch_server",
             "--model-path", MODEL, "--tp", "1",
@@ -290,7 +290,7 @@ def main():
         (2048, 128),
     ]
 
-    backends = ["ipc_cpp", "ipc"]
+    backends = ["ipc_cpp"]
     results = {}
 
     for backend in backends:

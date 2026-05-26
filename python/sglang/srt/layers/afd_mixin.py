@@ -129,6 +129,59 @@ class AFDDecoderLayerMixin:
         """Default MLP call. Override for models with extra args."""
         return self.mlp(hidden_states, forward_batch)
 
+    # --- Pure compute stages (no IPC communication) for async pipeline ---
+
+    def forward_afd_A_compute(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Pure attention compute without IPC send/recv.
+
+        For DA (Attn perspective): input_layernorm + attention + post_attention_layernorm.
+        For DF (FFN perspective): no-op (FFN side doesn't compute attention).
+
+        Used by AsyncPipelineExecutor which handles communication externally
+        via CUDA stream events.
+        """
+        perspective = self.layer_communicator.perspective
+        if perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
+            return hidden_states, residual
+        # DA side: layernorm → attn → post_attn_layernorm
+        inner_lc = self.layer_communicator.layer_communicator
+        hidden_states, residual = inner_lc.prepare_attn(
+            hidden_states, residual, forward_batch
+        )
+        if hidden_states.shape[0] != 0:
+            hidden_states = self._run_attn(positions, hidden_states, forward_batch)
+        # Apply post_attention_layernorm (without AFDCommunicator's send)
+        hidden_states, residual = inner_lc.prepare_mlp(
+            hidden_states, residual, forward_batch
+        )
+        return hidden_states, residual
+
+    def forward_afd_F_compute(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Pure FFN compute without IPC send/recv.
+
+        For DF (FFN perspective): run MLP on received hidden_states.
+        For DA (Attn perspective): no-op (Attn side doesn't compute FFN).
+
+        Used by AsyncPipelineExecutor which handles communication externally.
+        """
+        perspective = self.layer_communicator.perspective
+        if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN:
+            return hidden_states, residual
+        # DF side: just run MLP
+        hidden_states = self._run_mlp(hidden_states, forward_batch)
+        return hidden_states, residual
+
     # --- Generic AFD forward stages ---
 
     def forward_afd_A(

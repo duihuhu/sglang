@@ -23,7 +23,7 @@ namespace afd_ipc {
 // Ring buffer configuration
 constexpr int RING_SIZE = 4;
 constexpr int HEADER_BYTES = 64;
-constexpr size_t MAX_MSG_SIZE = 32 * 1024 * 1024;  // 32 MB (enough for prefill: 2048×5120×bf16=20MB)
+constexpr size_t MAX_MSG_SIZE = 128 * 1024 * 1024;  // 128 MB (prefill batch: 8192×5120×bf16=80MB max)
 
 // SHM layout: per-slot flags + sizes + metadata for bidirectional communication
 // Layout (per direction):
@@ -145,6 +145,17 @@ public:
 
     // Receive with cached metadata (skip meta decoding after first call)
     void* recv_cached(size_t* out_data_bytes, cudaStream_t stream);
+
+    // GPU-only send: uses GPU signal kernel instead of CPU event record.
+    // CPU does NOT block — only enqueues GPU ops on the stream.
+    // Requires peer_signal_flags_ to be set up (GPU_SIGNAL or IPC_EVENT mode).
+    void send_gpu_only(const void* data_ptr, size_t data_bytes,
+                       cudaStream_t stream);
+
+    // GPU-only recv: uses GPU wait kernel instead of CPU SHM poll.
+    // CPU does NOT block — enqueues wait_kernel + memcpy on the stream.
+    // The wait_kernel spins on local_signal_flags_ (written by sender's signal_kernel).
+    void* recv_gpu_only(size_t* out_data_bytes, cudaStream_t stream);
 
     // Cache metadata for subsequent send_cached/recv_cached calls
     void cache_meta(const TensorMeta& meta, size_t total_bytes);
