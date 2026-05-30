@@ -646,6 +646,11 @@ class ServerArgs:
     afd_dvfs_enabled: bool = False
     afd_ttft_slo_ms: float = 5000.0
     afd_tpot_slo_us: float = 50000.0
+    afd_dvfs_feedback: bool = False  # Tier2 feedback: force step-up on repeated SLO urgent
+    afd_dvfs_feedback_threshold: int = 3  # N consecutive urgent-no-change before step-up
+    afd_dvfs_feedback_hold: int = 30  # hold forced freq for N iterations
+    afd_dvfs_online_calibration: bool = False  # Tier2 online calibration: correct predictor bias with observed TPOT
+    afd_dvfs_calibration_ema: float = 0.2  # EMA weight for calibration factor update
 
     # Tier 1: Joint ILP resource planning + dynamic monitoring
     enable_tier1_pa: bool = False
@@ -663,6 +668,10 @@ class ServerArgs:
     tier1_decode_data_path: str = "benchmark/test_motivation/hucc/paper/decode_data_v1.txt"
     tier1_stats_path: Optional[str] = None
     """Path to a shared JSON file for DA→PA decode timing stats (cross-process Tier1 TPOT monitoring)."""
+    tier1_disable_reload: bool = False
+    """If set, Tier1 re-planning never triggers a full model reload (TP/k change).
+    The frequency portion of the new solution is still applied (freq-only transition),
+    so Tier1 acts as a workload-aware *re-frequency* controller without restarting servers."""
 
     enable_torch_compile: bool = False
     disable_piecewise_cuda_graph: bool = False
@@ -5553,6 +5562,38 @@ class ServerArgs:
             default=ServerArgs.afd_tpot_slo_us,
             help="TPOT SLO in microseconds for Decode DVFS. Default: 50000.",
         )
+        parser.add_argument(
+            "--afd-dvfs-feedback",
+            action="store_true",
+            default=ServerArgs.afd_dvfs_feedback,
+            help="Enable Tier2 DVFS feedback: force step-up freq when predictor "
+            "is stuck at low freq despite repeated SLO violations.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-feedback-threshold",
+            type=int,
+            default=ServerArgs.afd_dvfs_feedback_threshold,
+            help="Number of consecutive urgent-no-change before forcing step-up. Default: 3.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-feedback-hold",
+            type=int,
+            default=ServerArgs.afd_dvfs_feedback_hold,
+            help="Hold forced freq for N iterations before allowing re-eval. Default: 30.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-online-calibration",
+            action="store_true",
+            default=ServerArgs.afd_dvfs_online_calibration,
+            help="Enable Tier2 online calibration: correct predictor bias using "
+            "observed TPOT vs predicted TPOT ratio (EMA-smoothed).",
+        )
+        parser.add_argument(
+            "--afd-dvfs-calibration-ema",
+            type=float,
+            default=ServerArgs.afd_dvfs_calibration_ema,
+            help="EMA weight for online calibration factor update. Default: 0.2.",
+        )
 
         parser.add_argument(
             "--enable-tier1-pa",
@@ -5650,6 +5691,15 @@ class ServerArgs:
             default=ServerArgs.tier1_stats_path,
             help="Path to a shared JSON file for DA→PA decode timing stats. "
             "Set by af_launcher.py for cross-process Tier1 TPOT monitoring.",
+        )
+        parser.add_argument(
+            "--tier1-disable-reload",
+            action="store_true",
+            default=ServerArgs.tier1_disable_reload,
+            help="Disable Tier1 full model reload on TP/k changes. Tier1 still "
+            "re-plans and applies the new frequency (freq-only transition), but "
+            "never restarts servers / reloads weights. Use to isolate Tier1's "
+            "re-frequency behaviour from its resource re-planning.",
         )
 
         parser.add_argument(

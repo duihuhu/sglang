@@ -1,0 +1,27 @@
+# energy_bench — keep code & docs in git, ignore generated data/figures/logs.
+#
+# Rationale: benchmark runs produce large amounts of result JSON, NVML/server
+# logs, decision JSONL, generated workloads and rendered figures. None of it
+# belongs in git. Source code (scripts/**/*.py) and writeups (versions/*.md)
+# are tracked normally.
+
+# ── Result data (per-run JSON, summaries, sweep outputs) ──
+scripts/bench/results/
+results/
+
+# ── Logs: bench sweep logs + per-process server / DVFS decision logs ──
+scripts/bench/logs/
+*.log
+*.jsonl
+
+# ── Rendered figures ──
+*.png
+
+# ── Generated fixed/variable-length workloads ──
+workloads/
+
+# ── Profiling / misc run artifacts ──
+profiling/
+energy_bench_logs/
+__pycache__/
+*.pyc

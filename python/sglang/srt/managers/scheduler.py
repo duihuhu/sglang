@@ -1749,41 +1749,306 @@ class Scheduler(
             logger.error("Tier 1 re-plan failed: %s", e)
 
     def _apply_tier1_transition(self, old: "Tier1Solution", new: "Tier1Solution"):
-        """Apply Tier 1 configuration transition based on what changed.
+        """Apply Tier 1 configuration transition.
 
-        Three scenarios per design doc Section 1.5:
-          1. Frequency-only change: apply immediately (~6ms)
-          2. TP change: requires drain-then-switch (stop new requests,
-             wait for active to finish, restart with new TP)
-          3. k_P/k_D change: P/D rebalance (shrink then expand)
-
-        Currently implements scenario 1 (freq change) and updates Tier 2
-        baseline. Scenarios 2/3 log a warning — full drain-then-switch
-        requires orchestrator-level coordination beyond the scheduler.
+        Two modes:
+          - Frequency-only: if TP/k unchanged, apply new frequencies immediately
+          - Full reload: if TP/k changed, spawn reload_orchestrator to kill all
+            processes and restart with new TP configuration
         """
-        freq_only = (
+        from sglang.srt.layers.afd import afd_is_attn
+        from sglang.srt.disaggregation.utils import DisaggregationMode
+        import json
+
+        tp_or_k_changed = not (
             old.tp_pa == new.tp_pa and old.tp_pf == new.tp_pf
             and old.tp_da == new.tp_da and old.tp_df == new.tp_df
             and old.k_p == new.k_p and old.k_d == new.k_d
         )
 
-        if freq_only:
-            logger.info("[Tier1] Transition: frequency-only change, applying immediately")
-            self._apply_freq(new.f_da, new.f_df)
-            if hasattr(self, "_af_dvfs_ctrl") and self._af_dvfs_ctrl is not None:
-                self._af_dvfs_ctrl.update_baseline(new.f_da, new.f_df)
+        if tp_or_k_changed:
+            if getattr(self.server_args, "tier1_disable_reload", False):
+                logger.info(
+                    "[Tier1] TP/k change detected "
+                    "(tp_pa %d->%d, tp_pf %d->%d, tp_da %d->%d, tp_df %d->%d, "
+                    "k_p %d->%d, k_d %d->%d) but --tier1-disable-reload is set: "
+                    "skipping full reload, applying frequency only.",
+                    old.tp_pa, new.tp_pa, old.tp_pf, new.tp_pf,
+                    old.tp_da, new.tp_da, old.tp_df, new.tp_df,
+                    old.k_p, new.k_p, old.k_d, new.k_d,
+                )
+                # Fall through to the frequency-only transition below.
+            else:
+                logger.info(
+                    "[Tier1] TP/k change detected "
+                    "(tp_pa %d->%d, tp_pf %d->%d, tp_da %d->%d, tp_df %d->%d, "
+                    "k_p %d->%d, k_d %d->%d). Triggering full reload.",
+                    old.tp_pa, new.tp_pa, old.tp_pf, new.tp_pf,
+                    old.tp_da, new.tp_da, old.tp_df, new.tp_df,
+                    old.k_p, new.k_p, old.k_d, new.k_d,
+                )
+                self._trigger_full_reload(new)
+                return
+
+        # Frequency-only transition
+        disagg_mode = getattr(self, "disaggregation_mode", None)
+        if disagg_mode == DisaggregationMode.PREFILL:
+            local_f_a, local_f_f = new.f_pa, new.f_pf
         else:
-            logger.warning(
-                "[Tier1] Transition: TP or k change detected "
-                "(tp_pa %d→%d, tp_da %d→%d, k_p %d→%d, k_d %d→%d). "
-                "Drain-then-switch required — upgrading to max freq as "
-                "interim measure. Full transition requires orchestrator.",
-                old.tp_pa, new.tp_pa, old.tp_da, new.tp_da,
-                old.k_p, new.k_p, old.k_d, new.k_d,
-            )
-            self._apply_freq(1410, 1410)
-            if hasattr(self, "_af_dvfs_ctrl") and self._af_dvfs_ctrl is not None:
-                self._af_dvfs_ctrl.update_baseline(1410, 1410)
+            local_f_a, local_f_f = new.f_da, new.f_df
+
+        logger.info(
+            "[Tier1] Applying freq reload: PA=%d PF=%d DA=%d DF=%d "
+            "(local f_a=%d f_f=%d)",
+            new.f_pa, new.f_pf, new.f_da, new.f_df,
+            local_f_a, local_f_f,
+        )
+
+        self._apply_freq(local_f_a, local_f_f)
+        if hasattr(self, "_af_dvfs_ctrl") and self._af_dvfs_ctrl is not None:
+            self._af_dvfs_ctrl.update_baseline(local_f_a, local_f_f)
+
+        self._write_tier1_freq_config(new)
+
+    def _trigger_full_reload(self, new: "Tier1Solution"):
+        """Spawn reload_orchestrator to kill all processes and restart with new TP.
+
+        The orchestrator runs as an independent process (start_new_session=True)
+        because it needs to kill this PA process as well.
+        """
+        import json
+        import subprocess
+        import sys
+
+        server_args = self.server_args
+        stats_path = getattr(server_args, "tier1_stats_path", None) or "/tmp/tier1_shared"
+        signal_dir = os.path.dirname(stats_path) if stats_path else "/tmp/tier1_shared"
+        os.makedirs(signal_dir, exist_ok=True)
+        signal_path = os.path.join(signal_dir, "tier1_reload_signal.json")
+
+        # Build reload config from server_args
+        reload_config = self._build_reload_config(new, signal_path)
+
+        # Write config to file
+        config_path = os.path.join(signal_dir, "tier1_reload_config.json")
+        with open(config_path, "w") as f:
+            json.dump(reload_config, f, indent=2)
+
+        logger.info("[Tier1] Spawning reload_orchestrator: %s", config_path)
+
+        # Spawn orchestrator as independent process
+        subprocess.Popen(
+            [sys.executable, "-m", "sglang.srt.energy.reload_orchestrator",
+             "--config", config_path],
+            start_new_session=True,
+            stdout=open(os.path.join(signal_dir, "reload_orchestrator.log"), "w"),
+            stderr=subprocess.STDOUT,
+        )
+
+    def _build_reload_config(self, solution: "Tier1Solution", signal_path: str) -> dict:
+        """Build the JSON config for reload_orchestrator from server_args."""
+        import os
+        sa = self.server_args
+
+        # Extract GPU indices from environment
+        gpu_pa = int(os.environ.get("AFD_NVML_DEVICE_INDEX", 7))
+        # Infer other GPUs from the visible devices pattern
+        cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        vis_gpus = [int(x) for x in cuda_vis.split(",") if x.strip()] if cuda_vis else []
+
+        # Get ports from server_args or environment
+        port = sa.port
+        # Infer the 4-process port layout from PA port
+        pa_port = port
+        pf_port = pa_port + 1
+        da_port = pa_port + 10
+        df_port = da_port + 1
+        router_port = pa_port - 10
+
+        # Dynamic GPU allocation based on solution TP and available GPUs
+        total_gpu_count = getattr(sa, "tier1_gpu_count", 8)
+        all_gpus = list(range(total_gpu_count))
+
+        # Allocate GPUs: Decode first (lower indices), then Prefill (higher indices)
+        tp_df = solution.tp_df
+        tp_da = solution.tp_da
+        tp_pf = solution.tp_pf
+        tp_pa = solution.tp_pa
+        n_decode = tp_df + tp_da
+        n_prefill = tp_pf + tp_pa
+
+        decode_gpus = all_gpus[:n_decode]
+        prefill_gpus = all_gpus[n_decode:n_decode + n_prefill]
+        all_used_gpus = decode_gpus + prefill_gpus
+
+        df_gpus = decode_gpus[:tp_df]
+        da_gpus = decode_gpus[tp_df:]
+        pf_gpus = prefill_gpus[:tp_pf]
+        pa_gpus = prefill_gpus[tp_pf:]
+
+        d_vis = ",".join(str(g) for g in decode_gpus)
+        p_vis = ",".join(str(g) for g in prefill_gpus)
+
+        ucx_p = int(os.environ.get("AFD_UCX_BASE_PORT", 26200))
+        ucx_d = ucx_p + 100
+        sched_p = int(os.environ.get("AFD_SCHED_PORT", 66400))
+        sched_d = sched_p + 100
+
+        bootstrap_port = getattr(sa, "disaggregation_bootstrap_port", 29999)
+        ib_device = getattr(sa, "disaggregation_ib_device", "mlx5_4")
+        if isinstance(ib_device, list):
+            ib_device = ib_device[0] if ib_device else "mlx5_4"
+
+        # Build extra args
+        extra_args = ["--skip-server-warmup",
+                      "--disable-cuda-graph", "--disable-piecewise-cuda-graph",
+                      "--afd-micro-batch", str(getattr(sa, "afd_micro_batch", 1)),
+                      "--afd-disagg-interleave-poll",
+                      "--disable-radix-cache",
+                      "--num-reserved-decode-tokens", "32"]
+
+        dvfs_args = []
+        if getattr(sa, "afd_dvfs_enabled", False):
+            dvfs_args = [
+                "--afd-dvfs-enabled",
+                "--afd-energy-model-dir", sa.afd_energy_model_dir,
+                "--afd-ttft-slo-ms", str(getattr(sa, "afd_ttft_slo_ms", 5000)),
+                "--afd-tpot-slo-us", str(getattr(sa, "afd_tpot_slo_us", 300000)),
+            ]
+
+        tier1_args = []
+        if getattr(sa, "enable_tier1_pa", False):
+            tier1_args = [
+                "--enable-tier1-pa",
+                "--tier1-monitor-window-s", str(sa.tier1_monitor_window_s),
+                "--tier1-gpu-count", str(sa.tier1_gpu_count),
+            ]
+            if sa.tier1_stats_path:
+                tier1_args += ["--tier1-stats-path", sa.tier1_stats_path]
+
+        modules = [
+            {"name": "DF", "perspective": "ffn", "disagg_mode": "decode",
+             "port": df_port, "visible_gpus": d_vis, "base_gpu_id": 0,
+             "peer_device": tp_df,
+             "ucx_base_port": ucx_d, "sched_port": sched_d,
+             "nvml_device_index": df_gpus[0], "is_pa": False},
+            {"name": "DA", "perspective": "attn", "disagg_mode": "decode",
+             "port": da_port, "visible_gpus": d_vis, "base_gpu_id": tp_df,
+             "peer_device": 0,
+             "ucx_base_port": ucx_d, "sched_port": sched_d,
+             "nvml_device_index": da_gpus[0], "ffn_host": "127.0.0.1", "is_pa": False},
+            {"name": "PF", "perspective": "ffn", "disagg_mode": "prefill",
+             "port": pf_port, "visible_gpus": p_vis, "base_gpu_id": 0,
+             "peer_device": tp_pf,
+             "ucx_base_port": ucx_p, "sched_port": sched_p,
+             "nvml_device_index": pf_gpus[0], "is_pa": False},
+            {"name": "PA", "perspective": "attn", "disagg_mode": "prefill",
+             "port": pa_port, "visible_gpus": p_vis, "base_gpu_id": tp_pf,
+             "peer_device": 0,
+             "ucx_base_port": ucx_p, "sched_port": sched_p,
+             "nvml_device_index": pa_gpus[0], "ffn_host": "127.0.0.1", "is_pa": True},
+        ]
+
+        return {
+            "signal_path": signal_path,
+            "solution": {
+                "tp_pa": solution.tp_pa, "tp_pf": solution.tp_pf,
+                "tp_da": solution.tp_da, "tp_df": solution.tp_df,
+                "f_pa": solution.f_pa, "f_pf": solution.f_pf,
+                "f_da": solution.f_da, "f_df": solution.f_df,
+                "k_p": solution.k_p, "k_d": solution.k_d,
+            },
+            "server_config": {
+                "model_path": sa.model_path,
+                "gpu_indices": all_used_gpus,
+                "all_ports": [router_port, pa_port, pf_port, da_port, df_port],
+                "router_port": router_port,
+                "bootstrap_port": bootstrap_port,
+                "ib_device": ib_device,
+                "mem_fraction": getattr(sa, "mem_fraction_static", 0.85),
+                "extra_args": extra_args,
+                "dvfs_args": dvfs_args,
+                "tier1_args": tier1_args,
+                "log_dir": os.path.dirname(signal_path),
+                "modules": modules,
+                "router": {
+                    "enabled": True,
+                    "prefill_port": pa_port,
+                    "decode_port": da_port,
+                },
+            },
+        }
+
+    def _write_tier1_freq_config(self, solution: "Tier1Solution"):
+        """Write Tier 1 frequency config to shared file for cross-process sync."""
+        import json
+        freq_path = self._get_tier1_freq_path()
+        if not freq_path:
+            return
+        try:
+            config = {
+                "f_pa": solution.f_pa,
+                "f_pf": solution.f_pf,
+                "f_da": solution.f_da,
+                "f_df": solution.f_df,
+                "timestamp": time.time(),
+            }
+            with open(freq_path, "w") as f:
+                json.dump(config, f)
+            logger.info("[Tier1] Wrote freq config to %s", freq_path)
+        except Exception as e:
+            logger.warning("[Tier1] Failed to write freq config: %s", e)
+
+    def _poll_tier1_freq_config(self):
+        """Check shared Tier 1 freq config file and apply if updated.
+
+        Called by non-PA processes (PF/DA/DF) in _afd_dvfs_before_batch
+        to pick up frequency changes from Tier 1 re-planning.
+        """
+        import json
+        from sglang.srt.disaggregation.utils import DisaggregationMode
+
+        freq_path = self._get_tier1_freq_path()
+        if not freq_path:
+            return
+        try:
+            import os
+            mtime = os.path.getmtime(freq_path)
+            last = getattr(self, "_tier1_freq_mtime", 0.0)
+            if mtime <= last:
+                return
+            self._tier1_freq_mtime = mtime
+
+            with open(freq_path) as f:
+                config = json.load(f)
+
+            disagg_mode = getattr(self, "disaggregation_mode", None)
+            if disagg_mode == DisaggregationMode.PREFILL:
+                new_f_a, new_f_f = config["f_pa"], config["f_pf"]
+            else:
+                new_f_a, new_f_f = config["f_da"], config["f_df"]
+
+            if new_f_a != self._cur_f_a or new_f_f != self._cur_f_f:
+                logger.info(
+                    "[Tier1] Applying freq from shared config: "
+                    "f_a=%d→%d f_f=%d→%d",
+                    self._cur_f_a, new_f_a, self._cur_f_f, new_f_f,
+                )
+                self._apply_freq(new_f_a, new_f_f)
+                if hasattr(self, "_af_dvfs_ctrl") and self._af_dvfs_ctrl is not None:
+                    self._af_dvfs_ctrl.update_baseline(new_f_a, new_f_f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        except Exception as e:
+            logger.debug("[Tier1] Poll freq config error: %s", e)
+
+    def _get_tier1_freq_path(self) -> str:
+        """Get the shared Tier 1 frequency config file path."""
+        stats_path = getattr(self.server_args, "tier1_stats_path", None)
+        if not stats_path:
+            return ""
+        import os
+        return os.path.join(os.path.dirname(stats_path), "tier1_freq_config.json")
 
     def _afd_get_next_batch(self, disagg_mode):
         """Select the correct batch scheduling function based on disagg mode.
@@ -1817,6 +2082,11 @@ class Scheduler(
                 num_layers=self.model_config.num_hidden_layers,
                 tp_a=tp_a,
                 tp_f=tp_f,
+                feedback_enabled=getattr(self.server_args, "afd_dvfs_feedback", False),
+                feedback_threshold=getattr(self.server_args, "afd_dvfs_feedback_threshold", 3),
+                feedback_hold=getattr(self.server_args, "afd_dvfs_feedback_hold", 30),
+                online_calibration=getattr(self.server_args, "afd_dvfs_online_calibration", False),
+                calibration_ema=getattr(self.server_args, "afd_dvfs_calibration_ema", 0.2),
             )
             logger.info("AFD DVFS controller initialized")
         except Exception as e:
@@ -1839,6 +2109,29 @@ class Scheduler(
             logger.warning("DVFS HW unavailable (libdvfs_ctrl.so missing?): %s. "
                            "Frequency decisions will be logged but not applied.", e)
             self._dvfs_hw = None
+
+        # Optional: structured DVFS decision log (JSONL) for accuracy analysis.
+        # Each process writes its own file (path templated with NVML index) so
+        # there is no cross-process write contention.
+        self._dvfs_decision_log = None
+        log_tmpl = os.environ.get("AFD_DVFS_DECISION_LOG")
+        if log_tmpl:
+            try:
+                from sglang.srt.layers.afd_type import AFDPerspective
+                nvml_idx = int(os.environ.get("AFD_NVML_DEVICE_INDEX", -1))
+                persp = ("attn"
+                         if self.server_args.afd_perspective
+                         == AFDPerspective.AFD_PERSPECTIVE_ATTN
+                         else "ffn")
+                disagg = getattr(self.server_args, "disaggregation_mode", "") or "null"
+                disagg = str(disagg).split(".")[-1].lower()
+                log_path = log_tmpl.format(persp=persp, disagg=disagg, gpu=nvml_idx)
+                os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+                self._dvfs_decision_log = open(log_path, "w", buffering=1)
+                logger.info("DVFS decision log → %s", log_path)
+            except Exception as e:
+                logger.warning("Failed to open DVFS decision log: %s", e)
+                self._dvfs_decision_log = None
 
     def _init_afd_tier1(self, server_args):
         """Initialize Tier 1 dynamic monitoring on the PA scheduler.
@@ -1907,35 +2200,24 @@ class Scheduler(
                     sol.gpu_used,
                 )
             else:
-                # No pre-computed solution — run solver now
+                # No pre-computed solution — set initial solution to reflect
+                # the ACTUAL current config (tp=1, k=1), not the solver's ideal.
+                # The solver will be called on re-plan and may output a different
+                # TP, triggering a full reload at that point.
+                from sglang.srt.energy.tier1_solver import Tier1Solution
                 self._tier1_solver = self._make_tier1_solver(server_args)
-                wl, slo = self._make_tier1_workload_slo(server_args)
-                self._tier1_solution = self._tier1_solver.solve(
-                    G=server_args.tier1_gpu_count,
-                    workload=wl,
-                    slo=slo,
+                self._tier1_solution = Tier1Solution(
+                    k_p=1, k_d=1,
+                    tp_pa=server_args.tp_size, tp_pf=server_args.tp_size,
+                    tp_da=server_args.tp_size, tp_df=server_args.tp_size,
+                    f_pa=1410, f_pf=1410, f_da=1410, f_df=1410,
+                    feasible=True,
                 )
-                if self._tier1_solution.feasible:
-                    sol = self._tier1_solution
-                    logger.info(
-                        "[Tier1] Init solution: "
-                        "PA(tp=%d,f=%d) PF(tp=%d,f=%d) "
-                        "DA(tp=%d,f=%d) DF(tp=%d,f=%d) "
-                        "k_P=%d k_D=%d E/layer=%.2fmJ GPU=%d",
-                        sol.tp_pa, sol.f_pa, sol.tp_pf, sol.f_pf,
-                        sol.tp_da, sol.f_da, sol.tp_df, sol.f_df,
-                        sol.k_p, sol.k_d, sol.total_energy_mj_per_layer,
-                        sol.gpu_used,
-                    )
-                else:
-                    logger.warning(
-                        "[Tier1] Init: INFEASIBLE — using warm_start fallback"
-                    )
-                    self._tier1_solution = self._tier1_solver.warm_start(
-                        G=server_args.tier1_gpu_count,
-                        workload=wl,
-                        slo=slo,
-                    )
+                logger.info(
+                    "[Tier1] Init: using actual config as baseline "
+                    "(tp=%d, k_p=1, k_d=1). Solver will run on first re-plan.",
+                    server_args.tp_size,
+                )
 
         except Exception as e:
             logger.warning("Failed to init Tier 1: %s", e)
@@ -2037,8 +2319,24 @@ class Scheduler(
         self._cur_f_a = f_a
         self._cur_f_f = f_f
 
+    def _log_dvfs_decision(self, record: dict):
+        """Append a DVFS decision record (JSONL) if decision logging is enabled."""
+        log = getattr(self, "_dvfs_decision_log", None)
+        if log is None:
+            return
+        import json
+        try:
+            record["t"] = round(time.time(), 3)
+            log.write(json.dumps(record) + "\n")
+        except Exception:
+            pass
+
     def _afd_dvfs_before_batch(self, batch):
         """Select and apply frequency before running a batch."""
+        # Poll Tier 1 freq config (for non-PA processes)
+        if not getattr(self.server_args, "enable_tier1_pa", False):
+            self._poll_tier1_freq_config()
+
         if self._af_dvfs_ctrl is None:
             return
         from sglang.srt.layers.afd import get_afd_micro_batch
@@ -2057,6 +2355,15 @@ class Scheduler(
             )
             if decision.f_a != self._cur_f_a or decision.f_f != self._cur_f_f:
                 self._apply_freq(decision.f_a, decision.f_f)
+            if self._dvfs_decision_log is not None:
+                self._log_dvfs_decision({
+                    "phase": "prefill", "reeval": "per_request",
+                    "bs": batch.batch_size(), "il": max_il,
+                    "slack_us": round(slack_us, 1),
+                    "f_a": decision.f_a, "f_f": decision.f_f,
+                    "pred_lat_us": round(decision.latency_us, 1),
+                    "pred_energy_mj": round(decision.energy_mj, 1),
+                })
 
         elif batch.forward_mode.is_decode():
             self._af_dvfs_ctrl.tick_decode_iteration()
@@ -2080,11 +2387,50 @@ class Scheduler(
                     (r.seqlen - len(r.origin_input_ids)) for r in batch.reqs
                 ) / max(len(batch.reqs), 1))
                 repr_ol = max(repr_ol, 1)
+                # Predicted iteration latency at the CURRENTLY running freq,
+                # for the current workload — compared against the observed
+                # t_iter_us this gives a direct model-accuracy signal.
+                pred_cur_iter_us = 0.0
+                try:
+                    if t_iter_us > 0:
+                        pred_cur_iter_us = self._af_dvfs_ctrl._iteration_latency(
+                            "decode", self._cur_f_a, self._cur_f_f,
+                            batch.batch_size(), repr_il, repr_ol, M,
+                        )
+                except Exception:
+                    pred_cur_iter_us = 0.0
                 decision = self._af_dvfs_ctrl.select_freq_decode(
                     bs=batch.batch_size(), il=repr_il, ol=repr_ol,
                     slo_tpot_us=self.server_args.afd_tpot_slo_us, M=M,
                     reeval_reason=reeval_reason,
                 )
+                # Online calibration: feed observed vs predicted TPOT
+                if (self._af_dvfs_ctrl._calibration_enabled
+                        and t_iter_us > 0 and decision.latency_us > 0):
+                    self._af_dvfs_ctrl.update_calibration(
+                        observed_tpot_us=t_iter_us,
+                        predicted_tpot_us=decision.latency_us,
+                    )
+                if self._dvfs_decision_log is not None:
+                    _reeval_names = {1: "window_expired", 2: "bs_change", 3: "slo_urgent"}
+                    err = None
+                    if pred_cur_iter_us > 0 and t_iter_us > 0:
+                        err = round((pred_cur_iter_us - t_iter_us) / t_iter_us * 100, 1)
+                    self._log_dvfs_decision({
+                        "phase": "decode",
+                        "reeval": _reeval_names.get(reeval_reason, str(reeval_reason)),
+                        "bs": batch.batch_size(), "il": repr_il, "ol": repr_ol,
+                        "slo_tpot_us": self.server_args.afd_tpot_slo_us,
+                        "cur_f_a": self._cur_f_a, "cur_f_f": self._cur_f_f,
+                        "sel_f_a": decision.f_a, "sel_f_f": decision.f_f,
+                        "switched": decision.switched,
+                        "obs_iter_us": round(t_iter_us, 1),
+                        "pred_iter_cur_us": round(pred_cur_iter_us, 1),
+                        "pred_iter_err_pct": err,
+                        "pred_sel_lat_us": round(decision.latency_us, 1),
+                        "pred_sel_energy_mj": round(decision.energy_mj, 1),
+                        "calib": round(self._af_dvfs_ctrl.calibration_factor, 3),
+                    })
                 if decision.switched:
                     self._apply_freq(decision.f_a, decision.f_f)
 

@@ -46,8 +46,14 @@ class DecodeWindowState:
     last_bs: int = 0
     window_size: int = 60
     last_decision_time: float = 0.0
+    # Feedback: consecutive slo_urgent triggers without freq change
+    consec_urgent_no_change: int = 0
+    # Hold: after forced step-up, hold freq for this many iterations
+    hold_iters_remaining: int = 0
 
 SLO_URGENCY_RATIO = 0.9
+URGENT_FORCE_STEP_THRESHOLD = 3  # force step up after N consecutive urgent-no-change
+URGENT_HOLD_ITERS = 30  # hold forced freq for N iterations before allowing re-eval
 
 REEVAL_NONE = 0
 REEVAL_WINDOW_EXPIRED = 1
@@ -74,15 +80,22 @@ class AFDVFSController:
         tp_a: int = 1,
         tp_f: Optional[int] = None,
         t_comm_us: float = 0.0,
+        t_drain_us: float = 18000.0,  # pipeline drain overhead per iteration (us)
         freqs: Optional[list[int]] = None,
         baseline_f_a: Optional[int] = None,
         baseline_f_f: Optional[int] = None,
+        feedback_enabled: bool = False,
+        feedback_threshold: int = 3,
+        feedback_hold: int = 30,
+        online_calibration: bool = False,
+        calibration_ema: float = 0.2,
     ):
         self.predictor = predictor
         self.num_layers = num_layers
         self.tp_a = tp_a
         self.tp_f = tp_f if tp_f is not None else tp_a
         self.t_comm_us = t_comm_us
+        self.t_drain_us = t_drain_us
         self.freqs = freqs or VALID_FREQS
         self._baseline_f_a = baseline_f_a or F_MAX
         self._baseline_f_f = baseline_f_f or F_MAX
@@ -93,6 +106,17 @@ class AFDVFSController:
         self._stats_switch_up = 0
         self._stats_switch_down = 0
         self._stats_fallback = 0
+
+        # Tier2 feedback: force step-up on repeated SLO urgent
+        self._feedback_enabled = feedback_enabled
+        self._feedback_threshold = feedback_threshold
+        self._feedback_hold = feedback_hold
+
+        # Tier2 online calibration: correct predictor bias
+        self._calibration_enabled = online_calibration
+        self._calibration_ema = calibration_ema
+        self._calibration_factor = 1.0  # multiplier on predicted latency
+
         self._precompute_freq_pairs()
 
     def _precompute_freq_pairs(self):
@@ -100,6 +124,40 @@ class AFDVFSController:
         self._freq_pairs = [
             (fa, ff) for fa in self.freqs for ff in self.freqs
         ]
+
+    def _next_freq_up(self, current_freq: int) -> int:
+        """Return the next higher frequency, or F_MAX if already at max."""
+        for f in self.freqs:
+            if f > current_freq:
+                return f
+        return F_MAX
+
+    def update_calibration(self, observed_tpot_us: float, predicted_tpot_us: float):
+        """Update online calibration factor using observed vs predicted TPOT.
+
+        Called by the scheduler after each decode iteration with the actual
+        measured TPOT and the predictor's estimate for the same config.
+
+        Args:
+            observed_tpot_us: Actual measured TPOT (microseconds).
+            predicted_tpot_us: Predictor's estimate for the same (bs, il, freq).
+        """
+        if not self._calibration_enabled:
+            return
+        if predicted_tpot_us <= 0 or observed_tpot_us <= 0:
+            return
+
+        ratio = observed_tpot_us / predicted_tpot_us
+        # Clamp ratio to avoid extreme corrections
+        ratio = max(0.5, min(ratio, 3.0))
+
+        alpha = self._calibration_ema
+        self._calibration_factor = (1.0 - alpha) * self._calibration_factor + alpha * ratio
+
+    @property
+    def calibration_factor(self) -> float:
+        """Current calibration factor (1.0 = no correction)."""
+        return self._calibration_factor
 
     def _layer_latency(self, phase: str, f_a: int, f_f: int,
                        bs: int, il: int, ol: Optional[int], M: int) -> float:
@@ -109,6 +167,19 @@ class AFDVFSController:
         if M > 1:
             return max(lat_a, lat_f) + self.t_comm_us / M
         return lat_a + lat_f + self.t_comm_us
+
+    def _iteration_latency(self, phase: str, f_a: int, f_f: int,
+                           bs: int, il: int, ol: Optional[int], M: int) -> float:
+        """Compute full iteration latency = pipeline + drain overhead.
+
+        Model:
+          iteration_time = layer_latency * num_layers + t_drain_us
+        Where:
+          - layer_latency: per-layer compute (pipeline overlap for M>1)
+          - t_drain_us: IPC sync + pipeline drain (fixed per-iteration overhead)
+        """
+        t_layer = self._layer_latency(phase, f_a, f_f, bs, il, ol, M)
+        return t_layer * self.num_layers + self.t_drain_us
 
     def _layer_energy(self, phase: str, f_a: int, f_f: int,
                       bs: int, il: int, ol: Optional[int]) -> float:
@@ -222,6 +293,18 @@ class AFDVFSController:
         """
         st = self._decode_state
 
+        # If in hold mode after forced step-up, keep current freq
+        # but count urgent triggers — if still urgent after hold, step up again
+        if st.hold_iters_remaining > 0 and reeval_reason == REEVAL_SLO_URGENT:
+            st.consec_urgent_no_change += 1
+            return DVFSDecision(
+                f_a=st.cur_f_a, f_f=st.cur_f_f,
+                energy_mj=0, latency_us=0, switched=False,
+            )
+        elif st.hold_iters_remaining > 0:
+            # Non-urgent re-eval during hold: allow (window expired or bs change)
+            pass
+
         if reeval_reason == REEVAL_WINDOW_EXPIRED:
             w_remaining = st.window_size
         else:
@@ -243,8 +326,46 @@ class AFDVFSController:
             except (RuntimeError, ValueError):
                 continue
 
-            if t_layer * self.num_layers > slo_tpot_us:
+            # Use full iteration latency (pipeline + drain) for SLO check
+            t_iter = t_layer * self.num_layers + self.t_drain_us
+            if (t_iter * self._calibration_factor) > slo_tpot_us:
                 continue
+
+            # Feedback: if slo_urgent triggered repeatedly but predictor keeps
+            # choosing a freq that doesn't resolve the SLO violation,
+            # force step up one notch from current freq.
+            if self._feedback_enabled and reeval_reason == REEVAL_SLO_URGENT:
+                if f_a <= st.cur_f_a and f_f <= st.cur_f_f:
+                    # Predictor wants same or lower freq despite SLO pressure
+                    st.consec_urgent_no_change += 1
+                else:
+                    st.consec_urgent_no_change = 0
+
+                if st.consec_urgent_no_change >= self._feedback_threshold:
+                    # Force step up from CURRENT freq (not predictor's choice)
+                    st.consec_urgent_no_change = 0
+                    f_a_up = self._next_freq_up(st.cur_f_a)
+                    f_f_up = self._next_freq_up(st.cur_f_f)
+                    logger.info(
+                        "Decode DVFS feedback: %d consecutive urgent-no-change, "
+                        "forcing step up f_a=%d→%d f_f=%d→%d",
+                        self._feedback_threshold, st.cur_f_a, f_a_up, st.cur_f_f, f_f_up,
+                    )
+                    self._stats_switch_up += 1
+                    self._update_decode_state(f_a_up, f_f_up, bs, switched=True)
+                    # Hold the higher freq for N iterations before allowing re-eval
+                    st.iters_since_decision = 0
+                    st.hold_iters_remaining = self._feedback_hold
+                    t_layer_up = self._layer_latency("decode", f_a_up, f_f_up, bs, il, ol, M)
+                    e_up = self._layer_energy("decode", f_a_up, f_f_up, bs, il, ol)
+                    return DVFSDecision(
+                        f_a=f_a_up, f_f=f_f_up,
+                        energy_mj=e_up * self.num_layers,
+                        latency_us=t_layer_up * self.num_layers,
+                        switched=True,
+                    )
+            elif reeval_reason != REEVAL_SLO_URGENT:
+                st.consec_urgent_no_change = 0
 
             switched = self._should_switch(
                 f_a, f_f, st.cur_f_a, st.cur_f_f,
@@ -260,7 +381,7 @@ class AFDVFSController:
                     self._stats_switch_down += 1
 
             self._update_decode_state(f_a, f_f, bs, switched)
-            total_lat = t_layer * self.num_layers
+            total_lat = t_layer * self.num_layers + self.t_drain_us
             total_e = e * self.num_layers
             logger.debug(
                 "Decode DVFS: bs=%d il=%d ol=%d → f_a=%d f_f=%d "
@@ -325,6 +446,8 @@ class AFDVFSController:
     def tick_decode_iteration(self):
         """Call after each decode iteration to advance the window counter."""
         self._decode_state.iters_since_decision += 1
+        if self._decode_state.hold_iters_remaining > 0:
+            self._decode_state.hold_iters_remaining -= 1
 
     def reset_decode_state(self):
         """Reset decode window state (e.g. when batch changes completely)."""
