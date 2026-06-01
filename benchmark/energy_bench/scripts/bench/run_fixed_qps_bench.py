@@ -69,6 +69,14 @@ SCHED_P, SCHED_D = 66400, 66500
 ALL_PORTS = [ROUTER_PORT, PA_PORT, PF_PORT, DA_PORT, DF_PORT]
 
 
+def _qps_sort_key(x):
+    """Sort QPS labels numerically, falling back to string for var-len names."""
+    try:
+        return (0, float(x))
+    except (TypeError, ValueError):
+        return (1, str(x))
+
+
 # ── Process Utils ────────────────────────────────────────────────────────
 
 
@@ -272,7 +280,8 @@ def get_gpu_freq_mhz(gpu_indices: list[int]) -> dict[int, int]:
 # ── Server Launcher ──────────────────────────────────────────────────────
 
 
-def start_pdaf(mode: str, label: str = "", log_dir: Optional[Path] = None) -> Optional[tuple]:
+def start_pdaf(mode: str, label: str = "", log_dir: Optional[Path] = None,
+               tpot_slo_ms: float = 300.0) -> Optional[tuple]:
     """Start PD+AF M=1 with C++ IPC backend on GPU 4-7.
 
     Args:
@@ -341,7 +350,7 @@ def start_pdaf(mode: str, label: str = "", log_dir: Optional[Path] = None) -> Op
             '--afd-dvfs-enabled',
             '--afd-energy-model-dir', ENERGY_MODEL_DIR,
             '--afd-ttft-slo-ms', '5000',
-            '--afd-tpot-slo-us', '300000',
+            '--afd-tpot-slo-us', str(int(tpot_slo_ms * 1000)),
         ]
         # Tier1 freq-only: monitor + re-plan frequency, but NEVER reload model
         tier1_args = [
@@ -528,7 +537,8 @@ def procs_all_alive(procs) -> tuple:
 
 async def run_workload(workload_path: str, url: str, reload_signal_path: str = None,
                        ttft_slo_ms: float = 0.0, tpot_slo_ms: float = 0.0,
-                       procs=None, max_run_s: float = 0.0) -> dict:
+                       procs=None, max_run_s: float = 0.0,
+                       gpu_indices=None, prefill_gpus=None, decode_gpus=None) -> dict:
     """Execute workload trace, measure performance + energy + SLO violations.
 
     If reload_signal_path is provided, pauses sending when Tier1 reload is
@@ -543,7 +553,12 @@ async def run_workload(workload_path: str, url: str, reload_signal_path: str = N
 
     log.info("Running workload: %d requests from %s", len(requests_data), workload_path)
 
-    energy_start = get_gpu_energy_mj(GPU_INDICES)
+    # Per-deployment GPU mapping (defaults to the module-level PD+AF 4-GPU map).
+    _gpu_idx = gpu_indices if gpu_indices is not None else GPU_INDICES
+    _pf_gpus = prefill_gpus if prefill_gpus is not None else [GPU_PA, GPU_PF]
+    _df_gpus = decode_gpus if decode_gpus is not None else [GPU_DA, GPU_DF]
+
+    energy_start = get_gpu_energy_mj(_gpu_idx)
     freq_samples = []
     reload_pauses = []  # track reload pause durations
     aborted = False
@@ -598,7 +613,7 @@ async def run_workload(workload_path: str, url: str, reload_signal_path: str = N
             if i % 20 == 0:
                 freq_samples.append({
                     "time_s": round(time.monotonic() - base_time, 1),
-                    "freqs": get_gpu_freq_mhz(GPU_INDICES),
+                    "freqs": get_gpu_freq_mhz(_gpu_idx),
                 })
 
         # Gather remaining requests, but guard against a hung pipeline: if a
@@ -642,17 +657,17 @@ async def run_workload(workload_path: str, url: str, reload_signal_path: str = N
             results = []
 
     duration_s = time.monotonic() - base_time
-    energy_end = get_gpu_energy_mj(GPU_INDICES)
+    energy_end = get_gpu_energy_mj(_gpu_idx)
 
     def _energy_j(indices):
         return sum((energy_end[idx] - energy_start[idx]) / 1000.0
                    for idx in indices)
 
-    total_energy_j = _energy_j(GPU_INDICES)
-    # Per-stage split: prefill GPUs (PA/PF) vs decode GPUs (DA/DF). NVML energy
-    # is read per-GPU, so the P/D breakdown is exact given the fixed mapping.
-    prefill_energy_j = _energy_j([GPU_PA, GPU_PF])
-    decode_energy_j = _energy_j([GPU_DA, GPU_DF])
+    total_energy_j = _energy_j(_gpu_idx)
+    # Per-stage split: prefill GPUs vs decode GPUs. NVML energy is read per-GPU,
+    # so the P/D breakdown is exact given the deployment's GPU mapping.
+    prefill_energy_j = _energy_j(_pf_gpus)
+    decode_energy_j = _energy_j(_df_gpus)
 
     successful = [r for r in results if r.success]
     ttfts = [r.ttft_ms for r in successful if r.ttft_ms > 0]
@@ -824,11 +839,6 @@ def print_qps_sweep(sweep: dict):
     print(f"\n{'='*100}")
     print(f"  QPS SWEEP SUMMARY (fixed-length workloads)")
     print(f"{'='*100}")
-    def _qps_sort_key(x):
-        try:
-            return (0, float(x))
-        except (TypeError, ValueError):
-            return (1, str(x))
     qps_keys = sorted(sweep.keys(), key=_qps_sort_key)
     cols = [
         ("Energy(J)", "total_energy_j"),
@@ -947,6 +957,10 @@ def main():
     for wl in workloads:
         cfg = _cfg_from_path(wl)
         group, qps_label, tag = cfg["group"], cfg["qps"], cfg["tag"]
+        # Tighter-TPOT-SLO experiments tag results separately so they never
+        # collide with the default 300ms-SLO cache/logs.
+        if abs(args.tpot_slo_ms - 300.0) > 1e-6:
+            tag = f"{tag}_tpot{int(args.tpot_slo_ms)}"
         sweep.setdefault(group, {}).setdefault(qps_label, {})
         log.info("#" * 70)
         log.info("WORKLOAD: %s  (il=%s ol=%s QPS=%s)", wl, cfg["il"], cfg["ol"], qps_label)
@@ -964,7 +978,8 @@ def main():
                 continue
 
             run_log_dir = log_root / tag / mode
-            ret = start_pdaf(mode=mode, label=f"{tag}_{mode}", log_dir=run_log_dir)
+            ret = start_pdaf(mode=mode, label=f"{tag}_{mode}", log_dir=run_log_dir,
+                             tpot_slo_ms=args.tpot_slo_ms)
             if ret is None:
                 log.error("%s mode=%s server failed to start, skipping", tag, mode)
                 continue
@@ -1004,8 +1019,9 @@ def main():
                 # A single run blowing up (e.g. watchdog cancellation, network
                 # error, OOM mid-flight) must NOT kill the whole sweep. Log it,
                 # leave it uncached so it can be re-run, and move on.
-                log.error("%s mode=%s crashed: %r — skipping (not cached)",
-                          tag, mode, e)
+                import traceback
+                log.error("%s mode=%s crashed: %r — skipping (not cached)\n%s",
+                          tag, mode, e, traceback.format_exc())
             finally:
                 cleanup_procs(procs)
                 kill_our_servers()

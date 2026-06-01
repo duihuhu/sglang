@@ -768,6 +768,10 @@ class BroadcastTensorCommunicator(FifoTensorCommunicator):
         dist.broadcast(tensor, src=tp_group.ranks[0], group=tp_group.device_group)
         return tensor
 
+    # Aliases for compatibility with code paths that call stream-ordered variants
+    send_stream_ordered = send_tensor
+    recv_stream_ordered = recv_tensor
+
 
 # dtype <-> int mapping for broadcasting tensor metadata
 _DTYPE_MAP = {
@@ -1214,6 +1218,15 @@ def get_tensor_communicator() -> FifoTensorCommunicator:
     if comm_backend == "ipc_cpp":
         from sglang.srt.layers.afd_ipc_cpp.communicator import CppIpcTensorCommunicator
 
+        local_tp = server_args.tp_size
+        local_tp_rank = dist.get_rank() % local_tp if dist.is_initialized() else 0
+        if local_tp > 1:
+            base_comm = CppIpcTensorCommunicator(perspective) if local_tp_rank == 0 else None
+            return BroadcastTensorCommunicator(
+                inner_comm=base_comm,
+                local_tp_size=local_tp,
+                local_tp_rank=local_tp_rank,
+            )
         return CppIpcTensorCommunicator(perspective)
 
     if comm_backend == "nccl_p2p":

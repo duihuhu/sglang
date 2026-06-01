@@ -208,7 +208,7 @@ prefill 调频依据 `_compute_prefill_slack()`（`scheduler.py`）：`slack = T
 - [ ] **补测 il2048_ol256 QPS2 的 max_freq**：本轮因外部任务占用 GPU4 启动 OOM 跳过，待 GPU4 空闲后单独补（`--modes max_freq` 即可，tier1/auto 已有缓存）。
 - [ ] **校准预测模型偏差**（version0 #1，未动）：系统性低估 ~28.8%，且饱和点恶化到 -71%。建议优先做：① 重标 `t_drain_us`；② 启用 `--afd-dvfs-online-calibration` EMA 修正；③ 针对饱和区单独建模 FFN 阻塞项。
 - [ ] **Tier1 真正生效场景**（version0 #5，未动）：G=4 下 Tier1 求解器 INFEASIBLE，需 G≥8 才能体现资源重规划价值。
-- [ ] **SLO 余量收紧实验**：当前 TPOT SLO 300ms 余量大，低估未致命。可收紧到 120ms 验证预测偏差是否会让 tier1 在更低 QPS 踩 SLO。
+- [x] **SLO 余量收紧实验**：已完成（见第 11 节）。收紧 TPOT SLO 到 120/100/85/75ms 后发现一个反直觉结果——tier1 调频对 SLO 收紧**完全无响应**，根因是预测器 3.9x 低估让 SLO 检查恒为真，实为预测偏差 TODO 的放大验证。
 - [ ] **变长 trace 加密采样决策日志**：变长场景的 phase 切换瞬态调频行为值得单独画时间线（plot_tier_trace.py 已有雏形）。
 - [ ] **prefill slack 纳入队列积压（见第 7 节）**：`_compute_prefill_slack` 目前只看当前 batch 已等待时间，看不到 waiting queue 队首的积压。改为纳入队首等待时间后，调频器能感知积压（虽救不了容量天花板，但可避免"余量充足"误判，并为早降速/拒绝提供信号）。
 
@@ -221,4 +221,40 @@ prefill 调频依据 `_compute_prefill_slack()`（`scheduler.py`）：`slack = T
 2.能耗按 prefill/decode 拆开后，Decode 是节能主战场（占 52-71%），且 Prefill 节能随 QPS 升、Decode 节能随 QPS 降。
 3.SLO 违背全来自 TTFT 排队、TPOT 从不违背；高 QPS 长输出下的违背是系统容量天花板（三种频率模式违背率一致），与调频无关，此时维持低频省电是正确决策。
 4.待校准两点：预测模型系统性低估 decode 延迟约 28%（饱和点恶化到 -71%）；prefill 调频的 slack 指标看不到 waiting queue 排队积压。
+
+---
+
+## 11. TPOT SLO 收紧实验（D 阶段 SLO 对调频的影响，2026-05-31）
+
+### 11.1 动机与设置
+之前所有实验 TPOT SLO 固定 300ms，余量极大（tier1 实测 ~90ms、No-Tier ~73ms），从未违背，因此无法观察 D 阶段 SLO 对调频的影响。本实验把 TPOT SLO 逐档收紧到 100ms 以下，观察 tier1 的 decode 选频是否被逼升频。
+- workload：il256_ol512（decode 重，TPOT 调频空间最大），QPS 2 / 4
+- TPOT SLO 四档：120 / 100 / 85 / 75 ms（75 接近 No-Tier 物理下限 ~73ms）
+- 模式：tier1_freq（受 SLO 影响） + max_freq（锁频，仅违背统计随 SLO 变，作对照）
+- 代码改动：`run_fixed_qps_bench.py` 让 `--tpot-slo-ms` 真正流入调频器（`--afd-tpot-slo-us`），并给收紧档结果加 `_tpot{N}` tag 后缀，与 300ms 基线隔离。
+
+### 11.2 核心数据（tier1 vs max，单位 ms / tok·s⁻¹ / J）
+| SLO | QPS | tier1 TPOT | tier1 TTFT | tier1 吞吐 | tier1 TPOT违背 | max TPOT |
+|-----|-----|-----------|-----------|----------|--------------|---------|
+| 120 | 2 | 208.0 | 10035 | 273 | 120/120 | 71.9 |
+| 100 | 2 | 208.3 | 10097 | 273 | 120/120 | 72.0 |
+| 85  | 2 | 208.7 | 10158 | 273 | 120/120 | 71.9 |
+| 75  | 2 | 206.9 | 9985  | 275 | 120/120 | 71.8 |
+| 120 | 4 | 206.3 | 61765 | 373 | 240/240 | 73.8 |
+| 75  | 4 | 204.3 | 61200 | 377 | 240/240 | 73.9 |
+
+### 11.3 DVFS 决策日志（decode，三档对比）
+| SLO | attn 频率分布 | pred_iter | obs_iter | 低估倍数 |
+|-----|-------------|-----------|----------|---------|
+| 120 | 690:517 / 1170:346 / 930:223 | 54.4ms | 213.7ms | 3.9x |
+| 85  | 690:519 / 1170:348 / 930:219 | 54.4ms | 214.0ms | 3.9x |
+| 75  | 690:517 / 1170:347 / 930:221 | 54.4ms | 212.7ms | 3.9x |
+
+三档的频率分布、预测值、观测值几乎逐位相同，证明调频器对 SLO 收紧零响应。对照 300ms 基线同 workload：pred=54.5ms / obs=117ms（低估 2.2x），TPOT 实测仅 92ms。
+
+### 11.4 因果分析（反直觉结论）
+预期"收紧 SLO → 调频器升频满足更严 SLO"，实测却是"收紧 SLO → 调频毫无变化 → tier1 性能反而比 300ms 基线更差（TPOT 92→208ms，吞吐 584→273）"。根因在 `af_dvfs_controller.py::select_freq_decode`（330-331 行）：候选频率按能耗升序，对每个候选算预测迭代时间 `t_iter`，若 `t_iter * calibration_factor > slo_tpot_us` 则跳过，否则选中（最省电的"可行"频率）。由于预测器对最低频 690MHz 的迭代时间恒预测为 ~54ms，即使最严的 75ms SLO，判据 `54ms < 75ms` 仍恒为真，于是 690MHz 始终被当成可行的最省电选择。预测器 3.9x 低估让 SLO 阈值在选频公式里被彻底架空——这是第 10 节"预测模型系统性低估"TODO 在 SLO 收紧场景下的放大暴露。
+
+### 11.5 结论与下一步
+当前 D 阶段 TPOT SLO 对调频实际失效，不是 SLO 机制设计问题，而是预测器低估导致 SLO 约束恒满足。要让 SLO 真正驱动调频，必须先修预测偏差：① 重标 `t_drain_us`（当前 18ms 远低于实测）；② 启用 `--afd-dvfs-online-calibration` 用 EMA 把 obs/pred 比值反馈进 `calibration_factor`；③ 在 decode 重负载区单独建模迭代时间。修复后应重跑本实验验证 SLO 梯度能否驱动频率梯度。
 

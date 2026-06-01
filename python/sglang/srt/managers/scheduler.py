@@ -520,6 +520,7 @@ class Scheduler(
         # AFD DVFS (Tier 2 energy-aware frequency scaling)
         self._af_dvfs_ctrl = None
         self._dvfs_hw = None
+        self._dvfs_hw_list = []
         self._cur_f_a = 1410
         self._cur_f_f = 1410
         if getattr(self.server_args, "afd_dvfs_enabled", False):
@@ -2094,21 +2095,39 @@ class Scheduler(
             self._af_dvfs_ctrl = None
             return
 
+        # NVML locking and decision logging only run on tp_rank 0 of each
+        # process. Locking is system-wide per physical GPU, so a single rank
+        # locking all owned cards is sufficient; letting every rank lock (and
+        # write the shared decision log) causes redundant NVML calls and
+        # interleaved/corrupted JSONL.
+        if self.tp_rank != 0:
+            self._dvfs_hw = None
+            self._dvfs_hw_list = []
+            self._dvfs_decision_log = None
+            return
+
         try:
             import torch
             from sglang.srt.layers.dvfs import DVFSController
 
-            # Use physical NVML GPU index set by launcher (not CUDA index,
-            # which may differ when CUDA_VISIBLE_DEVICES remaps devices).
-            nvml_device_index = int(os.environ.get("AFD_NVML_DEVICE_INDEX",
-                torch.cuda.current_device() if torch.cuda.is_available() else 0))
+            # Physical NVML GPU indices owned by this process. A TP>1 process
+            # spans multiple physical cards, so we must lock ALL of them, not
+            # just the first one. Prefer the explicit CSV list set by the
+            # launcher; fall back to the single-index var, then CUDA index.
+            nvml_indices = _parse_gpu_indices_env("AFD_NVML_DEVICE_INDICES")
+            if not nvml_indices:
+                single = int(os.environ.get("AFD_NVML_DEVICE_INDEX",
+                    torch.cuda.current_device() if torch.cuda.is_available() else 0))
+                nvml_indices = [single]
 
-            self._dvfs_hw = DVFSController(device_index=nvml_device_index)
-            logger.info("DVFS HW controller initialized on NVML GPU %d", nvml_device_index)
+            self._dvfs_hw_list = [DVFSController(device_index=i) for i in nvml_indices]
+            self._dvfs_hw = self._dvfs_hw_list[0] if self._dvfs_hw_list else None
+            logger.info("DVFS HW controllers initialized on NVML GPUs %s", nvml_indices)
         except Exception as e:
             logger.warning("DVFS HW unavailable (libdvfs_ctrl.so missing?): %s. "
                            "Frequency decisions will be logged but not applied.", e)
             self._dvfs_hw = None
+            self._dvfs_hw_list = []
 
         # Optional: structured DVFS decision log (JSONL) for accuracy analysis.
         # Each process writes its own file (path templated with NVML index) so
@@ -2311,11 +2330,16 @@ class Scheduler(
         return max(min_slack, 0)
 
     def _apply_freq(self, f_a: int, f_f: int):
-        """Apply frequency via NVML. Each process only controls its own GPU."""
+        """Apply frequency via NVML. Each process locks ALL of its own GPUs.
+
+        A TP>1 process spans multiple physical cards; we must lock every card
+        the process owns, otherwise only one card scales while the rest stay
+        at auto-boost (and waste energy when idle).
+        """
         from sglang.srt.layers.afd import afd_is_attn
         target_f = f_a if afd_is_attn() else f_f
-        if self._dvfs_hw is not None:
-            self._dvfs_hw.lock_sm_clock(target_f)
+        for hw in self._dvfs_hw_list:
+            hw.lock_sm_clock(target_f)
         self._cur_f_a = f_a
         self._cur_f_f = f_f
 
