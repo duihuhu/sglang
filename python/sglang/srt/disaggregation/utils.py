@@ -275,16 +275,21 @@ class MetadataBuffers:
         self.bootstrap_room[req.metadata_buffer_index, 0] = (
             req.bootstrap_room if req.bootstrap_room is not None else 0
         )
-        # Propagate processing TTFT (prefill_finished_time - api_server_dispatch_time)
-        # from PA to DA via KV transfer metadata buffers.
+        # Propagate pure processing TTFT (prefill_finished - prefill_batch_start)
+        # from PA to DA via KV transfer metadata buffers. Excludes queue wait.
         if hasattr(req, "time_stats") and req.time_stats is not None:
             ts = req.time_stats
             pft = getattr(ts, "prefill_finished_time", 0.0)
-            adt = getattr(ts, "api_server_dispatch_time", 0.0)
-            if pft > 0.0 and adt > 0.0:
-                proc_ttft = pft - adt
-                if proc_ttft > 0.0:
-                    self.prefill_ttft_processing[req.metadata_buffer_index, 0] = proc_ttft
+            pbs = getattr(ts, "prefill_run_batch_start_time", 0.0)
+            if pft > 0.0 and pbs > 0.0 and pft > pbs:
+                self.prefill_ttft_processing[req.metadata_buffer_index, 0] = pft - pbs
+            else:
+                # Fallback: use dispatch time if batch_start not available
+                adt = getattr(ts, "api_server_dispatch_time", 0.0)
+                if pft > 0.0 and adt > 0.0:
+                    proc_ttft = pft - adt
+                    if proc_ttft > 0.0:
+                        self.prefill_ttft_processing[req.metadata_buffer_index, 0] = proc_ttft
 
 
 #########################

@@ -113,9 +113,11 @@ class AFDVFSController:
         self._feedback_hold = feedback_hold
 
         # Tier2 online calibration: correct predictor bias
+        # Separate factors for pipelined (M>1) vs serial (M=1) execution
         self._calibration_enabled = online_calibration
         self._calibration_ema = calibration_ema
-        self._calibration_factor = 1.0  # multiplier on predicted latency
+        self._calibration_factor = 1.0  # multiplier for M>1 (pipelined)
+        self._calibration_factor_serial = 1.0  # multiplier for M=1 (serial)
 
         self._precompute_freq_pairs()
 
@@ -132,15 +134,17 @@ class AFDVFSController:
                 return f
         return F_MAX
 
-    def update_calibration(self, observed_tpot_us: float, predicted_tpot_us: float):
+    def update_calibration(self, observed_tpot_us: float, predicted_tpot_us: float,
+                           M: int = 2):
         """Update online calibration factor using observed vs predicted TPOT.
 
-        Called by the scheduler after each decode iteration with the actual
-        measured TPOT and the predictor's estimate for the same config.
+        Maintains separate calibration factors for pipelined (M>1) and serial
+        (M=1) execution modes, since latency models differ significantly.
 
         Args:
             observed_tpot_us: Actual measured TPOT (microseconds).
             predicted_tpot_us: Predictor's estimate for the same (bs, il, freq).
+            M: Effective micro-batch count used for this iteration.
         """
         if not self._calibration_enabled:
             return
@@ -148,16 +152,24 @@ class AFDVFSController:
             return
 
         ratio = observed_tpot_us / predicted_tpot_us
-        # Clamp ratio to avoid extreme corrections
         ratio = max(0.5, min(ratio, 3.0))
 
         alpha = self._calibration_ema
-        self._calibration_factor = (1.0 - alpha) * self._calibration_factor + alpha * ratio
+        if M > 1:
+            self._calibration_factor = (1.0 - alpha) * self._calibration_factor + alpha * ratio
+        else:
+            self._calibration_factor_serial = (1.0 - alpha) * self._calibration_factor_serial + alpha * ratio
 
     @property
     def calibration_factor(self) -> float:
-        """Current calibration factor (1.0 = no correction)."""
+        """Current calibration factor for pipelined mode (M>1)."""
         return self._calibration_factor
+
+    def get_calibration_factor(self, M: int = 2) -> float:
+        """Get calibration factor appropriate for the given M."""
+        if M > 1:
+            return self._calibration_factor
+        return self._calibration_factor_serial
 
     def _layer_latency(self, phase: str, f_a: int, f_f: int,
                        bs: int, il: int, ol: Optional[int], M: int) -> float:
@@ -173,13 +185,15 @@ class AFDVFSController:
         """Compute full iteration latency = pipeline + drain overhead.
 
         Model:
-          iteration_time = layer_latency * num_layers + t_drain_us
+          M > 1: iteration_time = layer_latency * num_layers + t_drain_us
+          M = 1: iteration_time = layer_latency * num_layers (no pipeline drain)
         Where:
           - layer_latency: per-layer compute (pipeline overlap for M>1)
-          - t_drain_us: IPC sync + pipeline drain (fixed per-iteration overhead)
+          - t_drain_us: IPC sync + pipeline drain (only applies when M>1)
         """
         t_layer = self._layer_latency(phase, f_a, f_f, bs, il, ol, M)
-        return t_layer * self.num_layers + self.t_drain_us
+        drain = self.t_drain_us if M > 1 else 0.0
+        return t_layer * self.num_layers + drain
 
     def _layer_energy(self, phase: str, f_a: int, f_f: int,
                       bs: int, il: int, ol: Optional[int]) -> float:
@@ -310,6 +324,16 @@ class AFDVFSController:
         else:
             w_remaining = st.window_size - st.iters_since_decision
 
+        # ─── V2 Coupled Model Path ───────────────────────────────────────
+        # If the coupled iteration-level model is available, use it directly
+        # for more accurate latency/energy predictions (accounts for IPC,
+        # pipeline drain, and micro-batch overlap).
+        if (self.predictor is not None
+                and self.predictor.has_coupled_model):
+            return self._select_freq_decode_coupled(
+                bs, il, ol, slo_tpot_us, M, reeval_reason, st, w_remaining)
+
+        # ─── V1 Formula-based Path (fallback) ────────────────────────────
         # Sort candidates by energy (ascending) for early exit
         candidates = []
         for f_a, f_f in self._freq_pairs:
@@ -327,8 +351,10 @@ class AFDVFSController:
                 continue
 
             # Use full iteration latency (pipeline + drain) for SLO check
-            t_iter = t_layer * self.num_layers + self.t_drain_us
-            if (t_iter * self._calibration_factor) > slo_tpot_us:
+            drain = self.t_drain_us if M > 1 else 0.0
+            t_iter = t_layer * self.num_layers + drain
+            calib = self.get_calibration_factor(M)
+            if (t_iter * calib) > slo_tpot_us:
                 continue
 
             # Feedback: if slo_urgent triggered repeatedly but predictor keeps
@@ -358,10 +384,11 @@ class AFDVFSController:
                     st.hold_iters_remaining = self._feedback_hold
                     t_layer_up = self._layer_latency("decode", f_a_up, f_f_up, bs, il, ol, M)
                     e_up = self._layer_energy("decode", f_a_up, f_f_up, bs, il, ol)
+                    drain_up = self.t_drain_us if M > 1 else 0.0
                     return DVFSDecision(
                         f_a=f_a_up, f_f=f_f_up,
                         energy_mj=e_up * self.num_layers,
-                        latency_us=t_layer_up * self.num_layers,
+                        latency_us=t_layer_up * self.num_layers + drain_up,
                         switched=True,
                     )
             elif reeval_reason != REEVAL_SLO_URGENT:
@@ -381,7 +408,7 @@ class AFDVFSController:
                     self._stats_switch_down += 1
 
             self._update_decode_state(f_a, f_f, bs, switched)
-            total_lat = t_layer * self.num_layers + self.t_drain_us
+            total_lat = t_layer * self.num_layers + drain
             total_e = e * self.num_layers
             logger.debug(
                 "Decode DVFS: bs=%d il=%d ol=%d → f_a=%d f_f=%d "
@@ -404,10 +431,99 @@ class AFDVFSController:
         self._update_decode_state(F_MAX, F_MAX, bs, switched=True)
         t_layer = self._layer_latency("decode", F_MAX, F_MAX, bs, il, ol, M)
         e = self._layer_energy("decode", F_MAX, F_MAX, bs, il, ol)
+        drain = self.t_drain_us if M > 1 else 0.0
         return DVFSDecision(
             f_a=F_MAX, f_f=F_MAX,
             energy_mj=e * self.num_layers,
-            latency_us=t_layer * self.num_layers,
+            latency_us=t_layer * self.num_layers + drain,
+            switched=True,
+        )
+
+    def _select_freq_decode_coupled(
+        self, bs: int, il: int, ol: int,
+        slo_tpot_us: float, M: int,
+        reeval_reason: int, st, w_remaining: int,
+    ) -> DVFSDecision:
+        """Select decode freq using V2 coupled iteration-level model.
+
+        The coupled model predicts iteration latency and energy directly,
+        accounting for IPC communication, pipeline drain, and micro-batch
+        overlap — unlike the V1 formula (max(A,F)*N + drain).
+        """
+        calib = self.get_calibration_factor(M)
+
+        # Build candidates sorted by energy
+        candidates = []
+        for f_a, f_f in self._freq_pairs:
+            energy = self.predictor.predict_iteration_energy(M, f_a, f_f, bs, il)
+            if energy is not None:
+                total_e = energy[0] + energy[1]
+                candidates.append((total_e, f_a, f_f))
+        candidates.sort()
+
+        for total_e, f_a, f_f in candidates:
+            lat = self.predictor.predict_iteration_latency(M, f_a, f_f, bs, il)
+            if lat is None:
+                continue
+            if (lat * calib) > slo_tpot_us:
+                continue
+
+            # Feedback logic (same as V1)
+            if self._feedback_enabled and reeval_reason == REEVAL_SLO_URGENT:
+                if f_a <= st.cur_f_a and f_f <= st.cur_f_f:
+                    st.consec_urgent_no_change += 1
+                else:
+                    st.consec_urgent_no_change = 0
+                if st.consec_urgent_no_change >= self._feedback_threshold:
+                    st.consec_urgent_no_change = 0
+                    f_a_up = self._next_freq_up(st.cur_f_a)
+                    f_f_up = self._next_freq_up(st.cur_f_f)
+                    self._stats_switch_up += 1
+                    self._update_decode_state(f_a_up, f_f_up, bs, switched=True)
+                    st.iters_since_decision = 0
+                    st.hold_iters_remaining = self._feedback_hold
+                    lat_up = self.predictor.predict_iteration_latency(
+                        M, f_a_up, f_f_up, bs, il) or slo_tpot_us
+                    e_up = self.predictor.predict_iteration_energy(
+                        M, f_a_up, f_f_up, bs, il)
+                    e_up_total = (e_up[0] + e_up[1]) if e_up else 0
+                    return DVFSDecision(
+                        f_a=f_a_up, f_f=f_f_up,
+                        energy_mj=e_up_total, latency_us=lat_up,
+                        switched=True,
+                    )
+            elif reeval_reason != REEVAL_SLO_URGENT:
+                st.consec_urgent_no_change = 0
+
+            switched = self._should_switch(
+                f_a, f_f, st.cur_f_a, st.cur_f_f, bs, il, ol, w_remaining)
+            if switched:
+                old_avg = (st.cur_f_a + st.cur_f_f) / 2
+                new_avg = (f_a + f_f) / 2
+                if new_avg > old_avg:
+                    self._stats_switch_up += 1
+                else:
+                    self._stats_switch_down += 1
+
+            self._update_decode_state(f_a, f_f, bs, switched)
+            return DVFSDecision(
+                f_a=f_a, f_f=f_f,
+                energy_mj=total_e, latency_us=lat,
+                switched=switched,
+            )
+
+        # Fallback: max frequency
+        self._stats_fallback += 1
+        self._stats_switch_up += 1
+        self._update_decode_state(F_MAX, F_MAX, bs, switched=True)
+        lat_max = self.predictor.predict_iteration_latency(
+            M, F_MAX, F_MAX, bs, il) or slo_tpot_us
+        e_max = self.predictor.predict_iteration_energy(
+            M, F_MAX, F_MAX, bs, il)
+        e_max_total = (e_max[0] + e_max[1]) if e_max else 0
+        return DVFSDecision(
+            f_a=F_MAX, f_f=F_MAX,
+            energy_mj=e_max_total, latency_us=lat_max,
             switched=True,
         )
 

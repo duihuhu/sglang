@@ -456,6 +456,11 @@ class APIServerReqTimeStats(ReqTimeStatsBase):
                 proc_ttft = _pft - _adt
                 if proc_ttft > 0.0:
                     meta_info["time_to_first_token_processing"] = proc_ttft
+            # Pure processing TTFT: prefill_finished - prefill_run_batch_start
+            # (excludes both network latency and scheduler queue wait)
+            _pbs = getattr(scheduler_time_stats, "prefill_run_batch_start_time", 0.0)
+            if _pft > 0.0 and _pbs > 0.0 and _pft > _pbs:
+                meta_info["ttft_pure_processing"] = _pft - _pbs
             # Fallback 1: cached TTFT from PA via KV transfer metadata (PD+AF DA side).
             if "time_to_first_token_processing" not in meta_info:
                 _cached = getattr(scheduler_time_stats, "cached_ttft_processing", 0.0)
@@ -624,14 +629,17 @@ class SchedulerReqTimeStats(ReqTimeStatsBase):
         # send to detokenizer/tokenizer
         state = {}
         if not self.enable_metrics:
-            # Only propagate the cached TTFT (from PA KV metadata) when metrics
-            # are disabled — other fields are not needed without metrics.
+            # Always propagate prefill timing for TTFT pure processing calculation
+            state = {}
+            if self.prefill_run_batch_start_time > 0.0:
+                state["prefill_run_batch_start_time"] = self.prefill_run_batch_start_time
+            if self.prefill_finished_time > 0.0:
+                state["prefill_finished_time"] = self.prefill_finished_time
             if self.cached_ttft_processing > 0.0:
-                return {
-                    "cached_ttft_processing": self.cached_ttft_processing,
-                    "diff_realtime_monotonic": global_diff_realtime_monotonic,
-                }
-            return {}
+                state["cached_ttft_processing"] = self.cached_ttft_processing
+            if state:
+                state["diff_realtime_monotonic"] = global_diff_realtime_monotonic
+            return state
 
         state = {
             "wait_queue_entry_time": self.wait_queue_entry_time,

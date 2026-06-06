@@ -1,0 +1,4 @@
+# Ignore all result/config JSON across AFlex_bench — benchmark runs generate
+# large amounts of per-run result JSON, summaries and sweep outputs that must
+# not pollute git. Source code (*.py / *.sh) and writeups (*.md) stay tracked.
+*.json

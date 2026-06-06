@@ -123,16 +123,21 @@ class SchedulerAFDMixin:
         forward_mode = batch.forward_mode
         if forward_mode == ForwardMode.EXTEND:
             if is_pd_prefill:
-                # In PD+AF disaggregation, prefill batches are small and FFN
-                # round-trip dominates. Microbatch splitting adds 3x communication
-                # overhead without compute savings. Disable for PD+AF prefill.
                 batch.afd_split_seq_index = None
                 return
             extend_lens = batch.extend_lens
             split_indices = _split_seq_indices_m_way(len(extend_lens), m, extend_lens)
         elif forward_mode.is_decode() or forward_mode.is_target_verify():
-            # Decode phase: allow M>1 pipeline overlap (both pure AF and PD+AF decode)
-            split_indices = _split_seq_indices_m_way(batch.batch_size(), m, None)
+            # Dynamic M: use M=1 for small decode batches
+            effective_m = m
+            if getattr(self.server_args, "afd_dynamic_micro_batch", False):
+                threshold = getattr(self.server_args, "afd_dynamic_mb_threshold", 8)
+                if batch.batch_size() < threshold:
+                    effective_m = 1
+            if effective_m <= 1:
+                batch.afd_split_seq_index = None
+                return
+            split_indices = _split_seq_indices_m_way(batch.batch_size(), effective_m, None)
         else:
             return
 

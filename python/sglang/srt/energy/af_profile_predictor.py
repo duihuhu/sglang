@@ -19,13 +19,29 @@ import pandas as pd
 
 
 class _ModelUnpickler(pickle.Unpickler):
-    """Resolve classes pickled under __main__ to energy_model module."""
+    """Resolve classes pickled under __main__ or energy_model modules."""
 
     _class_cache: dict = {}
 
     def find_class(self, module: str, name: str):
+        # V2 models (from energy_model_v2.py) — check first to avoid V1 conflict
+        if module in ("__main__", "energy_model_v2") and name in ("GBDTModel", "LookupModel"):
+            v2_key = f"v2_{name}"
+            if v2_key not in self._class_cache:
+                import importlib.util
+                em_path = (
+                    Path(__file__).resolve().parents[4]
+                    / "benchmark" / "test_motivation" / "energy_model_v2.py"
+                )
+                spec = importlib.util.spec_from_file_location("_energy_model_v2", em_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                self._class_cache["v2_GBDTModel"] = getattr(mod, "GBDTModel")
+                self._class_cache["v2_LookupModel"] = getattr(mod, "LookupModel")
+            return self._class_cache[v2_key]
+        # V1 models (from energy_model.py)
         if module == "__main__" and name in (
-            "LookupTableModel", "LinearRegressionModel", "GBDTModel",
+            "LookupTableModel", "LinearRegressionModel",
         ):
             if name not in self._class_cache:
                 import importlib.util
@@ -67,6 +83,13 @@ _BEST_MODEL_TYPE = {
     "Decode_F_lat":  "GBDT",
 }
 
+# V2 coupled decode pipeline models
+_V2_LABELS = [
+    "Decode_iter_lat",
+    "Decode_iter_energy_A",
+    "Decode_iter_energy_F",
+]
+
 
 @dataclass
 class PredictionResult:
@@ -88,8 +111,9 @@ class AFProfilePredictor:
         self._load_models()
 
     def _load_models(self):
-        """Load all available pkl models."""
+        """Load all available pkl models (V1 + V2)."""
         loaded = 0
+        # V1 models (independent A/F per-layer)
         for label in _LABEL_MAP.values():
             self._models[label] = {}
             for mtype in ("LUT", "LinearReg", "GBDT"):
@@ -98,7 +122,22 @@ class AFProfilePredictor:
                     with open(pkl_path, "rb") as f:
                         self._models[label][mtype] = _ModelUnpickler(f).load()
                     loaded += 1
-        logger.info("AFProfilePredictor: loaded %d models from %s", loaded, self.model_dir)
+
+        # V2 models (coupled decode pipeline)
+        self._v2_models: dict[str, object] = {}
+        for label in _V2_LABELS:
+            for mtype in ("GBDT", "LUT"):
+                pkl_path = self.model_dir / f"{label}_{mtype}.pkl"
+                if pkl_path.exists():
+                    with open(pkl_path, "rb") as f:
+                        self._v2_models[f"{label}_{mtype}"] = _ModelUnpickler(f).load()
+                    loaded += 1
+        self._v2_available = any(
+            f"Decode_iter_lat_{t}" in self._v2_models for t in ("GBDT", "LUT")
+        )
+        logger.info(
+            "AFProfilePredictor: loaded %d models from %s (v2_coupled=%s)",
+            loaded, self.model_dir, self._v2_available)
 
     def _build_df(self, phase: str, tp: int, freq: int,
                   bs: int, il: int, ol: Optional[int]) -> pd.DataFrame:
@@ -238,5 +277,90 @@ class AFProfilePredictor:
                 total_e = (e_a + e_f) * num_layers
                 if best is None or total_e < best[2]:
                     best = (f_a, f_f, total_e)
+
+        return best
+
+    # ─── V2 Coupled Decode Pipeline Interface ─────────────────────────────
+
+    @property
+    def has_coupled_model(self) -> bool:
+        """Whether V2 coupled decode pipeline models are available."""
+        return self._v2_available
+
+    def _v2_predict(self, label: str, features: np.ndarray) -> Optional[float]:
+        """Predict using V2 coupled model (GBDT preferred, LUT fallback)."""
+        for mtype in ("GBDT", "LUT"):
+            key = f"{label}_{mtype}"
+            model = self._v2_models.get(key)
+            if model is not None:
+                pred = model.predict(features)
+                val = pred[0] if hasattr(pred, '__len__') else float(pred)
+                if not np.isnan(val) and val > 0:
+                    return float(val)
+        return None
+
+    def predict_iteration_latency(
+        self, M: int, f_a: int, f_f: int,
+        bs: int, il: int
+    ) -> Optional[float]:
+        """Predict end-to-end decode iteration latency (us) using coupled model.
+
+        This accounts for IPC communication, pipeline drain, and micro-batch
+        overlap — effects that the independent per-layer model cannot capture.
+
+        Returns iteration latency in microseconds, or None if model unavailable.
+        """
+        if not self._v2_available:
+            return None
+        features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
+        return self._v2_predict("Decode_iter_lat", features)
+
+    def predict_iteration_energy(
+        self, M: int, f_a: int, f_f: int,
+        bs: int, il: int
+    ) -> Optional[tuple[float, float]]:
+        """Predict per-iteration energy (DA_mJ, DF_mJ) using coupled model.
+
+        Returns (da_energy_mj, df_energy_mj) or None if model unavailable.
+        """
+        if not self._v2_available:
+            return None
+        features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
+        da_e = self._v2_predict("Decode_iter_energy_A", features)
+        df_e = self._v2_predict("Decode_iter_energy_F", features)
+        if da_e is None or df_e is None:
+            return None
+        return (da_e, df_e)
+
+    def find_best_freq_pair_coupled(
+        self, M: int, bs: int, il: int,
+        slo_budget_us: float,
+        freqs: Optional[list[int]] = None,
+    ) -> Optional[tuple[int, int, float, float]]:
+        """Find minimum-energy (f_A, f_F) pair under SLO using coupled model.
+
+        Unlike find_best_freq_pair which uses per-layer independent models,
+        this uses the V2 iteration-level coupled model that accounts for
+        pipeline overhead and A/F interaction.
+
+        Returns (f_A, f_F, iter_lat_us, total_energy_mj) or None.
+        """
+        if not self._v2_available:
+            return None
+        if freqs is None:
+            freqs = VALID_FREQS
+
+        best = None
+        for f_a in freqs:
+            for f_f in freqs:
+                lat = self.predict_iteration_latency(M, f_a, f_f, bs, il)
+                if lat is None or lat > slo_budget_us:
+                    continue
+                energy = self.predict_iteration_energy(M, f_a, f_f, bs, il)
+                if energy is None:
+                    continue
+                total_e = energy[0] + energy[1]
+                if best is None or total_e < best[3]:
+                    best = (f_a, f_f, lat, total_e)
 
         return best

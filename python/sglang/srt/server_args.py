@@ -631,6 +631,8 @@ class ServerArgs:
     # For AF disaggregation (AFD)
     afd_perspective: Optional[str] = None
     afd_micro_batch: int = 3
+    afd_dynamic_micro_batch: bool = False
+    afd_dynamic_mb_threshold: int = 128
     afd_attn_ratio: float = 0.5
     afd_attn_tp: Optional[int] = None
     afd_ffn_tp: Optional[int] = None
@@ -651,6 +653,12 @@ class ServerArgs:
     afd_dvfs_feedback_hold: int = 30  # hold forced freq for N iterations
     afd_dvfs_online_calibration: bool = False  # Tier2 online calibration: correct predictor bias with observed TPOT
     afd_dvfs_calibration_ema: float = 0.2  # EMA weight for calibration factor update
+
+    # Unified single-knob DVFS (PD / Native baselines, no AF disaggregation)
+    dvfs_enabled: bool = False
+    dvfs_energy_model_dir: Optional[str] = None
+    dvfs_ttft_slo_ms: float = 5000.0
+    dvfs_tpot_slo_us: float = 50000.0
 
     # Tier 1: Joint ILP resource planning + dynamic monitoring
     enable_tier1_pa: bool = False
@@ -3309,6 +3317,20 @@ class ServerArgs:
                 )
                 self.enable_tier1_pa = False
 
+        # Unified single-knob DVFS (PD / Native baselines, independent of AF).
+        if self.dvfs_enabled:
+            if not self.dvfs_energy_model_dir:
+                raise ValueError(
+                    "--dvfs-enabled requires --dvfs-energy-model-dir."
+                )
+            logger.info(
+                "Unified DVFS enabled: energy model dir=%s, "
+                "TTFT SLO=%.0f ms, TPOT SLO=%.0f us",
+                self.dvfs_energy_model_dir,
+                self.dvfs_ttft_slo_ms,
+                self.dvfs_tpot_slo_us,
+            )
+
     def _validate_ib_devices(self, device_str: str) -> Optional[str]:
         """
         Validate IB devices before passing to mooncake.
@@ -5463,6 +5485,18 @@ class ServerArgs:
             help="Number of micro-batches for AFD overlap pipeline. Must be >= 1.",
         )
         parser.add_argument(
+            "--afd-dynamic-micro-batch",
+            action="store_true",
+            default=ServerArgs.afd_dynamic_micro_batch,
+            help="Enable dynamic M: use M=1 when decode batch_size < threshold, M=max otherwise.",
+        )
+        parser.add_argument(
+            "--afd-dynamic-mb-threshold",
+            type=int,
+            default=ServerArgs.afd_dynamic_mb_threshold,
+            help="Batch size threshold for dynamic M. Below this, decode uses M=1.",
+        )
+        parser.add_argument(
             "--afd-attn-ratio",
             type=float,
             default=ServerArgs.afd_attn_ratio,
@@ -5561,6 +5595,32 @@ class ServerArgs:
             type=float,
             default=ServerArgs.afd_tpot_slo_us,
             help="TPOT SLO in microseconds for Decode DVFS. Default: 50000.",
+        )
+        parser.add_argument(
+            "--dvfs-enabled",
+            action="store_true",
+            default=ServerArgs.dvfs_enabled,
+            help="Enable unified single-knob Tier 2 DVFS for PD / Native "
+            "(non-AF) instances. Requires --dvfs-energy-model-dir.",
+        )
+        parser.add_argument(
+            "--dvfs-energy-model-dir",
+            type=str,
+            default=ServerArgs.dvfs_energy_model_dir,
+            help="Directory containing energy model pkl files. "
+            "Required when --dvfs-enabled is set.",
+        )
+        parser.add_argument(
+            "--dvfs-ttft-slo-ms",
+            type=float,
+            default=ServerArgs.dvfs_ttft_slo_ms,
+            help="TTFT SLO (ms) for unified prefill DVFS. Default: 5000.",
+        )
+        parser.add_argument(
+            "--dvfs-tpot-slo-us",
+            type=float,
+            default=ServerArgs.dvfs_tpot_slo_us,
+            help="TPOT SLO (us) for unified decode DVFS. Default: 50000.",
         )
         parser.add_argument(
             "--afd-dvfs-feedback",

@@ -526,6 +526,13 @@ class Scheduler(
         if getattr(self.server_args, "afd_dvfs_enabled", False):
             self._init_afd_dvfs(self.server_args)
 
+        # Unified single-knob DVFS (PD / Native baselines, non-AF instances)
+        self._unified_dvfs_ctrl = None
+        self._last_unified_decode_t = None
+        if (getattr(self.server_args, "dvfs_enabled", False)
+                and getattr(self.server_args, "afd_perspective", None) is None):
+            self._init_unified_dvfs(self.server_args)
+
         # Tier 1: Joint ILP resource planning
         self._tier1_solver = None
         self._tier1_solution = None
@@ -1344,6 +1351,7 @@ class Scheduler(
 
             # Launch the current batch
             if batch:
+                self._unified_dvfs_before_batch(batch)
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
             else:
@@ -1463,8 +1471,17 @@ class Scheduler(
                     len(extend_lens), m, extend_lens
                 )
             elif forward_mode.is_decode() or forward_mode.is_target_verify():
+                # Dynamic M: use M=1 for small decode batches
+                effective_m = m
+                if getattr(self.server_args, "afd_dynamic_micro_batch", False):
+                    threshold = getattr(self.server_args, "afd_dynamic_mb_threshold", 8)
+                    if batch.batch_size() < threshold:
+                        effective_m = 1
+                if effective_m <= 1:
+                    batch.afd_split_seq_index = None
+                    return
                 split_indices = _split_seq_indices_m_way(
-                    batch.batch_size(), m, None
+                    batch.batch_size(), effective_m, None
                 )
             else:
                 batch.afd_split_seq_index = None
@@ -1538,6 +1555,9 @@ class Scheduler(
                 # embedding + logits-extraction stay in sync.
                 bs = batch.batch_size()
                 if bs > 0:
+                    # Preserve original extend_input_len for DVFS prediction
+                    for r in batch.reqs:
+                        r._orig_extend_input_len = r.extend_input_len
                     batch.extend_lens = [1] * bs
                     for r in batch.reqs:
                         r.extend_input_len = 1
@@ -1576,6 +1596,7 @@ class Scheduler(
                 self._afd_dvfs_before_batch(batch)
                 _prepare_afd_overlap(batch)
                 batch_result = self.run_batch(batch)
+                self._afd_dvfs_after_prefill_batch(batch)
 
                 if afd_overlap:
                     self.result_queue.append((batch.copy(), batch_result))
@@ -2069,6 +2090,147 @@ class Scheduler(
         else:
             return self.get_next_batch_to_run()
 
+    def _init_unified_dvfs(self, server_args):
+        """Initialize unified single-knob DVFS (PD / Native baselines).
+
+        Builds a UnifiedDVFSController + per-process DVFSController hardware
+        handles. Unlike AFD DVFS, there is a single frequency knob; every GPU
+        owned by this instance is locked to the same frequency.
+        """
+        try:
+            from sglang.srt.energy.af_profile_predictor import AFProfilePredictor
+            from sglang.srt.energy.unified_dvfs_controller import (
+                UnifiedDVFSController,
+            )
+
+            predictor = AFProfilePredictor(server_args.dvfs_energy_model_dir)
+            self._unified_dvfs_ctrl = UnifiedDVFSController(
+                predictor=predictor,
+                num_layers=self.model_config.num_hidden_layers,
+                tp=server_args.tp_size,
+            )
+            logger.info("Unified DVFS controller initialized")
+        except Exception as e:
+            logger.warning("Failed to init unified DVFS controller: %s", e)
+            self._unified_dvfs_ctrl = None
+            return
+
+        if self.tp_rank != 0:
+            self._dvfs_hw_list = []
+            return
+        try:
+            import torch
+            from sglang.srt.layers.dvfs import DVFSController
+
+            nvml_indices = _parse_gpu_indices_env("AFD_NVML_DEVICE_INDICES")
+            if not nvml_indices:
+                single = int(os.environ.get(
+                    "AFD_NVML_DEVICE_INDEX",
+                    torch.cuda.current_device() if torch.cuda.is_available() else 0))
+                nvml_indices = [single]
+            self._dvfs_hw_list = [DVFSController(device_index=i) for i in nvml_indices]
+            logger.info("Unified DVFS HW controllers on NVML GPUs %s", nvml_indices)
+        except Exception as e:
+            logger.warning("Unified DVFS HW unavailable (libdvfs_ctrl.so?): %s. "
+                           "Decisions logged but not applied.", e)
+            self._dvfs_hw_list = []
+
+    def _apply_freq_single(self, f: int):
+        """Lock every GPU owned by this (non-AF) process to one frequency."""
+        for hw in self._dvfs_hw_list:
+            hw.lock_sm_clock(f)
+        self._cur_f_a = f
+        self._cur_f_f = f
+
+    def _unified_dvfs_before_batch(self, batch):
+        """Select and apply a single frequency before running a batch.
+
+        Phase is determined by disaggregation_mode for PD instances (prefill /
+        decode servers) and by batch.forward_mode for Native (NULL) instances.
+        """
+        ctrl = getattr(self, "_unified_dvfs_ctrl", None)
+        if ctrl is None or batch is None:
+            return
+        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+        from sglang.srt.disaggregation.utils import DisaggregationMode
+
+        sa = self.server_args
+        disagg = getattr(self, "disaggregation_mode", DisaggregationMode.NULL)
+
+        if disagg == DisaggregationMode.PREFILL:
+            is_prefill = True
+        elif disagg == DisaggregationMode.DECODE:
+            is_prefill = False
+        else:
+            is_prefill = batch.forward_mode == ForwardMode.EXTEND
+            if not is_prefill and not batch.forward_mode.is_decode():
+                return
+
+        if is_prefill:
+            slack_us = self._compute_unified_prefill_slack(batch)
+            max_il = max(
+                (getattr(r, "_orig_extend_input_len", r.extend_input_len)
+                 for r in batch.reqs), default=1024)
+            decision = ctrl.select_freq_prefill(
+                bs=batch.batch_size(), il=max_il, slack_us=slack_us)
+            if decision.switched:
+                self._apply_freq_single(decision.f)
+        else:
+            ctrl.tick_decode_iteration()
+            t_iter_us = 0.0
+            if self._last_unified_decode_t is not None:
+                t_iter_us = (time.perf_counter() - self._last_unified_decode_t) * 1e6
+                ctrl.compute_window_size(t_iter_us)
+            self._last_unified_decode_t = time.perf_counter()
+
+            reeval = ctrl.should_reevaluate_decode(
+                batch.batch_size(),
+                current_tpot_us=t_iter_us,
+                slo_tpot_us=sa.dvfs_tpot_slo_us,
+            )
+            kv_util = self._unified_kv_util()
+            if reeval or kv_util > 0.85:
+                repr_il = int(sum(len(r.origin_input_ids) for r in batch.reqs)
+                              / max(len(batch.reqs), 1))
+                repr_ol = max(int(sum(
+                    (r.seqlen - len(r.origin_input_ids)) for r in batch.reqs)
+                    / max(len(batch.reqs), 1)), 1)
+                decision = ctrl.select_freq_decode(
+                    bs=batch.batch_size(), il=repr_il, ol=repr_ol,
+                    slo_tpot_us=sa.dvfs_tpot_slo_us,
+                    reeval_reason=reeval, kv_util=kv_util)
+                if decision.switched:
+                    self._apply_freq_single(decision.f)
+
+    def _compute_unified_prefill_slack(self, batch) -> float:
+        """Tightest TTFT slack (us), using pure processing time (no queue)."""
+        slo_us = self.server_args.dvfs_ttft_slo_ms * 1000
+        min_slack = slo_us
+        now = time.perf_counter()
+        for req in batch.reqs:
+            ts = getattr(req, "time_stats", None)
+            if ts is None:
+                continue
+            batch_start = getattr(ts, "prefill_run_batch_start_time", 0.0)
+            ref_t = batch_start if batch_start > 0 else getattr(
+                ts, "api_server_dispatch_time", 0.0)
+            if ref_t > 0:
+                elapsed = (now - ref_t) * 1e6
+                min_slack = min(min_slack, slo_us - elapsed)
+        return max(min_slack, 0)
+
+    def _unified_kv_util(self) -> float:
+        """KV-cache pool utilization in [0, 1] (1 = full)."""
+        try:
+            alloc = self.token_to_kv_pool_allocator
+            avail = alloc.available_size()
+            total = self.max_total_num_tokens
+            if total > 0:
+                return max(0.0, 1.0 - avail / total)
+        except Exception:
+            pass
+        return 0.0
+
     def _init_afd_dvfs(self, server_args):
         """Initialize Tier 2 DVFS components (predictor + controller + HW)."""
         try:
@@ -2317,16 +2479,29 @@ class Scheduler(
         )
 
     def _compute_prefill_slack(self, batch) -> float:
-        """Compute tightest TTFT slack (us) across all requests in batch."""
+        """Compute tightest TTFT slack (us) across all requests in batch.
+
+        Uses prefill_run_batch_start_time (when batch actually starts processing)
+        rather than api_server_dispatch_time (which includes queue wait).
+        """
         slo_us = self.server_args.afd_ttft_slo_ms * 1000
         min_slack = slo_us
         now = time.perf_counter()
         for req in batch.reqs:
             ts = getattr(req, "time_stats", None)
-            dispatch_t = getattr(ts, "api_server_dispatch_time", 0.0) if ts else 0.0
-            if dispatch_t > 0:
-                elapsed = (now - dispatch_t) * 1e6
+            if ts is None:
+                continue
+            # Prefer batch start time (excludes queue wait)
+            batch_start = getattr(ts, "prefill_run_batch_start_time", 0.0)
+            if batch_start > 0:
+                elapsed = (now - batch_start) * 1e6
                 min_slack = min(min_slack, slo_us - elapsed)
+            else:
+                # Fallback to dispatch time if batch_start not set yet
+                dispatch_t = getattr(ts, "api_server_dispatch_time", 0.0)
+                if dispatch_t > 0:
+                    elapsed = (now - dispatch_t) * 1e6
+                    min_slack = min(min_slack, slo_us - elapsed)
         return max(min_slack, 0)
 
     def _apply_freq(self, f_a: int, f_f: int):
@@ -2368,10 +2543,20 @@ class Scheduler(
 
         M = get_afd_micro_batch()
 
+        # Calibrate effective M for decode: if dynamic micro-batch is enabled
+        # and batch size is below threshold, actual M=1 (serial, not pipelined).
+        effective_M = M
+        if batch.forward_mode.is_decode():
+            if getattr(self.server_args, "afd_dynamic_micro_batch", False):
+                threshold = getattr(self.server_args, "afd_dynamic_mb_threshold", 8)
+                if batch.batch_size() < threshold:
+                    effective_M = 1
+
         if batch.forward_mode == ForwardMode.EXTEND:
             slack_us = self._compute_prefill_slack(batch)
             max_il = max(
-                (r.extend_input_len for r in batch.reqs), default=1024
+                (getattr(r, "_orig_extend_input_len", r.extend_input_len)
+                 for r in batch.reqs), default=1024
             )
             decision = self._af_dvfs_ctrl.select_freq_prefill(
                 bs=batch.batch_size(), il=max_il,
@@ -2379,15 +2564,16 @@ class Scheduler(
             )
             if decision.f_a != self._cur_f_a or decision.f_f != self._cur_f_f:
                 self._apply_freq(decision.f_a, decision.f_f)
-            if self._dvfs_decision_log is not None:
-                self._log_dvfs_decision({
-                    "phase": "prefill", "reeval": "per_request",
-                    "bs": batch.batch_size(), "il": max_il,
-                    "slack_us": round(slack_us, 1),
-                    "f_a": decision.f_a, "f_f": decision.f_f,
-                    "pred_lat_us": round(decision.latency_us, 1),
-                    "pred_energy_mj": round(decision.energy_mj, 1),
-                })
+            # Save prefill timing context for post-batch obs_lat measurement
+            self._prefill_dvfs_pending = {
+                "phase": "prefill", "reeval": "per_request",
+                "bs": batch.batch_size(), "il": max_il,
+                "slack_us": round(slack_us, 1),
+                "f_a": decision.f_a, "f_f": decision.f_f,
+                "pred_lat_us": round(decision.latency_us, 1),
+                "pred_energy_mj": round(decision.energy_mj, 1),
+            }
+            self._prefill_dvfs_start_t = time.perf_counter()
 
         elif batch.forward_mode.is_decode():
             self._af_dvfs_ctrl.tick_decode_iteration()
@@ -2419,13 +2605,13 @@ class Scheduler(
                     if t_iter_us > 0:
                         pred_cur_iter_us = self._af_dvfs_ctrl._iteration_latency(
                             "decode", self._cur_f_a, self._cur_f_f,
-                            batch.batch_size(), repr_il, repr_ol, M,
+                            batch.batch_size(), repr_il, repr_ol, effective_M,
                         )
                 except Exception:
                     pred_cur_iter_us = 0.0
                 decision = self._af_dvfs_ctrl.select_freq_decode(
                     bs=batch.batch_size(), il=repr_il, ol=repr_ol,
-                    slo_tpot_us=self.server_args.afd_tpot_slo_us, M=M,
+                    slo_tpot_us=self.server_args.afd_tpot_slo_us, M=effective_M,
                     reeval_reason=reeval_reason,
                 )
                 # Online calibration: feed observed vs predicted TPOT
@@ -2434,6 +2620,7 @@ class Scheduler(
                     self._af_dvfs_ctrl.update_calibration(
                         observed_tpot_us=t_iter_us,
                         predicted_tpot_us=decision.latency_us,
+                        M=effective_M,
                     )
                 if self._dvfs_decision_log is not None:
                     _reeval_names = {1: "window_expired", 2: "bs_change", 3: "slo_urgent"}
@@ -2444,6 +2631,7 @@ class Scheduler(
                         "phase": "decode",
                         "reeval": _reeval_names.get(reeval_reason, str(reeval_reason)),
                         "bs": batch.batch_size(), "il": repr_il, "ol": repr_ol,
+                        "M": effective_M,
                         "slo_tpot_us": self.server_args.afd_tpot_slo_us,
                         "cur_f_a": self._cur_f_a, "cur_f_f": self._cur_f_f,
                         "sel_f_a": decision.f_a, "sel_f_f": decision.f_f,
@@ -2453,7 +2641,8 @@ class Scheduler(
                         "pred_iter_err_pct": err,
                         "pred_sel_lat_us": round(decision.latency_us, 1),
                         "pred_sel_energy_mj": round(decision.energy_mj, 1),
-                        "calib": round(self._af_dvfs_ctrl.calibration_factor, 3),
+                        "calib": round(self._af_dvfs_ctrl.get_calibration_factor(effective_M), 3),
+                        "calib_serial": round(self._af_dvfs_ctrl._calibration_factor_serial, 3),
                     })
                 if decision.switched:
                     self._apply_freq(decision.f_a, decision.f_f)
@@ -2473,6 +2662,27 @@ class Scheduler(
                 }, f)
         except Exception as e:
             logger.error("Failed to write decode stats to %s: %s", stats_path, e)
+
+    def _afd_dvfs_after_prefill_batch(self, batch):
+        """Log prefill DVFS decision with observed latency after batch completes."""
+        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+        if batch.forward_mode != ForwardMode.EXTEND:
+            return
+        pending = getattr(self, "_prefill_dvfs_pending", None)
+        if pending is None:
+            return
+        start_t = getattr(self, "_prefill_dvfs_start_t", None)
+        if start_t is not None:
+            obs_lat_us = (time.perf_counter() - start_t) * 1e6
+            pending["obs_lat_us"] = round(obs_lat_us, 1)
+            pred = pending.get("pred_lat_us", 0)
+            if pred > 0 and obs_lat_us > 0:
+                err = (pred - obs_lat_us) / obs_lat_us * 100
+                pending["pred_err_pct"] = round(err, 1)
+        if self._dvfs_decision_log is not None:
+            self._log_dvfs_decision(pending)
+        self._prefill_dvfs_pending = None
+        self._prefill_dvfs_start_t = None
 
     def _afd_process_input_requests(self, recv_reqs):
         """Process input requests with AFD awareness (S1, S4).
@@ -2744,6 +2954,7 @@ class Scheduler(
 
             # Launch the current batch
             if batch:
+                self._unified_dvfs_before_batch(batch)
                 batch_result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), batch_result))
             else:

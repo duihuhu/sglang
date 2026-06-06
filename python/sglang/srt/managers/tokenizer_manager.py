@@ -1662,6 +1662,23 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                             scheduler_time_stats, completion_tokens
                         )
                     )
+                else:
+                    # Even without full metrics, output pure processing TTFT
+                    scheduler_time_stats = (
+                        recv_obj.time_stats[i]
+                        if recv_obj.time_stats is not None
+                        else None
+                    )
+                    if scheduler_time_stats is not None:
+                        _pft = getattr(scheduler_time_stats, "prefill_finished_time", 0.0)
+                        _pbs = getattr(scheduler_time_stats, "prefill_run_batch_start_time", 0.0)
+                        if _pft > 0.0 and _pbs > 0.0 and _pft > _pbs:
+                            meta_info["ttft_pure_processing"] = _pft - _pbs
+                        else:
+                            # PD mode: use cached value from prefill via KV transfer
+                            _cached = getattr(scheduler_time_stats, "cached_ttft_processing", 0.0)
+                            if _cached > 0.0:
+                                meta_info["ttft_pure_processing"] = _cached
 
                 del self.rid_to_state[rid]
 

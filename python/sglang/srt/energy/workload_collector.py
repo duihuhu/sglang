@@ -248,11 +248,16 @@ class WorkloadMetricsCollector:
 
             rec = _ReqRecord(rid=req.rid if hasattr(req, "rid") else "")
 
-            # TTFT: time from API dispatch to first token (prefill finish)
-            dispatch_t = getattr(ts, "api_server_dispatch_time", 0.0)
+            # TTFT: time from batch start to prefill finish (pure processing, no queue).
+            prefill_start_t = getattr(ts, "prefill_run_batch_start_time", 0.0)
             prefill_finish_t = getattr(ts, "prefill_finished_time", 0.0)
-            if dispatch_t > 0 and prefill_finish_t > 0:
-                rec.ttft_us = max(0, (prefill_finish_t - dispatch_t) * 1_000_000)
+            if prefill_start_t > 0 and prefill_finish_t > 0:
+                rec.ttft_us = max(0, (prefill_finish_t - prefill_start_t) * 1_000_000)
+            else:
+                # Fallback: dispatch to prefill finish (includes queue)
+                dispatch_t = getattr(ts, "api_server_dispatch_time", 0.0)
+                if dispatch_t > 0 and prefill_finish_t > 0:
+                    rec.ttft_us = max(0, (prefill_finish_t - dispatch_t) * 1_000_000)
 
             # TPOT: for decode iterations, time per output token
             # = decode iteration latency (from the last decode step)
