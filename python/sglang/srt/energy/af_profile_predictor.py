@@ -24,8 +24,8 @@ class _ModelUnpickler(pickle.Unpickler):
     _class_cache: dict = {}
 
     def find_class(self, module: str, name: str):
-        # V2 models (from energy_model_v2.py) — check first to avoid V1 conflict
-        if module in ("__main__", "energy_model_v2") and name in ("GBDTModel", "LookupModel"):
+        # V2/V3 models (from energy_model_v2.py / energy_model_v3.py)
+        if module in ("__main__", "energy_model_v2", "energy_model_v3") and name in ("GBDTModel", "LookupModel"):
             v2_key = f"v2_{name}"
             if v2_key not in self._class_cache:
                 import importlib.util
@@ -40,7 +40,7 @@ class _ModelUnpickler(pickle.Unpickler):
                 self._class_cache["v2_LookupModel"] = getattr(mod, "LookupModel")
             return self._class_cache[v2_key]
         # V1 models (from energy_model.py)
-        if module == "__main__" and name in (
+        if module in ("__main__", "energy_model") and name in (
             "LookupTableModel", "LinearRegressionModel",
         ):
             if name not in self._class_cache:
@@ -90,6 +90,10 @@ _V2_LABELS = [
     "Decode_iter_energy_F",
 ]
 
+# V3 labels are the same as V2 but loaded from a separate directory
+# and use features (tp_a, tp_f, M, f_A, f_F, input_len, batch_size)
+_V3_LABELS = _V2_LABELS
+
 
 @dataclass
 class PredictionResult:
@@ -103,15 +107,19 @@ class AFProfilePredictor:
 
     Args:
         model_dir: Directory containing *.pkl model files from energy_model.py.
+        v3_model_dir: Optional directory for V3 heterogeneous-TP models.
+                      If provided and V3 models found, they take priority over V2
+                      for coupled decode pipeline predictions.
     """
 
-    def __init__(self, model_dir: str):
+    def __init__(self, model_dir: str, v3_model_dir: str = None):
         self.model_dir = Path(model_dir)
+        self.v3_model_dir = Path(v3_model_dir) if v3_model_dir else None
         self._models: dict[str, dict[str, object]] = {}
         self._load_models()
 
     def _load_models(self):
-        """Load all available pkl models (V1 + V2)."""
+        """Load all available pkl models (V1 + V2 + V3)."""
         loaded = 0
         # V1 models (independent A/F per-layer)
         for label in _LABEL_MAP.values():
@@ -123,7 +131,7 @@ class AFProfilePredictor:
                         self._models[label][mtype] = _ModelUnpickler(f).load()
                     loaded += 1
 
-        # V2 models (coupled decode pipeline)
+        # V2 models (coupled decode pipeline, single tp)
         self._v2_models: dict[str, object] = {}
         for label in _V2_LABELS:
             for mtype in ("GBDT", "LUT"):
@@ -135,9 +143,27 @@ class AFProfilePredictor:
         self._v2_available = any(
             f"Decode_iter_lat_{t}" in self._v2_models for t in ("GBDT", "LUT")
         )
+
+        # V3 models (coupled decode pipeline, heterogeneous tp_a/tp_f)
+        self._v3_models: dict[str, object] = {}
+        self._v3_available = False
+        v3_dir = self.v3_model_dir or (self.model_dir.parent / "models_v3")
+        if v3_dir.exists():
+            for label in _V3_LABELS:
+                for mtype in ("GBDT", "LUT"):
+                    pkl_path = v3_dir / f"{label}_{mtype}.pkl"
+                    if pkl_path.exists():
+                        with open(pkl_path, "rb") as f:
+                            self._v3_models[f"{label}_{mtype}"] = _ModelUnpickler(f).load()
+                        loaded += 1
+            self._v3_available = any(
+                f"Decode_iter_lat_{t}" in self._v3_models for t in ("GBDT", "LUT")
+            )
+
         logger.info(
-            "AFProfilePredictor: loaded %d models from %s (v2_coupled=%s)",
-            loaded, self.model_dir, self._v2_available)
+            "AFProfilePredictor: loaded %d models from %s "
+            "(v2_coupled=%s, v3_hetero=%s)",
+            loaded, self.model_dir, self._v2_available, self._v3_available)
 
     def _build_df(self, phase: str, tp: int, freq: int,
                   bs: int, il: int, ol: Optional[int]) -> pd.DataFrame:
@@ -284,8 +310,13 @@ class AFProfilePredictor:
 
     @property
     def has_coupled_model(self) -> bool:
-        """Whether V2 coupled decode pipeline models are available."""
-        return self._v2_available
+        """Whether V2/V3 coupled decode pipeline models are available."""
+        return self._v2_available or self._v3_available
+
+    @property
+    def has_hetero_tp_model(self) -> bool:
+        """Whether V3 heterogeneous-TP models are available."""
+        return self._v3_available
 
     def _v2_predict(self, label: str, features: np.ndarray) -> Optional[float]:
         """Predict using V2 coupled model (GBDT preferred, LUT fallback)."""
@@ -299,53 +330,136 @@ class AFProfilePredictor:
                     return float(val)
         return None
 
+    def _v3_predict(self, label: str, features: np.ndarray) -> Optional[float]:
+        """Predict using V3 hetero-TP model (GBDT preferred, LUT fallback)."""
+        for mtype in ("GBDT", "LUT"):
+            key = f"{label}_{mtype}"
+            model = self._v3_models.get(key)
+            if model is not None:
+                pred = model.predict(features)
+                val = pred[0] if hasattr(pred, '__len__') else float(pred)
+                if not np.isnan(val) and val > 0:
+                    return float(val)
+        return None
+
     def predict_iteration_latency(
         self, M: int, f_a: int, f_f: int,
-        bs: int, il: int
+        bs: int, il: int, tp: int = 1,
+        tp_a: int = None, tp_f: int = None,
+        lif: float = 1.0,
     ) -> Optional[float]:
         """Predict end-to-end decode iteration latency (us) using coupled model.
 
         This accounts for IPC communication, pipeline drain, and micro-batch
         overlap — effects that the independent per-layer model cannot capture.
 
+        Args:
+            tp_a: Attention TP size. If None, defaults to `tp`.
+            tp_f: FFN TP size. If None, defaults to `tp`.
+            lif: Load Imbalance Factor from expert routing (1.0 = uniform).
+                 When a V4 model (with LIF feature) is available it is used
+                 directly; otherwise the prediction is scaled by a heuristic.
+
         Returns iteration latency in microseconds, or None if model unavailable.
         """
-        if not self._v2_available:
-            return None
-        features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
-        return self._v2_predict("Decode_iter_lat", features)
+        _tp_a = tp_a if tp_a is not None else tp
+        _tp_f = tp_f if tp_f is not None else tp
+
+        # Try V3 (hetero TP) first if available
+        if self._v3_available:
+            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs]], dtype=float)
+            result = self._v3_predict("Decode_iter_lat", features)
+            if result is not None:
+                return result * self._lif_correction(lif)
+
+        # Fallback to V2 (single tp, only if tp_a == tp_f)
+        if self._v2_available and _tp_a == _tp_f:
+            features = np.array([[_tp_a, M, f_a, f_f, il, bs]], dtype=float)
+            result = self._v2_predict("Decode_iter_lat", features)
+            if result is not None:
+                return result * self._lif_correction(lif)
+
+        return None
+
+    @staticmethod
+    def _lif_correction(lif: float) -> float:
+        """Heuristic latency correction based on Load Imbalance Factor.
+
+        Models trained without LIF assume uniform routing (LIF~1).
+        When actual LIF > 1, the real latency is higher due to expert
+        load imbalance causing tail latency spikes.
+
+        The correction uses a power-law scaling that becomes aggressive
+        for high LIF values, reflecting the non-linear relationship
+        between routing skew and actual system-level TPOT (due to
+        queuing, batch size cliff effects, and GPU idle time).
+
+        Returns a multiplier >= 1.0.
+        """
+        if lif <= 1.0:
+            return 1.0
+        import math
+        # Power-law: roughly 50% increase at LIF=3, 100% at LIF=6
+        return 1.0 + 0.3 * (lif - 1.0) ** 0.7
 
     def predict_iteration_energy(
         self, M: int, f_a: int, f_f: int,
-        bs: int, il: int
+        bs: int, il: int, tp: int = 1,
+        tp_a: int = None, tp_f: int = None,
+        lif: float = 1.0,
     ) -> Optional[tuple[float, float]]:
         """Predict per-iteration energy (DA_mJ, DF_mJ) using coupled model.
 
+        Args:
+            tp_a: Attention TP size. If None, defaults to `tp`.
+            tp_f: FFN TP size. If None, defaults to `tp`.
+            lif: Load Imbalance Factor (currently unused for energy; reserved).
+
         Returns (da_energy_mj, df_energy_mj) or None if model unavailable.
         """
-        if not self._v2_available:
-            return None
-        features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
-        da_e = self._v2_predict("Decode_iter_energy_A", features)
-        df_e = self._v2_predict("Decode_iter_energy_F", features)
-        if da_e is None or df_e is None:
-            return None
-        return (da_e, df_e)
+        _tp_a = tp_a if tp_a is not None else tp
+        _tp_f = tp_f if tp_f is not None else tp
+
+        # Try V3 (hetero TP) first
+        if self._v3_available:
+            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs]], dtype=float)
+            da_e = self._v3_predict("Decode_iter_energy_A", features)
+            df_e = self._v3_predict("Decode_iter_energy_F", features)
+            if da_e is not None and df_e is not None:
+                return (da_e, df_e)
+
+        # Fallback to V2 (single tp)
+        if self._v2_available and _tp_a == _tp_f:
+            features = np.array([[_tp_a, M, f_a, f_f, il, bs]], dtype=float)
+            da_e = self._v2_predict("Decode_iter_energy_A", features)
+            df_e = self._v2_predict("Decode_iter_energy_F", features)
+            if da_e is not None and df_e is not None:
+                return (da_e, df_e)
+
+        return None
 
     def find_best_freq_pair_coupled(
         self, M: int, bs: int, il: int,
         slo_budget_us: float,
         freqs: Optional[list[int]] = None,
+        tp: int = 1,
+        tp_a: int = None, tp_f: int = None,
+        lif: float = 1.0,
     ) -> Optional[tuple[int, int, float, float]]:
         """Find minimum-energy (f_A, f_F) pair under SLO using coupled model.
 
         Unlike find_best_freq_pair which uses per-layer independent models,
-        this uses the V2 iteration-level coupled model that accounts for
+        this uses the V2/V3 iteration-level coupled model that accounts for
         pipeline overhead and A/F interaction.
+
+        Args:
+            tp_a: Attention TP size. If None, defaults to `tp`.
+            tp_f: FFN TP size. If None, defaults to `tp`.
+            lif: Load Imbalance Factor for latency correction.
 
         Returns (f_A, f_F, iter_lat_us, total_energy_mj) or None.
         """
-        if not self._v2_available:
+        if not self.has_coupled_model:
             return None
         if freqs is None:
             freqs = VALID_FREQS
@@ -353,10 +467,12 @@ class AFProfilePredictor:
         best = None
         for f_a in freqs:
             for f_f in freqs:
-                lat = self.predict_iteration_latency(M, f_a, f_f, bs, il)
+                lat = self.predict_iteration_latency(
+                    M, f_a, f_f, bs, il, tp=tp, tp_a=tp_a, tp_f=tp_f, lif=lif)
                 if lat is None or lat > slo_budget_us:
                     continue
-                energy = self.predict_iteration_energy(M, f_a, f_f, bs, il)
+                energy = self.predict_iteration_energy(
+                    M, f_a, f_f, bs, il, tp=tp, tp_a=tp_a, tp_f=tp_f, lif=lif)
                 if energy is None:
                     continue
                 total_e = energy[0] + energy[1]

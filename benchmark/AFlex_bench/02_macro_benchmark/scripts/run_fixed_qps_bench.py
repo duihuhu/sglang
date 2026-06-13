@@ -54,7 +54,11 @@ MODEL = "/models/Qwen/Qwen3-32B/"
 HERE = Path(__file__).resolve().parent
 ENERGY_MODEL_DIR = os.environ.get(
     "SGLANG_ENERGY_MODEL_DIR",
-    "/workspace/sglang/benchmark/test_motivation/energy_models"
+    "/workspace/sglang-tier/benchmark/AFlex_bench/03_sensitivity/slo_sweep/retrain/models_v2"
+)
+ENERGY_MODEL_V3_DIR = os.environ.get(
+    "SGLANG_ENERGY_MODEL_V3_DIR",
+    "/workspace/sglang-tier/benchmark/AFlex_bench/03_sensitivity/slo_sweep/retrain/models_v3"
 )
 
 MAX_SM_FREQ_MHZ = 1410

@@ -48,7 +48,7 @@ REEVAL_WINDOW_EXPIRED = 1
 REEVAL_BS_CHANGE = 2
 REEVAL_SLO_URGENT = 3
 
-SLO_URGENCY_RATIO = 0.9
+SLO_URGENCY_RATIO = 0.7
 
 
 @dataclass
@@ -120,17 +120,25 @@ class UnifiedDVFSController:
     def select_freq_prefill(
         self, bs: int, il: int, slack_us: float,
         remaining_layers: Optional[int] = None,
+        floor_freq: Optional[int] = None,
     ) -> UnifiedDVFSDecision:
         """Pick the lowest-energy frequency whose prefill latency fits slack.
 
         slack_us is the tightest TTFT budget (pure processing time, queue wait
         already excluded) across the batch. Searches all candidate freqs.
+
+        Args:
+            floor_freq: If set, skip frequencies below this value. Used to
+                ensure the GPU does not drop below a frequency needed by
+                interleaved decode batches (decode-aware prefill).
         """
         if remaining_layers is None:
             remaining_layers = self.num_layers
 
         best: Optional[UnifiedDVFSDecision] = None
         for f in self.freqs:
+            if floor_freq is not None and f < floor_freq:
+                continue
             try:
                 t_layer = self._layer_latency("prefill", f, bs, il, None)
             except (RuntimeError, ValueError):
@@ -192,8 +200,13 @@ class UnifiedDVFSController:
 
         If KV-cache utilization is high, force max frequency to drain requests
         faster and avoid OOM/retract regardless of energy.
+
+        Uses a conservative safety margin (80% of SLO) to account for
+        prefill chunk blocking in continuous batching (chunked prefill).
         """
         st = self._decode_state
+        # Conservative: only use 80% of the TPOT budget for the iteration itself
+        effective_slo = slo_tpot_us * 0.8
 
         # KV-util OOM guard: override energy-optimal choice with max freq.
         if kv_util > KV_UTIL_FORCE_MAX:
@@ -229,7 +242,7 @@ class UnifiedDVFSController:
             except (RuntimeError, ValueError):
                 continue
             t_iter = t_layer * self.num_layers
-            if t_iter > slo_tpot_us:
+            if t_iter > effective_slo:
                 continue
             switched = self._should_switch(f, st.cur_f, bs, il, ol, w_remaining)
             if switched:
@@ -289,6 +302,44 @@ class UnifiedDVFSController:
         w = max(W_MIN, int(10 * T_SWITCH_US / t_iter_avg_us + 0.5))
         self._decode_state.window_size = w
         return w
+
+    # ── Decode-aware floor for prefill frequency selection ────────────
+
+    def compute_decode_floor_freq(
+        self, decode_bs: int, decode_il: int, decode_ol: int,
+        slo_tpot_us: float,
+        prefill_bs: int = 1,
+        prefill_il: int = 8192,
+    ) -> int:
+        """Find minimum prefill frequency that limits TPOT degradation.
+
+        In Native mode with chunked prefill, decode requests are blocked for
+        the entire duration of a prefill chunk. We cannot make chunk_time <
+        TPOT_SLO (chunks are inherently longer), but we can limit the
+        degradation relative to max frequency.
+
+        Strategy: allow at most 10% latency increase over the baseline (max
+        freq) chunk time. This is very conservative to ensure TPOT SLO
+        compliance: even a small increase in prefill chunk time directly
+        blocks decode iterations and causes TPOT violations.
+        """
+        try:
+            t_baseline = self._layer_latency(
+                "prefill", F_MAX, prefill_bs, prefill_il, None) * self.num_layers
+        except (RuntimeError, ValueError):
+            return F_MAX
+
+        max_allowed = t_baseline * 1.1
+
+        for f in self.freqs:
+            try:
+                t_chunk = self._layer_latency(
+                    "prefill", f, prefill_bs, prefill_il, None) * self.num_layers
+            except (RuntimeError, ValueError):
+                continue
+            if t_chunk <= max_allowed:
+                return f
+        return F_MAX
 
     @property
     def cur_freq(self) -> int:

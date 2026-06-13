@@ -173,6 +173,38 @@ DEPLOYMENTS = {
         "af_tp": 2,
         "dynamic_mb": True,
     },
+    "pdaf_8g_asym_1p6d_tier": {
+        "label": "PD+AF Asym 1PA1PF+2DA4DF + DVFS (P:TP1x2, D:DA-TP2+DF-TP4, 8 GPU)",
+        "gpus": list(range(8)),
+        "prefill_gpus": [0, 1],
+        "decode_gpus": [2, 3, 4, 5, 6, 7],
+        "ngpu": 8,
+        "asym_pdaf": {
+            "p_cvd": "0,1",
+            "p_tp": 1,
+            "d_cvd": "2,3,4,5,6,7",
+            "d_attn_tp": 2,
+            "d_ffn_tp": 4,
+            "micro_batch": 2,
+            "dynamic_mb": True,
+        },
+    },
+    "pdaf_8g_asym_1p6d": {
+        "label": "PD+AF Asym 1PA1PF+2DA4DF (P:TP1x2, D:DA-TP2+DF-TP4, 8 GPU)",
+        "gpus": list(range(8)),
+        "prefill_gpus": [0, 1],
+        "decode_gpus": [2, 3, 4, 5, 6, 7],
+        "ngpu": 8,
+        "asym_pdaf": {
+            "p_cvd": "0,1",
+            "p_tp": 1,
+            "d_cvd": "2,3,4,5,6,7",
+            "d_attn_tp": 2,
+            "d_ffn_tp": 4,
+            "micro_batch": 2,
+            "dynamic_mb": True,
+        },
+    },
     "native_dp8": {
         "label": "Native DP=8 (8x TP=1 independent instances, round-robin, 8 GPU)",
         "gpus": list(range(8)),
@@ -461,6 +493,7 @@ _AFD_EXTRA_BASE = [
 def _dvfs_args():
     return ["--afd-dvfs-enabled",
             "--afd-energy-model-dir", B.ENERGY_MODEL_DIR,
+            "--afd-energy-model-v3-dir", B.ENERGY_MODEL_V3_DIR,
             "--afd-ttft-slo-ms", str(DVFS_TTFT_SLO_MS),
             "--afd-tpot-slo-us", str(DVFS_TPOT_SLO_US)]
 
@@ -624,7 +657,94 @@ def start_pdaf(deploy, log_dir, prefix):
     return procs, url
 
 
-def start_pd_dp4(log_dir, prefix, spec):
+def start_pdaf_asym(deploy, log_dir, prefix):
+    """Start asymmetric PDAF: 1PA(TP1)+1PF(TP1) on 2 prefill GPUs,
+    2DA(TP2)+4DF(TP4) on 6 decode GPUs.
+
+    GPU layout:
+      Prefill: PF(ffn, TP=1, base=0) + PA(attn, TP=1, base=1) on CVD=0,1
+      Decode:  DF(ffn, TP=4, base=0) + DA(attn, TP=2, base=4) on CVD=2,3,4,5,6,7
+    """
+    tier = deploy.endswith("_tier")
+    stats_path = _tier1_stats_path() if tier else None
+    spec = DEPLOYMENTS[deploy]
+    asym = spec["asym_pdaf"]
+    p_cvd = asym["p_cvd"]
+    d_cvd = asym["d_cvd"]
+    p_tp = asym["p_tp"]
+    d_attn_tp = asym["d_attn_tp"]
+    d_ffn_tp = asym["d_ffn_tp"]
+    micro_batch = asym["micro_batch"]
+    dynamic_mb = asym.get("dynamic_mb", False)
+
+    procs = []
+    env_base = os.environ.copy()
+    env_base["SGLANG_DISABLE_REQUEST_LOGGING"] = "true"
+    env_base["UCX_LOG_LEVEL"] = "fatal"
+    env_base["AFD_UCX_TLS"] = "rc,tcp,cuda_copy,cuda_ipc"
+    env_base["SGLANG_DISAGGREGATION_THREAD_POOL_SIZE"] = "128"
+    env_base["AFD_ASYNC_PIPELINE"] = "1"
+    if tier:
+        env_base["AFD_DVFS_DECISION_LOG"] = str(
+            log_dir / f"{prefix}dvfs_decisions_{{persp}}_{{disagg}}_gpu{{gpu}}.jsonl")
+
+    # Prefill: PF(ffn, TP=1, base=0) + PA(attn, TP=1, base=1) on CVD=0,1
+    env_pf = _afd_env(env_base, p_cvd, UCX_P, SCHED_P, peer_device=1,
+                      nvml_indices=_owned_gpus(p_cvd, 0, p_tp))
+    _popen("pf", _afd_cmd(PF_PORT, "ffn", "prefill", tp=p_tp, base_gpu_id=0,
+                          micro_batch=micro_batch, tier=tier, stats_path=stats_path,
+                          dynamic_mb=dynamic_mb),
+           env_pf, log_dir, prefix, procs)
+    time.sleep(2)
+
+    env_pa = _afd_env(env_base, p_cvd, UCX_P, SCHED_P, peer_device=0,
+                      ffn_host="127.0.0.1",
+                      nvml_indices=_owned_gpus(p_cvd, 1, p_tp))
+    _popen("pa", _afd_cmd(PA_PORT, "attn", "prefill", tp=p_tp, base_gpu_id=1,
+                          micro_batch=micro_batch, tier=tier, is_pa=True,
+                          stats_path=stats_path, dynamic_mb=dynamic_mb),
+           env_pa, log_dir, prefix, procs)
+
+    if not B.wait_port("127.0.0.1", PF_PORT, 300) or \
+       not B.wait_port("127.0.0.1", PA_PORT, 300):
+        log.error("AF prefill (asym) failed to start")
+        B.cleanup_procs(procs)
+        return None
+
+    # Decode: DF(ffn, TP=4, base=0) + DA(attn, TP=2, base=4) on CVD=2,3,4,5,6,7
+    env_df = _afd_env(env_base, d_cvd, UCX_D, SCHED_D, peer_device=4,
+                      nvml_indices=_owned_gpus(d_cvd, 0, d_ffn_tp))
+    _popen("df", _afd_cmd(DF_PORT, "ffn", "decode", tp=d_ffn_tp, base_gpu_id=0,
+                          micro_batch=micro_batch, attn_tp=d_attn_tp, tier=tier,
+                          stats_path=stats_path, dynamic_mb=dynamic_mb),
+           env_df, log_dir, prefix, procs)
+    time.sleep(5)
+
+    env_da = _afd_env(env_base, d_cvd, UCX_D, SCHED_D, peer_device=0,
+                      ffn_host="127.0.0.1",
+                      nvml_indices=_owned_gpus(d_cvd, 4, d_attn_tp))
+    _popen("da", _afd_cmd(DA_PORT, "attn", "decode", tp=d_attn_tp, base_gpu_id=4,
+                          micro_batch=micro_batch, ffn_tp=d_ffn_tp, tier=tier,
+                          stats_path=stats_path, dynamic_mb=dynamic_mb),
+           env_da, log_dir, prefix, procs)
+
+    if not B.wait_port("127.0.0.1", DA_PORT, 300) or \
+       not B.wait_port("127.0.0.1", DF_PORT, 300):
+        log.error("AF decode (asym) failed to start")
+        B.cleanup_procs(procs)
+        return None
+
+    time.sleep(5)
+    if not start_router(procs, log_dir, prefix, PA_PORT, DA_PORT):
+        B.cleanup_procs(procs)
+        return None
+    url = f"http://127.0.0.1:{ROUTER_PORT}"
+    log.info("%s ready at %s, warming up...", deploy, url)
+    B.warmup(url)
+    return procs, url
+
+
+def start_dp_full(log_dir, prefix, spec):
     """Start DP=N: independent full SGLang instances with round-robin router.
 
     Used by native_dp8 / native_dp4. When the dp_full spec sets tier=True each
@@ -665,9 +785,8 @@ def start_pd_dp4(log_dir, prefix, spec):
 
     cmd = [PYTHON, "-m", "sglang_router.launch_router",
            "--host", "127.0.0.1", "--port", str(ROUTER_PORT),
-           "--policy", "round_robin"]
-    for u in worker_urls:
-        cmd += ["--worker-urls", u]
+           "--policy", "round_robin",
+           "--worker-urls"] + worker_urls
     rf = open(log_dir / f"{prefix}router.log", "w")
     rp = subprocess.Popen(cmd, env=os.environ.copy(), stdout=rf,
                           stderr=subprocess.STDOUT, start_new_session=True)
@@ -689,7 +808,7 @@ def start_deploy(deploy, log_dir, prefix):
     if "native" in spec:
         return start_native_tp8(log_dir, prefix, spec)
     if "dp_full" in spec:
-        return start_pd_dp4(log_dir, prefix, spec)
+        return start_dp_full(log_dir, prefix, spec)
     if "dp" in spec:
         c = spec["dp"]
         return start_pd_dp(log_dir, prefix, c["instances"], c["tp"],
@@ -697,6 +816,8 @@ def start_deploy(deploy, log_dir, prefix):
     if "pd" in spec:
         c = spec["pd"]
         return start_pd(log_dir, prefix, c["p_cvd"], c["p_tp"], c["d_cvd"], c["d_tp"])
+    if "asym_pdaf" in spec:
+        return start_pdaf_asym(deploy, log_dir, prefix)
     return start_pdaf(deploy, log_dir, prefix)
 
 

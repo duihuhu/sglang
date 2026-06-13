@@ -778,6 +778,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
         return AFDDecoderLayerMixin.forward_afd_A(
             self, positions, hidden_states, forward_batch, residual
         )
@@ -788,6 +790,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
         return AFDDecoderLayerMixin.forward_afd_F(
             self, hidden_states, forward_batch, residual
         )

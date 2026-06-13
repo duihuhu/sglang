@@ -645,6 +645,7 @@ class ServerArgs:
 
     # Energy-aware DVFS (Tier 2)
     afd_energy_model_dir: Optional[str] = None
+    afd_energy_model_v3_dir: Optional[str] = None  # V3 hetero-TP models directory
     afd_dvfs_enabled: bool = False
     afd_ttft_slo_ms: float = 5000.0
     afd_tpot_slo_us: float = 50000.0
@@ -5576,6 +5577,14 @@ class ServerArgs:
             default=ServerArgs.afd_energy_model_dir,
             help="Directory containing energy model pkl files (from energy_model.py). "
             "Required when --afd-dvfs-enabled is set.",
+        )
+        parser.add_argument(
+            "--afd-energy-model-v3-dir",
+            type=str,
+            default=ServerArgs.afd_energy_model_v3_dir,
+            help="Directory containing V3 heterogeneous-TP energy model pkl files. "
+            "If provided, V3 models (with separate tp_a/tp_f features) will be "
+            "preferred over V2 for coupled decode pipeline predictions.",
         )
         parser.add_argument(
             "--afd-dvfs-enabled",

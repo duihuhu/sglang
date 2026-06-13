@@ -358,6 +358,11 @@ class Scheduler(
         # Init model configs
         self.init_model_config()
 
+        # Set MoE expert count for LIF computation
+        hf_cfg = getattr(self.model_config.hf_config, "text_config", self.model_config.hf_config)
+        self._moe_num_experts = getattr(hf_cfg, "num_local_experts", 0)
+        self._moe_tp_for_lif = self.server_args.tp_size
+
         # Init metrics stats
         self.init_metrics(tp_rank, pp_rank, dp_rank)
 
@@ -521,6 +526,10 @@ class Scheduler(
         self._af_dvfs_ctrl = None
         self._dvfs_hw = None
         self._dvfs_hw_list = []
+        # MoE LIF state (initialized here for FFN side too)
+        self._lif_ema = 1.0
+        self._moe_num_experts = 0
+        self._moe_tp_for_lif = 1
         self._cur_f_a = 1410
         self._cur_f_f = 1410
         if getattr(self.server_args, "afd_dvfs_enabled", False):
@@ -1598,6 +1607,10 @@ class Scheduler(
                 batch_result = self.run_batch(batch)
                 self._afd_dvfs_after_prefill_batch(batch)
 
+                # FFN side: compute and publish LIF for ATTN-side DVFS
+                if afd_is_ffn() and is_decode and self._moe_num_experts > 0:
+                    self._compute_lif_for_dvfs(batch)
+
                 if afd_overlap:
                     self.result_queue.append((batch.copy(), batch_result))
                 else:
@@ -2171,10 +2184,27 @@ class Scheduler(
             max_il = max(
                 (getattr(r, "_orig_extend_input_len", r.extend_input_len)
                  for r in batch.reqs), default=1024)
-            decision = ctrl.select_freq_prefill(
-                bs=batch.batch_size(), il=max_il, slack_us=slack_us)
-            if decision.switched:
-                self._apply_freq_single(decision.f)
+            # Ultra-conservative: if decode requests are active in continuous
+            # batching (Native mode), force F_MAX for prefill to minimize
+            # decode blocking. Only allow frequency reduction when idle.
+            force_max = False
+            if (disagg == DisaggregationMode.NULL
+                    and hasattr(self, "running_batch")
+                    and not self.running_batch.is_empty()
+                    and not getattr(self.running_batch, "is_prefill_only", False)):
+                decode_bs = self.running_batch.batch_size()
+                if decode_bs > 0:
+                    force_max = True
+            if force_max:
+                from sglang.srt.energy.unified_dvfs_controller import F_MAX as _F_MAX
+                if ctrl.cur_freq != _F_MAX:
+                    self._apply_freq_single(_F_MAX)
+                    ctrl._cur_f = _F_MAX
+            else:
+                decision = ctrl.select_freq_prefill(
+                    bs=batch.batch_size(), il=max_il, slack_us=slack_us)
+                if decision.switched:
+                    self._apply_freq_single(decision.f)
         else:
             ctrl.tick_decode_iteration()
             t_iter_us = 0.0
@@ -2212,10 +2242,8 @@ class Scheduler(
             if ts is None:
                 continue
             batch_start = getattr(ts, "prefill_run_batch_start_time", 0.0)
-            ref_t = batch_start if batch_start > 0 else getattr(
-                ts, "api_server_dispatch_time", 0.0)
-            if ref_t > 0:
-                elapsed = (now - ref_t) * 1e6
+            if batch_start > 0:
+                elapsed = (now - batch_start) * 1e6
                 min_slack = min(min_slack, slo_us - elapsed)
         return max(min_slack, 0)
 
@@ -2237,7 +2265,10 @@ class Scheduler(
             from sglang.srt.energy.af_profile_predictor import AFProfilePredictor
             from sglang.srt.energy.af_dvfs_controller import AFDVFSController
 
-            predictor = AFProfilePredictor(server_args.afd_energy_model_dir)
+            predictor = AFProfilePredictor(
+                server_args.afd_energy_model_dir,
+                v3_model_dir=getattr(server_args, "afd_energy_model_v3_dir", None),
+            )
             tp_a = getattr(server_args, "afd_attn_tp", None) or server_args.tp_size
             tp_f = getattr(server_args, "afd_ffn_tp", None) or server_args.tp_size
             self._af_dvfs_ctrl = AFDVFSController(
@@ -2252,6 +2283,12 @@ class Scheduler(
                 calibration_ema=getattr(self.server_args, "afd_dvfs_calibration_ema", 0.2),
             )
             logger.info("AFD DVFS controller initialized")
+
+            # MoE LIF (Load Imbalance Factor) state for expert-aware DVFS
+            self._lif_ema = 1.0
+            hf_cfg = getattr(self.model_config.hf_config, "text_config", self.model_config.hf_config)
+            self._moe_num_experts = getattr(hf_cfg, "num_local_experts", 0)
+            self._moe_tp_for_lif = tp_f
         except Exception as e:
             logger.warning("Failed to init AFD DVFS controller: %s", e)
             self._af_dvfs_ctrl = None
@@ -2481,8 +2518,9 @@ class Scheduler(
     def _compute_prefill_slack(self, batch) -> float:
         """Compute tightest TTFT slack (us) across all requests in batch.
 
-        Uses prefill_run_batch_start_time (when batch actually starts processing)
-        rather than api_server_dispatch_time (which includes queue wait).
+        Uses only prefill_run_batch_start_time (processing start, excludes queue
+        wait). If not yet set, assumes full SLO budget — never falls back to
+        api_server_dispatch_time which includes arbitrary queue delay.
         """
         slo_us = self.server_args.afd_ttft_slo_ms * 1000
         min_slack = slo_us
@@ -2491,17 +2529,10 @@ class Scheduler(
             ts = getattr(req, "time_stats", None)
             if ts is None:
                 continue
-            # Prefer batch start time (excludes queue wait)
             batch_start = getattr(ts, "prefill_run_batch_start_time", 0.0)
             if batch_start > 0:
                 elapsed = (now - batch_start) * 1e6
                 min_slack = min(min_slack, slo_us - elapsed)
-            else:
-                # Fallback to dispatch time if batch_start not set yet
-                dispatch_t = getattr(ts, "api_server_dispatch_time", 0.0)
-                if dispatch_t > 0:
-                    elapsed = (now - dispatch_t) * 1e6
-                    min_slack = min(min_slack, slo_us - elapsed)
         return max(min_slack, 0)
 
     def _apply_freq(self, f_a: int, f_f: int):
@@ -2609,10 +2640,13 @@ class Scheduler(
                         )
                 except Exception:
                     pred_cur_iter_us = 0.0
+                # Compute LIF from expert routing if MoE model
+                lif = self._compute_lif_for_dvfs(batch)
                 decision = self._af_dvfs_ctrl.select_freq_decode(
                     bs=batch.batch_size(), il=repr_il, ol=repr_ol,
                     slo_tpot_us=self.server_args.afd_tpot_slo_us, M=effective_M,
                     reeval_reason=reeval_reason,
+                    lif=lif,
                 )
                 # Online calibration: feed observed vs predicted TPOT
                 if (self._af_dvfs_ctrl._calibration_enabled
@@ -2646,6 +2680,63 @@ class Scheduler(
                     })
                 if decision.switched:
                     self._apply_freq(decision.f_a, decision.f_f)
+
+    def _compute_lif_for_dvfs(self, batch) -> float:
+        """Compute Load Imbalance Factor from expert routing for DVFS decisions.
+
+        In non-disaggregated mode: reads directly from device cache.
+        In PDAF mode: the DA (ATTN) side reads LIF from a shared file written
+        by the DF (FFN) side, since expert routing only happens on FFN.
+        """
+        if self._moe_num_experts <= 0:
+            return 1.0
+
+        # Try reading from device cache (works in non-disaggregated or FFN side)
+        try:
+            from sglang.srt.layers.moe.routed_experts_capturer import (
+                get_global_experts_capturer,
+            )
+            from sglang.srt.energy.expert_load_metric import compute_lif
+
+            capturer = get_global_experts_capturer()
+            dev_cache = capturer.get_device_cache()
+            if dev_cache is not None:
+                bs = batch.batch_size()
+                topk_ids = dev_cache.buffer[:bs, :, :]
+                topk_flat = topk_ids.reshape(-1, topk_ids.shape[-1])
+                if topk_flat.sum() != 0:
+                    lif_cur = compute_lif(topk_flat, self._moe_num_experts, self._moe_tp_for_lif)
+                    self._lif_ema = 0.8 * self._lif_ema + 0.2 * lif_cur
+                    self._write_lif_shared(self._lif_ema)
+                    return self._lif_ema
+        except Exception:
+            pass
+
+        # Fallback: read from shared file (DA side in PDAF reads what DF wrote)
+        return self._read_lif_shared()
+
+    def _write_lif_shared(self, lif: float):
+        """Write LIF to shared file for cross-process communication (FFN→ATTN)."""
+        try:
+            lif_path = os.environ.get("AFD_LIF_SHARED_PATH")
+            if lif_path:
+                with open(lif_path, "w") as f:
+                    f.write(f"{lif:.4f}")
+        except Exception:
+            pass
+
+    def _read_lif_shared(self) -> float:
+        """Read LIF from shared file (ATTN side reading what FFN wrote)."""
+        try:
+            lif_path = os.environ.get("AFD_LIF_SHARED_PATH")
+            if lif_path and os.path.exists(lif_path):
+                with open(lif_path, "r") as f:
+                    val = float(f.read().strip())
+                if val > 0:
+                    self._lif_ema = 0.8 * self._lif_ema + 0.2 * val
+        except Exception:
+            pass
+        return self._lif_ema
 
     def _write_afd_decode_stats(self, t_iter_us: float, bs: int):
         """Write decode iteration timing to shared stats file for PA's Tier1 monitor."""

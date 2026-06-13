@@ -1031,6 +1031,7 @@ class SchedulerDisaggregationDecodeMixin:
 
             # Launch the current batch
             if batch:
+                self._unified_dvfs_before_batch(batch)
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
             else:
@@ -1151,6 +1152,7 @@ class SchedulerDisaggregationDecodeMixin:
 
             # Launch the current batch
             if batch:
+                self._unified_dvfs_before_batch(batch)
                 batch_result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), batch_result))
             else:
