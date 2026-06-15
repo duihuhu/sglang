@@ -2281,6 +2281,7 @@ class Scheduler(
                 feedback_hold=getattr(self.server_args, "afd_dvfs_feedback_hold", 30),
                 online_calibration=getattr(self.server_args, "afd_dvfs_online_calibration", False),
                 calibration_ema=getattr(self.server_args, "afd_dvfs_calibration_ema", 0.2),
+                moe_freq_floor=0,  # disabled: MoE freq floor needs more research
             )
             logger.info("AFD DVFS controller initialized")
 
@@ -2641,12 +2642,12 @@ class Scheduler(
                 except Exception:
                     pred_cur_iter_us = 0.0
                 # Compute LIF from expert routing if MoE model
-                lif = self._compute_lif_for_dvfs(batch)
+                lif, max_expert_tokens, els = self._compute_lif_for_dvfs(batch)
                 decision = self._af_dvfs_ctrl.select_freq_decode(
                     bs=batch.batch_size(), il=repr_il, ol=repr_ol,
                     slo_tpot_us=self.server_args.afd_tpot_slo_us, M=effective_M,
                     reeval_reason=reeval_reason,
-                    lif=lif,
+                    lif=lif, max_expert_tokens=max_expert_tokens, els=els,
                 )
                 # Online calibration: feed observed vs predicted TPOT
                 if (self._af_dvfs_ctrl._calibration_enabled
@@ -2681,22 +2682,20 @@ class Scheduler(
                 if decision.switched:
                     self._apply_freq(decision.f_a, decision.f_f)
 
-    def _compute_lif_for_dvfs(self, batch) -> float:
-        """Compute Load Imbalance Factor from expert routing for DVFS decisions.
+    def _compute_lif_for_dvfs(self, batch) -> tuple:
+        """Compute Load Imbalance Factor and expert features for DVFS decisions.
 
-        In non-disaggregated mode: reads directly from device cache.
-        In PDAF mode: the DA (ATTN) side reads LIF from a shared file written
-        by the DF (FFN) side, since expert routing only happens on FFN.
+        Returns (lif, max_expert_tokens, els).
         """
         if self._moe_num_experts <= 0:
-            return 1.0
+            return 1.0, 0, 1.0
 
         # Try reading from device cache (works in non-disaggregated or FFN side)
         try:
             from sglang.srt.layers.moe.routed_experts_capturer import (
                 get_global_experts_capturer,
             )
-            from sglang.srt.energy.expert_load_metric import compute_lif
+            from sglang.srt.energy.expert_load_metric import compute_lif, compute_els
 
             capturer = get_global_experts_capturer()
             dev_cache = capturer.get_device_cache()
@@ -2705,15 +2704,24 @@ class Scheduler(
                 topk_ids = dev_cache.buffer[:bs, :, :]
                 topk_flat = topk_ids.reshape(-1, topk_ids.shape[-1])
                 if topk_flat.sum() != 0:
+                    import torch
+                    flat_ids = topk_flat.flatten()
+                    counts = torch.bincount(flat_ids.int(), minlength=self._moe_num_experts)
+                    max_e = int(counts.max().item())
+                    mean_c = counts.float().mean().item()
+                    els_cur = max_e / mean_c if mean_c > 0 else 1.0
                     lif_cur = compute_lif(topk_flat, self._moe_num_experts, self._moe_tp_for_lif)
                     self._lif_ema = 0.8 * self._lif_ema + 0.2 * lif_cur
+                    self._max_expert_tokens_ema = int(0.8 * getattr(self, '_max_expert_tokens_ema', 0) + 0.2 * max_e)
+                    self._els_ema = 0.8 * getattr(self, '_els_ema', 1.0) + 0.2 * els_cur
                     self._write_lif_shared(self._lif_ema)
-                    return self._lif_ema
+                    return self._lif_ema, self._max_expert_tokens_ema, self._els_ema
         except Exception:
             pass
 
         # Fallback: read from shared file (DA side in PDAF reads what DF wrote)
-        return self._read_lif_shared()
+        lif = self._read_lif_shared()
+        return lif, getattr(self, '_max_expert_tokens_ema', 0), getattr(self, '_els_ema', 1.0)
 
     def _write_lif_shared(self, lif: float):
         """Write LIF to shared file for cross-process communication (FFN→ATTN)."""

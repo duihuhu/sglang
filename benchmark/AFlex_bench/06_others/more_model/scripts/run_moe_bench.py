@@ -446,7 +446,8 @@ class DeploymentManager:
                   "--disaggregation-transfer-backend", "mooncake",
                   "--disaggregation-bootstrap-port", str(BS_PORT),
                   "--disaggregation-ib-device", "mlx5_4",
-                  "--enable-return-routed-experts"]
+                  "--enable-return-routed-experts",
+                  "--enable-metrics"]
 
         dvfs_args = []
         if self.tier:
@@ -527,6 +528,156 @@ class DeploymentManager:
             return None
         log.info("PDAF ready (M=%d, tier=%s, router port %d)",
                  micro_batch, self.tier, ROUTER_PORT)
+        return ROUTER_PORT
+
+    def start_pdaf_asym(self, micro_batch=2):
+        """Start asymmetric PDAF: PA(TP1)+PF(TP2) on 3GPU + DA(TP1)+DF(TP4) on 5GPU.
+        MoE-friendly layout: FFN needs at least TP=2, Attn can use TP=1.
+        Layout:
+          Prefill: CVD="0,1,2" -> PF(TP=2, base=0) + PA(TP=1, base=2)
+          Decode:  CVD="3,4,5,6,7" -> DF(TP=4, base=0) + DA(TP=1, base=4)
+        Gives decode side more GPU for KV cache capacity.
+        """
+        return self._start_pdaf_asym_impl(micro_batch)
+
+    def _start_pdaf_asym_impl(self, micro_batch):
+        """Implementation of asymmetric PDAF deployment."""
+        env_base = self._common_env()
+        env_base["AFD_UCX_TLS"] = "rc,tcp,cuda_copy,cuda_ipc"
+        env_base["SGLANG_DISAGGREGATION_THREAD_POOL_SIZE"] = "128"
+        env_base["AFD_ASYNC_PIPELINE"] = "1"
+
+        dvfs_args = []
+        if self.tier:
+            dvfs_args = ["--afd-dvfs-enabled",
+                         "--afd-energy-model-dir", ENERGY_MODEL_DIR,
+                         "--afd-ttft-slo-ms", "2000",
+                         "--afd-tpot-slo-us", "250000"]
+
+        # Prefill side: PF TP=2 (2GPU) + PA TP=1 (1GPU) = 3 GPU
+        p_cvd = "0,1,2"
+        p_ffn_tp = 2
+        p_attn_tp = 1
+        # Decode side: DF TP=4 (4GPU) + DA TP=1 (1GPU) = 5 GPU
+        d_cvd = "3,4,5,6,7"
+        d_ffn_tp = 4
+        d_attn_tp = 1
+
+        common_base = ["--model-path", MODEL,
+                       "--host", "127.0.0.1",
+                       "--afd-comm-backend", "ipc_cpp",
+                       "--afd-micro-batch", str(micro_batch),
+                       "--afd-dynamic-micro-batch",
+                       "--max-running-requests", "512",
+                       "--skip-server-warmup",
+                       "--disable-cuda-graph",
+                       "--disable-piecewise-cuda-graph",
+                       "--afd-disagg-interleave-poll",
+                       "--disable-radix-cache",
+                       "--num-reserved-decode-tokens", "512",
+                       "--disaggregation-transfer-backend", "mooncake",
+                       "--disaggregation-bootstrap-port", str(BS_PORT),
+                       "--disaggregation-ib-device", "mlx5_4",
+                       "--enable-return-routed-experts",
+                       "--enable-metrics"]
+
+        # Prefill TP=1(PA)/TP=2(PF): PA is small, PF needs TP=2
+        # Decode TP=1(DA)/TP=4(DF): more GPU = more KV cache
+        p_mem_frac = "0.70"
+        d_mem_frac = "0.75"
+
+        def _env(cvd, ucx_base, sched_port, peer_device, nvml_idx,
+                 ffn_host=None):
+            e = env_base.copy()
+            e["CUDA_VISIBLE_DEVICES"] = cvd
+            e["AFD_UCX_BASE_PORT"] = str(ucx_base)
+            e["AFD_SCHED_PORT"] = str(sched_port)
+            e["AFD_IPC_SYNC_MODE"] = "ipc_event"
+            e["AFD_IPC_PEER_DEVICE"] = str(peer_device)
+            e["AFD_NVML_DEVICE_INDICES"] = str(nvml_idx)
+            e["AFD_NVML_DEVICE_INDEX"] = str(nvml_idx)
+            e["SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT"] = "600"
+            e["SGLANG_DISAGGREGATION_WAITING_TIMEOUT"] = "600"
+            e["AFD_LIF_SHARED_PATH"] = "/tmp/afd_lif_shared.txt"
+            if ffn_host:
+                e["AFD_UCX_FFN_HOST"] = ffn_host
+            return e
+
+        def _cmd(port, perspective, disagg, tp, base_gpu_id,
+                 attn_tp=None, ffn_tp=None, mem_frac="0.75"):
+            cmd = [PYTHON, "-m", "sglang.launch_server",
+                   "--port", str(port),
+                   "--tp", str(tp),
+                   "--afd-perspective", perspective,
+                   "--disaggregation-mode", disagg,
+                   "--base-gpu-id", str(base_gpu_id),
+                   "--mem-fraction-static", mem_frac]
+            cmd += common_base + dvfs_args
+            if attn_tp is not None:
+                cmd += ["--afd-attn-tp", str(attn_tp)]
+            if ffn_tp is not None:
+                cmd += ["--afd-ffn-tp", str(ffn_tp)]
+            return cmd
+
+        # --- Prefill side (3 GPU: PF TP=2, PA TP=1) ---
+        # PF (FFN, TP=2, GPU0,1, base=0)
+        self._popen("pf",
+                    _cmd(PF_PORT, "ffn", "prefill", tp=p_ffn_tp,
+                         base_gpu_id=0, attn_tp=p_attn_tp,
+                         ffn_tp=p_ffn_tp, mem_frac=p_mem_frac),
+                    _env(p_cvd, UCX_P, SCHED_P, peer_device=2,
+                         nvml_idx="0,1"))
+        time.sleep(5)
+
+        # PA (Attn, TP=1, GPU2, base=2)
+        self._popen("pa",
+                    _cmd(PA_PORT, "attn", "prefill", tp=p_attn_tp,
+                         base_gpu_id=2, attn_tp=p_attn_tp,
+                         ffn_tp=p_ffn_tp, mem_frac=p_mem_frac),
+                    _env(p_cvd, UCX_P, SCHED_P, peer_device=0,
+                         nvml_idx="2", ffn_host="127.0.0.1"))
+        time.sleep(5)
+
+        # --- Decode side (5 GPU: DF TP=4, DA TP=1) ---
+        # DF (FFN, TP=4, GPU3-6, base=0)
+        self._popen("df",
+                    _cmd(DF_PORT, "ffn", "decode", tp=d_ffn_tp,
+                         base_gpu_id=0, attn_tp=d_attn_tp,
+                         ffn_tp=d_ffn_tp, mem_frac=d_mem_frac),
+                    _env(d_cvd, UCX_D, SCHED_D, peer_device=4,
+                         nvml_idx="3,4,5,6"))
+        time.sleep(8)
+
+        # DA (Attn, TP=1, GPU7, base=4)
+        self._popen("da",
+                    _cmd(DA_PORT, "attn", "decode", tp=d_attn_tp,
+                         base_gpu_id=4, attn_tp=d_attn_tp,
+                         ffn_tp=d_ffn_tp, mem_frac=d_mem_frac),
+                    _env(d_cvd, UCX_D, SCHED_D, peer_device=0,
+                         nvml_idx="7", ffn_host="127.0.0.1"))
+
+        log.info("Waiting for PDAF Asym servers...")
+        checks = [(PA_PORT, "PA", False), (PF_PORT, "PF", True),
+                  (DA_PORT, "DA", False), (DF_PORT, "DF", True)]
+        for port, name, use_model_info in checks:
+            if not wait_health(port, 600,
+                               check_model_info=use_model_info):
+                log.error("  %s (port %d) failed to start", name, port)
+                return None
+            log.info("  %s ready (port %d)", name, port)
+
+        # Router
+        cmd_r = [PYTHON, "-m", "sglang_router.launch_router",
+                 "--pd-disaggregation", "--mini-lb",
+                 "--prefill", f"http://127.0.0.1:{PA_PORT}",
+                 "--decode", f"http://127.0.0.1:{DA_PORT}",
+                 "--host", "127.0.0.1", "--port", str(ROUTER_PORT)]
+        self._popen("router", cmd_r, os.environ.copy())
+        if not wait_health(ROUTER_PORT, 60):
+            log.error("PDAF Asym router failed")
+            return None
+        log.info("PDAF Asym ready (M=%d, tier=%s, 3P5D: PA-TP1+PF-TP2 | DA-TP1+DF-TP4)",
+                 micro_batch, self.tier)
         return ROUTER_PORT
 
     def start_pdaf_dp(self, micro_batch=2, n_instances=2):
@@ -705,52 +856,106 @@ DEFAULT_TPOT_SLO_MS = 250.0
 
 async def _send_request(session, url, req, base_time, results_list,
                         ttft_slo_ms, tpot_slo_ms):
-    """Send one request and record latency + SLO violations."""
+    """Send one streaming request and record latency + SLO violations.
+
+    TPOT = (last_token_time - first_token_time) / (tokens - 1)
+    This excludes queue wait, consistent with Dense benchmark.
+    """
     delay = req["arrival_time_s"] - (time.monotonic() - base_time)
     if delay > 0:
         await asyncio.sleep(delay)
 
     payload = {
         "text": "x" * req["input_len"],
-        "sampling_params": {"max_new_tokens": req["output_len"], "temperature": 0.0}
+        "sampling_params": {"max_new_tokens": req["output_len"], "temperature": 0.0},
+        "stream": True,
     }
     t0 = time.monotonic()
+    first_token_time = None
+    token_count = 0
+    token_times = []
+    last_meta_info = {}
+
     try:
         async with session.post(url, json=payload) as resp:
-            data = await resp.json()
-            t1 = time.monotonic()
-            meta = data.get("meta_info", {})
-            completion_tokens = meta.get("completion_tokens", 0)
-            ttft_proc_ms = meta.get("ttft_pure_processing", 0) * 1000
-            e2e_s = t1 - t0
-            # Compute TPOT (per output token)
-            tpot_ms = 0.0
-            if completion_tokens > 1:
-                tpot_ms = (e2e_s - ttft_proc_ms / 1000) / (completion_tokens - 1) * 1000
-            # SLO checks
-            ttft_violated = ttft_proc_ms > ttft_slo_ms if ttft_proc_ms > 0 else False
-            tpot_violated = tpot_ms > tpot_slo_ms if tpot_ms > 0 else False
-            results_list.append({
-                "success": True,
-                "input_len": req["input_len"],
-                "output_len": req["output_len"],
-                "completion_tokens": completion_tokens,
-                "ttft_proc_ms": ttft_proc_ms,
-                "tpot_ms": tpot_ms,
-                "e2e_s": e2e_s,
-                "ttft_violated": ttft_violated,
-                "tpot_violated": tpot_violated,
-                "slo_violated": ttft_violated or tpot_violated,
-            })
+            if resp.status != 200:
+                results_list.append({
+                    "success": False,
+                    "input_len": req["input_len"],
+                    "output_len": req["output_len"],
+                })
+                return
+            async for line in resp.content:
+                now = time.monotonic()
+                text = line.decode().strip()
+                if not text or text.startswith(":"):
+                    continue
+                if text.startswith("data:"):
+                    text = text[5:].strip()
+                if text == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(text)
+                    if first_token_time is None:
+                        first_token_time = now
+                    token_count += 1
+                    token_times.append(now)
+                    if isinstance(chunk, dict) and "meta_info" in chunk:
+                        last_meta_info = chunk["meta_info"]
+                except json.JSONDecodeError:
+                    pass
     except Exception as e:
-        t1 = time.monotonic()
         results_list.append({
             "success": False,
             "input_len": req["input_len"],
             "output_len": req["output_len"],
-            "e2e_s": t1 - t0,
+            "e2e_s": time.monotonic() - t0,
             "error": str(e),
         })
+        return
+
+    t_end = time.monotonic()
+    e2e_s = t_end - t0
+
+    # TTFT: client-side time to first token (includes queue wait)
+    ttft_ms = (first_token_time - t0) * 1000 if first_token_time else 0.0
+    # TTFT pure processing (server-side, excludes queue)
+    ttft_proc_ms = 0.0
+    if last_meta_info.get("ttft_pure_processing"):
+        ttft_proc_ms = last_meta_info["ttft_pure_processing"] * 1000
+    elif last_meta_info.get("time_to_first_token_processing"):
+        ttft_proc_ms = last_meta_info["time_to_first_token_processing"] * 1000
+
+    # TPOT: (last_token - first_token) / (tokens - 1), excludes queue
+    tpot_ms = 0.0
+    if token_count > 1 and first_token_time is not None:
+        tpot_ms = (t_end - first_token_time) * 1000 / (token_count - 1)
+
+    # Per-token inter-token latencies
+    tpot_per_token_ms = None
+    if len(token_times) > 1:
+        tpot_per_token_ms = [(token_times[i] - token_times[i-1]) * 1000
+                             for i in range(1, len(token_times))]
+
+    # SLO: use ttft_proc (no queue) if available, else ttft_ms
+    ttft_for_slo = ttft_proc_ms if ttft_proc_ms > 0 else ttft_ms
+    ttft_violated = ttft_for_slo > ttft_slo_ms if ttft_for_slo > 0 else False
+    tpot_violated = tpot_ms > tpot_slo_ms if tpot_ms > 0 else False
+
+    results_list.append({
+        "success": True,
+        "input_len": req["input_len"],
+        "output_len": req["output_len"],
+        "completion_tokens": token_count,
+        "ttft_ms": ttft_ms,
+        "ttft_proc_ms": ttft_proc_ms,
+        "tpot_ms": tpot_ms,
+        "tpot_per_token_ms": tpot_per_token_ms,
+        "e2e_s": e2e_s,
+        "ttft_violated": ttft_violated,
+        "tpot_violated": tpot_violated,
+        "slo_violated": ttft_violated or tpot_violated,
+    })
 
 
 async def run_workload_async(workload_path, url, max_run_s=600,
@@ -818,7 +1023,8 @@ async def run_workload_async(workload_path, url, max_run_s=600,
         return {"status": "FAIL", "total_requests": len(requests_data),
                 "successful": 0, "failed": len(failed)}
 
-    ttfts_proc = [r["ttft_proc_ms"] for r in successful if r["ttft_proc_ms"] > 0]
+    ttfts_proc = [r["ttft_proc_ms"] for r in successful if r.get("ttft_proc_ms", 0) > 0]
+    ttfts = [r["ttft_ms"] for r in successful if r.get("ttft_ms", 0) > 0]
     tpots = [r["tpot_ms"] for r in successful if r["tpot_ms"] > 0]
     total_tokens = sum(r.get("completion_tokens", 0) for r in successful)
     throughput = total_tokens / duration_s if duration_s > 0 else 0
@@ -838,12 +1044,17 @@ async def run_workload_async(workload_path, url, max_run_s=600,
         "failed": len(failed),
         "total_output_tokens": total_tokens,
         "throughput_tok_s": round(throughput, 1),
-        # TTFT (processing time, no queue)
+        # TTFT with queue (client-side: first_token - request_sent)
+        "ttft_avg_ms": round(float(np.mean(ttfts)), 1) if ttfts else 0,
+        "ttft_p50_ms": round(float(np.percentile(ttfts, 50)), 1) if ttfts else 0,
+        "ttft_p90_ms": round(float(np.percentile(ttfts, 90)), 1) if ttfts else 0,
+        "ttft_p99_ms": round(float(np.percentile(ttfts, 99)), 1) if ttfts else 0,
+        # TTFT pure processing (server-side, no queue)
         "ttft_proc_avg_ms": round(float(np.mean(ttfts_proc)), 1) if ttfts_proc else 0,
         "ttft_proc_p50_ms": round(float(np.percentile(ttfts_proc, 50)), 1) if ttfts_proc else 0,
         "ttft_proc_p90_ms": round(float(np.percentile(ttfts_proc, 90)), 1) if ttfts_proc else 0,
         "ttft_proc_p99_ms": round(float(np.percentile(ttfts_proc, 99)), 1) if ttfts_proc else 0,
-        # TPOT
+        # TPOT (from first_token to last_token, no queue wait)
         "tpot_avg_ms": round(float(np.mean(tpots)), 1) if tpots else 0,
         "tpot_p50_ms": round(float(np.percentile(tpots, 50)), 1) if tpots else 0,
         "tpot_p90_ms": round(float(np.percentile(tpots, 90)), 1) if tpots else 0,
@@ -860,6 +1071,18 @@ async def run_workload_async(workload_path, url, max_run_s=600,
         "slo_violation_rate": round(slo_viol_rate, 1),
         # Freq samples
         "freq_samples": freq_samples,
+        # Per-request TPOT values for CDF plotting
+        "tpot_values_ms": [round(t, 1) for t in tpots],
+        "ttft_values_ms": [round(t, 1) for t in ttfts],
+        "ttft_proc_values_ms": [round(t, 1) for t in ttfts_proc],
+        # Per-request detailed breakdown
+        "per_request_details": [
+            {k: v for k, v in r.items()
+             if k in ("input_len", "output_len", "completion_tokens",
+                      "tpot_ms", "tpot_per_token_ms", "e2e_s",
+                      "ttft_ms", "ttft_proc_ms")}
+            for r in successful
+        ],
     }
     return summary
 
@@ -871,6 +1094,8 @@ DEPLOY_CONFIGS = {
     "pd_dp4_tier": {"method": "pd_dp", "n_pairs": 4, "tier": True},
     "pdaf_tp2": {"method": "pdaf", "micro_batch": 2, "tier": False},
     "pdaf_tp2_tier": {"method": "pdaf", "micro_batch": 2, "tier": True},
+    "pdaf_asym_1p6d": {"method": "pdaf_asym", "tier": False},
+    "pdaf_asym_1p6d_tier": {"method": "pdaf_asym", "tier": True},
 }
 
 
@@ -927,6 +1152,8 @@ def main():
             port = mgr.start_pd_dp(n_pairs=cfg.get("n_pairs", 4))
         elif cfg["method"] == "pdaf":
             port = mgr.start_pdaf(micro_batch=cfg["micro_batch"])
+        elif cfg["method"] == "pdaf_asym":
+            port = mgr.start_pdaf_asym(micro_batch=cfg.get("micro_batch", 2))
         elif cfg["method"] == "pdaf_dp":
             port = mgr.start_pdaf_dp(micro_batch=cfg["micro_batch"])
 

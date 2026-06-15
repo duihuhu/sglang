@@ -160,10 +160,27 @@ class AFProfilePredictor:
                 f"Decode_iter_lat_{t}" in self._v3_models for t in ("GBDT", "LUT")
             )
 
+        # V4 models (with expert load features: max_expert_tokens, els)
+        self._v4_models: dict[str, object] = {}
+        self._v4_available = False
+        v4_dir = self.model_dir.parent / "models_v4"
+        if v4_dir.exists():
+            for label in _V3_LABELS:
+                for mtype in ("GBDT", "LUT"):
+                    pkl_path = v4_dir / f"{label}_{mtype}.pkl"
+                    if pkl_path.exists():
+                        with open(pkl_path, "rb") as f:
+                            self._v4_models[f"{label}_{mtype}"] = _ModelUnpickler(f).load()
+                        loaded += 1
+            self._v4_available = any(
+                f"Decode_iter_lat_{t}" in self._v4_models for t in ("GBDT", "LUT")
+            )
+
         logger.info(
             "AFProfilePredictor: loaded %d models from %s "
-            "(v2_coupled=%s, v3_hetero=%s)",
-            loaded, self.model_dir, self._v2_available, self._v3_available)
+            "(v2_coupled=%s, v3_hetero=%s, v4_expert=%s)",
+            loaded, self.model_dir, self._v2_available,
+            self._v3_available, self._v4_available)
 
     def _build_df(self, phase: str, tp: int, freq: int,
                   bs: int, il: int, ol: Optional[int]) -> pd.DataFrame:
@@ -342,28 +359,47 @@ class AFProfilePredictor:
                     return float(val)
         return None
 
+    def _v4_predict(self, label: str, features: np.ndarray) -> Optional[float]:
+        """Predict using V4 model with expert load features."""
+        for mtype in ("GBDT", "LUT"):
+            key = f"{label}_{mtype}"
+            model = self._v4_models.get(key)
+            if model is not None:
+                pred = model.predict(features)
+                val = pred[0] if hasattr(pred, '__len__') else float(pred)
+                if not np.isnan(val) and val > 0:
+                    return float(val)
+        return None
+
     def predict_iteration_latency(
         self, M: int, f_a: int, f_f: int,
         bs: int, il: int, tp: int = 1,
         tp_a: int = None, tp_f: int = None,
         lif: float = 1.0,
+        max_expert_tokens: int = 0,
+        els: float = 1.0,
     ) -> Optional[float]:
         """Predict end-to-end decode iteration latency (us) using coupled model.
-
-        This accounts for IPC communication, pipeline drain, and micro-batch
-        overlap — effects that the independent per-layer model cannot capture.
 
         Args:
             tp_a: Attention TP size. If None, defaults to `tp`.
             tp_f: FFN TP size. If None, defaults to `tp`.
             lif: Load Imbalance Factor from expert routing (1.0 = uniform).
-                 When a V4 model (with LIF feature) is available it is used
-                 directly; otherwise the prediction is scaled by a heuristic.
+            max_expert_tokens: Max tokens routed to a single expert in the batch.
+            els: Expert Load Skew = max_count / mean_count.
 
         Returns iteration latency in microseconds, or None if model unavailable.
         """
         _tp_a = tp_a if tp_a is not None else tp
         _tp_f = tp_f if tp_f is not None else tp
+
+        # Try V4 (with expert features) first if available
+        if self._v4_available and max_expert_tokens > 0:
+            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs,
+                                  max_expert_tokens, els]], dtype=float)
+            result = self._v4_predict("Decode_iter_lat", features)
+            if result is not None:
+                return result
 
         # Try V3 (hetero TP) first if available
         if self._v3_available:
@@ -407,18 +443,31 @@ class AFProfilePredictor:
         bs: int, il: int, tp: int = 1,
         tp_a: int = None, tp_f: int = None,
         lif: float = 1.0,
+        max_expert_tokens: int = 0,
+        els: float = 1.0,
     ) -> Optional[tuple[float, float]]:
         """Predict per-iteration energy (DA_mJ, DF_mJ) using coupled model.
 
         Args:
             tp_a: Attention TP size. If None, defaults to `tp`.
             tp_f: FFN TP size. If None, defaults to `tp`.
-            lif: Load Imbalance Factor (currently unused for energy; reserved).
+            lif: Load Imbalance Factor (used for heuristic fallback).
+            max_expert_tokens: Max tokens routed to a single expert.
+            els: Expert Load Skew.
 
         Returns (da_energy_mj, df_energy_mj) or None if model unavailable.
         """
         _tp_a = tp_a if tp_a is not None else tp
         _tp_f = tp_f if tp_f is not None else tp
+
+        # Try V4 (with expert features) first
+        if self._v4_available and max_expert_tokens > 0:
+            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs,
+                                  max_expert_tokens, els]], dtype=float)
+            da_e = self._v4_predict("Decode_iter_energy_A", features)
+            df_e = self._v4_predict("Decode_iter_energy_F", features)
+            if da_e is not None and df_e is not None:
+                return (da_e, df_e)
 
         # Try V3 (hetero TP) first
         if self._v3_available:
@@ -445,17 +494,17 @@ class AFProfilePredictor:
         tp: int = 1,
         tp_a: int = None, tp_f: int = None,
         lif: float = 1.0,
+        max_expert_tokens: int = 0,
+        els: float = 1.0,
     ) -> Optional[tuple[int, int, float, float]]:
         """Find minimum-energy (f_A, f_F) pair under SLO using coupled model.
-
-        Unlike find_best_freq_pair which uses per-layer independent models,
-        this uses the V2/V3 iteration-level coupled model that accounts for
-        pipeline overhead and A/F interaction.
 
         Args:
             tp_a: Attention TP size. If None, defaults to `tp`.
             tp_f: FFN TP size. If None, defaults to `tp`.
             lif: Load Imbalance Factor for latency correction.
+            max_expert_tokens: Max tokens on hottest expert.
+            els: Expert Load Skew.
 
         Returns (f_A, f_F, iter_lat_us, total_energy_mj) or None.
         """
@@ -468,11 +517,13 @@ class AFProfilePredictor:
         for f_a in freqs:
             for f_f in freqs:
                 lat = self.predict_iteration_latency(
-                    M, f_a, f_f, bs, il, tp=tp, tp_a=tp_a, tp_f=tp_f, lif=lif)
+                    M, f_a, f_f, bs, il, tp=tp, tp_a=tp_a, tp_f=tp_f,
+                    lif=lif, max_expert_tokens=max_expert_tokens, els=els)
                 if lat is None or lat > slo_budget_us:
                     continue
                 energy = self.predict_iteration_energy(
-                    M, f_a, f_f, bs, il, tp=tp, tp_a=tp_a, tp_f=tp_f, lif=lif)
+                    M, f_a, f_f, bs, il, tp=tp, tp_a=tp_a, tp_f=tp_f,
+                    lif=lif, max_expert_tokens=max_expert_tokens, els=els)
                 if energy is None:
                     continue
                 total_e = energy[0] + energy[1]

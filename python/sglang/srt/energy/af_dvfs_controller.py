@@ -80,7 +80,7 @@ class AFDVFSController:
         tp_a: int = 1,
         tp_f: Optional[int] = None,
         t_comm_us: float = 0.0,
-        t_drain_us: float = 18000.0,  # pipeline drain overhead per iteration (us)
+        t_drain_us: float = 18000.0,
         freqs: Optional[list[int]] = None,
         baseline_f_a: Optional[int] = None,
         baseline_f_f: Optional[int] = None,
@@ -89,6 +89,7 @@ class AFDVFSController:
         feedback_hold: int = 30,
         online_calibration: bool = False,
         calibration_ema: float = 0.2,
+        moe_freq_floor: int = 0,
     ):
         self.predictor = predictor
         self.num_layers = num_layers
@@ -99,6 +100,7 @@ class AFDVFSController:
         self.freqs = freqs or VALID_FREQS
         self._baseline_f_a = baseline_f_a or F_MAX
         self._baseline_f_f = baseline_f_f or F_MAX
+        self._moe_freq_floor = moe_freq_floor
         self._decode_state = DecodeWindowState(
             cur_f_a=self._baseline_f_a,
             cur_f_f=self._baseline_f_f,
@@ -293,6 +295,8 @@ class AFDVFSController:
         slo_tpot_us: float, M: int = 1,
         reeval_reason: int = REEVAL_WINDOW_EXPIRED,
         lif: float = 1.0,
+        max_expert_tokens: int = 0,
+        els: float = 1.0,
     ) -> DVFSDecision:
         """Select (f_A, f_F) for a decode window.
 
@@ -303,6 +307,8 @@ class AFDVFSController:
             slo_tpot_us: TPOT SLO budget per iteration (us).
             M: Number of microbatches.
             lif: Load Imbalance Factor from expert routing (1.0 = uniform).
+            max_expert_tokens: Max tokens on hottest expert in current batch.
+            els: Expert Load Skew.
 
         Returns:
             DVFSDecision with chosen frequencies.
@@ -333,12 +339,16 @@ class AFDVFSController:
         if (self.predictor is not None
                 and self.predictor.has_coupled_model):
             return self._select_freq_decode_coupled(
-                bs, il, ol, slo_tpot_us, M, reeval_reason, st, w_remaining, lif)
+                bs, il, ol, slo_tpot_us, M, reeval_reason, st, w_remaining,
+                lif, max_expert_tokens, els)
 
         # ─── V1 Formula-based Path (fallback) ────────────────────────────
         # Sort candidates by energy (ascending) for early exit
         candidates = []
+        freq_floor_v1 = self._moe_freq_floor
         for f_a, f_f in self._freq_pairs:
+            if freq_floor_v1 > 0 and (f_a < freq_floor_v1 or f_f < freq_floor_v1):
+                continue
             try:
                 e = self._layer_energy("decode", f_a, f_f, bs, il, ol)
                 candidates.append((e, f_a, f_f))
@@ -446,26 +456,32 @@ class AFDVFSController:
         slo_tpot_us: float, M: int,
         reeval_reason: int, st, w_remaining: int,
         lif: float = 1.0,
+        max_expert_tokens: int = 0,
+        els: float = 1.0,
     ) -> DVFSDecision:
-        """Select decode freq using V2 coupled iteration-level model.
-
-        The coupled model predicts iteration latency and energy directly,
-        accounting for IPC communication, pipeline drain, and micro-batch
-        overlap — unlike the V1 formula (max(A,F)*N + drain).
-        """
+        """Select decode freq using V2/V3/V4 coupled iteration-level model."""
         calib = self.get_calibration_factor(M)
 
         # Build candidates sorted by energy
         candidates = []
+        # Apply MoE freq floor: for memory-bound MoE models, prevent
+        # excessively low frequencies that cause queuing-induced SLO violations
+        freq_floor = self._moe_freq_floor
         for f_a, f_f in self._freq_pairs:
-            energy = self.predictor.predict_iteration_energy(M, f_a, f_f, bs, il, tp_a=self.tp_a, tp_f=self.tp_f, lif=lif)
+            if freq_floor > 0 and (f_a < freq_floor or f_f < freq_floor):
+                continue
+            energy = self.predictor.predict_iteration_energy(
+                M, f_a, f_f, bs, il, tp_a=self.tp_a, tp_f=self.tp_f,
+                lif=lif, max_expert_tokens=max_expert_tokens, els=els)
             if energy is not None:
                 total_e = energy[0] + energy[1]
                 candidates.append((total_e, f_a, f_f))
         candidates.sort()
 
         for total_e, f_a, f_f in candidates:
-            lat = self.predictor.predict_iteration_latency(M, f_a, f_f, bs, il, tp_a=self.tp_a, tp_f=self.tp_f, lif=lif)
+            lat = self.predictor.predict_iteration_latency(
+                M, f_a, f_f, bs, il, tp_a=self.tp_a, tp_f=self.tp_f,
+                lif=lif, max_expert_tokens=max_expert_tokens, els=els)
             if lat is None:
                 continue
             if (lat * calib) > slo_tpot_us:
@@ -486,9 +502,11 @@ class AFDVFSController:
                     st.iters_since_decision = 0
                     st.hold_iters_remaining = self._feedback_hold
                     lat_up = self.predictor.predict_iteration_latency(
-                        M, f_a_up, f_f_up, bs, il, tp_a=self.tp_a, tp_f=self.tp_f, lif=lif) or slo_tpot_us
+                        M, f_a_up, f_f_up, bs, il, tp_a=self.tp_a, tp_f=self.tp_f,
+                        lif=lif, max_expert_tokens=max_expert_tokens, els=els) or slo_tpot_us
                     e_up = self.predictor.predict_iteration_energy(
-                        M, f_a_up, f_f_up, bs, il, tp_a=self.tp_a, tp_f=self.tp_f, lif=lif)
+                        M, f_a_up, f_f_up, bs, il, tp_a=self.tp_a, tp_f=self.tp_f,
+                        lif=lif, max_expert_tokens=max_expert_tokens, els=els)
                     e_up_total = (e_up[0] + e_up[1]) if e_up else 0
                     return DVFSDecision(
                         f_a=f_a_up, f_f=f_f_up,

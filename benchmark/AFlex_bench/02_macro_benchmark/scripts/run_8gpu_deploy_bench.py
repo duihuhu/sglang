@@ -205,6 +205,94 @@ DEPLOYMENTS = {
             "dynamic_mb": True,
         },
     },
+    "pdaf_8g_2pa4pf": {
+        "label": "PD+AF Hetero 2PA4PF+1DA1DF (P:PF-TP4+PA-TP2, D:TP1+TP1, 8 GPU)",
+        "gpus": list(range(8)),
+        "prefill_gpus": [0, 1, 2, 3, 4, 5],
+        "decode_gpus": [6, 7],
+        "ngpu": 8,
+        "hetero_pdaf": {
+            "p_cvd": "0,1,2,3,4,5",
+            "p_attn_tp": 2,
+            "p_ffn_tp": 4,
+            "p_attn_base": 4,
+            "p_ffn_base": 0,
+            "d_cvd": "6,7",
+            "d_attn_tp": 1,
+            "d_ffn_tp": 1,
+            "d_attn_base": 1,
+            "d_ffn_base": 0,
+            "micro_batch": 2,
+            "dynamic_mb": True,
+            "d_max_running": 32,
+        },
+    },
+    "pdaf_8g_2pa4pf_tier": {
+        "label": "PD+AF Hetero 2PA4PF+1DA1DF + DVFS (P:PF-TP4+PA-TP2, D:TP1+TP1, 8 GPU)",
+        "gpus": list(range(8)),
+        "prefill_gpus": [0, 1, 2, 3, 4, 5],
+        "decode_gpus": [6, 7],
+        "ngpu": 8,
+        "hetero_pdaf": {
+            "p_cvd": "0,1,2,3,4,5",
+            "p_attn_tp": 2,
+            "p_ffn_tp": 4,
+            "p_attn_base": 4,
+            "p_ffn_base": 0,
+            "d_cvd": "6,7",
+            "d_attn_tp": 1,
+            "d_ffn_tp": 1,
+            "d_attn_base": 1,
+            "d_ffn_base": 0,
+            "micro_batch": 2,
+            "dynamic_mb": True,
+            "d_max_running": 32,
+        },
+    },
+    "pdaf_8g_4pa2pf": {
+        "label": "PD+AF Hetero 4PA2PF+1DA1DF (P:PF-TP2+PA-TP4, D:TP1+TP1, 8 GPU)",
+        "gpus": list(range(8)),
+        "prefill_gpus": [0, 1, 2, 3, 4, 5],
+        "decode_gpus": [6, 7],
+        "ngpu": 8,
+        "hetero_pdaf": {
+            "p_cvd": "0,1,2,3,4,5",
+            "p_attn_tp": 4,
+            "p_ffn_tp": 2,
+            "p_attn_base": 2,
+            "p_ffn_base": 0,
+            "d_cvd": "6,7",
+            "d_attn_tp": 1,
+            "d_ffn_tp": 1,
+            "d_attn_base": 1,
+            "d_ffn_base": 0,
+            "micro_batch": 2,
+            "dynamic_mb": True,
+            "d_max_running": 32,
+        },
+    },
+    "pdaf_8g_4pa2pf_tier": {
+        "label": "PD+AF Hetero 4PA2PF+1DA1DF + DVFS (P:PF-TP2+PA-TP4, D:TP1+TP1, 8 GPU)",
+        "gpus": list(range(8)),
+        "prefill_gpus": [0, 1, 2, 3, 4, 5],
+        "decode_gpus": [6, 7],
+        "ngpu": 8,
+        "hetero_pdaf": {
+            "p_cvd": "0,1,2,3,4,5",
+            "p_attn_tp": 4,
+            "p_ffn_tp": 2,
+            "p_attn_base": 2,
+            "p_ffn_base": 0,
+            "d_cvd": "6,7",
+            "d_attn_tp": 1,
+            "d_ffn_tp": 1,
+            "d_attn_base": 1,
+            "d_ffn_base": 0,
+            "micro_batch": 2,
+            "dynamic_mb": True,
+            "d_max_running": 32,
+        },
+    },
     "native_dp8": {
         "label": "Native DP=8 (8x TP=1 independent instances, round-robin, 8 GPU)",
         "gpus": list(range(8)),
@@ -551,7 +639,7 @@ def _afd_env(env_base, cvd, ucx_base, sched_port, peer_device, ffn_host=None,
 
 def _afd_cmd(port, perspective, disagg, tp, base_gpu_id, micro_batch=2,
              attn_tp=None, ffn_tp=None, tier=False, is_pa=False, stats_path=None,
-             dynamic_mb=False):
+             dynamic_mb=False, max_running=None):
     cmd = [PYTHON, "-m", "sglang.launch_server",
            "--model-path", MODEL, "--tp", str(tp),
            "--host", "127.0.0.1", "--port", str(port),
@@ -565,6 +653,8 @@ def _afd_cmd(port, perspective, disagg, tp, base_gpu_id, micro_batch=2,
         cmd += ["--afd-attn-tp", str(attn_tp)]
     if ffn_tp is not None:
         cmd += ["--afd-ffn-tp", str(ffn_tp)]
+    if max_running is not None:
+        cmd += ["--max-running-requests", str(max_running)]
     if tier:
         cmd += _dvfs_args()
         if is_pa:
@@ -744,6 +834,99 @@ def start_pdaf_asym(deploy, log_dir, prefix):
     return procs, url
 
 
+def start_pdaf_hetero(deploy, log_dir, prefix):
+    """Start heterogeneous PDAF where prefill itself uses attn_tp != ffn_tp.
+
+    Layout (general, driven by spec['hetero_pdaf']):
+      Prefill: PF(ffn, tp=p_ffn_tp, base=p_ffn_base) +
+               PA(attn, tp=p_attn_tp, base=p_attn_base) sharing p_cvd
+      Decode:  DF(ffn, tp=d_ffn_tp, base=d_ffn_base) +
+               DA(attn, tp=d_attn_tp, base=d_attn_base) sharing d_cvd
+    """
+    tier = deploy.endswith("_tier")
+    stats_path = _tier1_stats_path() if tier else None
+    spec = DEPLOYMENTS[deploy]
+    h = spec["hetero_pdaf"]
+    p_cvd, d_cvd = h["p_cvd"], h["d_cvd"]
+    p_attn_tp, p_ffn_tp = h["p_attn_tp"], h["p_ffn_tp"]
+    d_attn_tp, d_ffn_tp = h["d_attn_tp"], h["d_ffn_tp"]
+    micro_batch = h["micro_batch"]
+    dynamic_mb = h.get("dynamic_mb", False)
+    d_max_running = h.get("d_max_running")
+
+    procs = []
+    env_base = os.environ.copy()
+    env_base["SGLANG_DISABLE_REQUEST_LOGGING"] = "true"
+    env_base["UCX_LOG_LEVEL"] = "fatal"
+    env_base["AFD_UCX_TLS"] = "rc,tcp,cuda_copy,cuda_ipc"
+    env_base["SGLANG_DISAGGREGATION_THREAD_POOL_SIZE"] = "128"
+    env_base["AFD_ASYNC_PIPELINE"] = "1"
+    if tier:
+        env_base["AFD_DVFS_DECISION_LOG"] = str(
+            log_dir / f"{prefix}dvfs_decisions_{{persp}}_{{disagg}}_gpu{{gpu}}.jsonl")
+
+    # Prefill: PF(ffn) + PA(attn) sharing p_cvd
+    env_pf = _afd_env(env_base, p_cvd, UCX_P, SCHED_P, peer_device=h["p_attn_base"],
+                      nvml_indices=_owned_gpus(p_cvd, h["p_ffn_base"], p_ffn_tp))
+    _popen("pf", _afd_cmd(PF_PORT, "ffn", "prefill", tp=p_ffn_tp,
+                          base_gpu_id=h["p_ffn_base"], micro_batch=micro_batch,
+                          attn_tp=p_attn_tp, ffn_tp=p_ffn_tp, tier=tier,
+                          stats_path=stats_path, dynamic_mb=dynamic_mb),
+           env_pf, log_dir, prefix, procs)
+    time.sleep(2)
+
+    env_pa = _afd_env(env_base, p_cvd, UCX_P, SCHED_P, peer_device=h["p_ffn_base"],
+                      ffn_host="127.0.0.1",
+                      nvml_indices=_owned_gpus(p_cvd, h["p_attn_base"], p_attn_tp))
+    _popen("pa", _afd_cmd(PA_PORT, "attn", "prefill", tp=p_attn_tp,
+                          base_gpu_id=h["p_attn_base"], micro_batch=micro_batch,
+                          attn_tp=p_attn_tp, ffn_tp=p_ffn_tp, tier=tier, is_pa=True,
+                          stats_path=stats_path, dynamic_mb=dynamic_mb),
+           env_pa, log_dir, prefix, procs)
+
+    if not B.wait_port("127.0.0.1", PF_PORT, 300) or \
+       not B.wait_port("127.0.0.1", PA_PORT, 300):
+        log.error("AF prefill (hetero) failed to start")
+        B.cleanup_procs(procs)
+        return None
+
+    # Decode: DF(ffn) + DA(attn) sharing d_cvd
+    env_df = _afd_env(env_base, d_cvd, UCX_D, SCHED_D, peer_device=h["d_attn_base"],
+                      nvml_indices=_owned_gpus(d_cvd, h["d_ffn_base"], d_ffn_tp))
+    _popen("df", _afd_cmd(DF_PORT, "ffn", "decode", tp=d_ffn_tp,
+                          base_gpu_id=h["d_ffn_base"], micro_batch=micro_batch,
+                          attn_tp=d_attn_tp, ffn_tp=d_ffn_tp, tier=tier,
+                          stats_path=stats_path, dynamic_mb=dynamic_mb,
+                          max_running=d_max_running),
+           env_df, log_dir, prefix, procs)
+    time.sleep(5)
+
+    env_da = _afd_env(env_base, d_cvd, UCX_D, SCHED_D, peer_device=h["d_ffn_base"],
+                      ffn_host="127.0.0.1",
+                      nvml_indices=_owned_gpus(d_cvd, h["d_attn_base"], d_attn_tp))
+    _popen("da", _afd_cmd(DA_PORT, "attn", "decode", tp=d_attn_tp,
+                          base_gpu_id=h["d_attn_base"], micro_batch=micro_batch,
+                          attn_tp=d_attn_tp, ffn_tp=d_ffn_tp, tier=tier,
+                          stats_path=stats_path, dynamic_mb=dynamic_mb,
+                          max_running=d_max_running),
+           env_da, log_dir, prefix, procs)
+
+    if not B.wait_port("127.0.0.1", DA_PORT, 300) or \
+       not B.wait_port("127.0.0.1", DF_PORT, 300):
+        log.error("AF decode (hetero) failed to start")
+        B.cleanup_procs(procs)
+        return None
+
+    time.sleep(5)
+    if not start_router(procs, log_dir, prefix, PA_PORT, DA_PORT):
+        B.cleanup_procs(procs)
+        return None
+    url = f"http://127.0.0.1:{ROUTER_PORT}"
+    log.info("%s ready at %s, warming up...", deploy, url)
+    B.warmup(url)
+    return procs, url
+
+
 def start_dp_full(log_dir, prefix, spec):
     """Start DP=N: independent full SGLang instances with round-robin router.
 
@@ -818,6 +1001,8 @@ def start_deploy(deploy, log_dir, prefix):
         return start_pd(log_dir, prefix, c["p_cvd"], c["p_tp"], c["d_cvd"], c["d_tp"])
     if "asym_pdaf" in spec:
         return start_pdaf_asym(deploy, log_dir, prefix)
+    if "hetero_pdaf" in spec:
+        return start_pdaf_hetero(deploy, log_dir, prefix)
     return start_pdaf(deploy, log_dir, prefix)
 
 

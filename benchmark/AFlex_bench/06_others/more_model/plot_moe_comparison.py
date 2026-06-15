@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate MoE 8gpu_azure_simplified_comparison.png — same format as Qwen3-32B version."""
+"""Generate MoE deployment comparison chart (similar to 8gpu_azure_simplified_comparison.png)."""
 import json
 import numpy as np
 import matplotlib
@@ -20,11 +20,11 @@ DATASETS = {
     'Conv\nHeavy': 'workload_azure_conv_heavy_real',
 }
 
-schemes_baseline = ['native_dp8', 'pd_dp4', 'pdaf_tp2']
-schemes_tier = ['native_dp8_tier', 'pd_dp4_tier', 'pdaf_tp2_tier']
-scheme_labels = ['Native DP8', 'PD DP4', 'PDAF TP2']
+schemes_baseline = ['native_dp8', 'pd_dp4', 'pdaf_tp2', 'pdaf_asym_1p6d']
+schemes_tier = ['native_dp8_tier', 'pd_dp4_tier', 'pdaf_tp2_tier', 'pdaf_asym_1p6d_tier']
+scheme_labels = ['Native DP8', 'PD DP4', 'PDAF Sym\n(4P+4D)', 'PDAF Asym\n(3P+5D)']
 
-colors_base = ['#4472C4', '#ED7D31', '#70AD47']
+colors_base = ['#4472C4', '#ED7D31', '#A5A5A5', '#70AD47']
 
 results = {}
 for ds_label, ds_key in DATASETS.items():
@@ -35,11 +35,11 @@ for ds_label, ds_key in DATASETS.items():
             with open(fname) as f:
                 results[ds_label][s] = json.load(f)
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-fig.suptitle("8-GPU MoE (Qwen3-30B-A3B) — Tier DVFS Comparison",
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+fig.suptitle("MoE (Qwen3-30B-A3B) 8-GPU — Tier DVFS Comparison (TTFT SLO=2s, TPOT SLO=250ms)",
              fontsize=12, fontweight='bold')
 
-bar_width = 0.10
+bar_width = 0.08
 ds_labels = list(DATASETS.keys())
 n_datasets = len(ds_labels)
 n_schemes = len(schemes_baseline)
@@ -47,7 +47,8 @@ group_width = n_schemes * 2 * bar_width + bar_width * 2
 
 metrics = [
     ('total_energy_j', 'Total Energy (kJ)', 'Total Energy', 1000.0, None),
-    ('tpot_avg_ms', 'TPOT Avg (ms)', 'TPOT (Avg)', 1.0, 150),
+    ('ttft_proc_avg_ms', 'TTFT Avg (ms)', 'TTFT (Pure Processing)', 1.0, 2000),
+    ('tpot_avg_ms', 'TPOT Avg (ms)', 'TPOT (Avg, Streaming)', 1.0, 250),
 ]
 
 for mi, (key, ylabel, title, divisor, slo_line) in enumerate(metrics):
@@ -73,7 +74,7 @@ for mi, (key, ylabel, title, divisor, slo_line) in enumerate(metrics):
     ax.set_title(title, fontsize=11, fontweight='bold')
     ticks = [di * group_width + (n_schemes - 0.5) * bar_width for di in range(n_datasets)]
     ax.set_xticks(ticks)
-    ax.set_xticklabels(ds_labels, fontsize=8)
+    ax.set_xticklabels(ds_labels, fontsize=7.5)
     ax.grid(axis='y', alpha=0.3)
     ax.set_axisbelow(True)
     if slo_line:
@@ -88,11 +89,11 @@ for si, label in enumerate(scheme_labels):
     legend_elements.append(Patch(facecolor=colors_base[si], edgecolor='black',
                                  linewidth=0.5, hatch='//', label=f'{label} +Tier'))
 
-fig.legend(handles=legend_elements, loc='lower center', ncol=3,
-           fontsize=9, bbox_to_anchor=(0.5, -0.04), frameon=True)
+fig.legend(handles=legend_elements, loc='lower center', ncol=4,
+           fontsize=8.5, bbox_to_anchor=(0.5, -0.04), frameon=True)
 
 plt.tight_layout(rect=[0, 0.08, 1, 0.94])
-save_path = OUT_DIR / "8gpu_moe_azure_comparison.png"
+save_path = OUT_DIR / "moe_simplified_comparison.png"
 fig.savefig(save_path, dpi=150, bbox_inches='tight')
 print(f"Saved: {save_path}")
 
@@ -104,6 +105,15 @@ for ds_label in ds_labels:
         t = results[ds_label].get(schemes_tier[si], {})
         e_b = b.get('total_energy_j', 0)
         e_t = t.get('total_energy_j', 0)
+        thpt_b = b.get('throughput_tok_s', 0)
+        thpt_t = t.get('throughput_tok_s', 0)
+        tpot_b = b.get('tpot_avg_ms', 0)
+        tpot_t = t.get('tpot_avg_ms', 0)
+        slo_b = b.get('slo_violation_rate', 0)
+        slo_t = t.get('slo_violation_rate', 0)
         if e_b > 0 and e_t > 0:
             save = (1 - e_t / e_b) * 100
-            print(f"  {scheme_labels[si]:12s}: {e_b/1000:.0f}kJ -> {e_t/1000:.0f}kJ ({save:+.1f}%)")
+            print(f"  {scheme_labels[si]:18s}: {e_b/1000:.0f}kJ -> {e_t/1000:.0f}kJ"
+                  f" ({save:+.1f}%) | Thpt: {thpt_b:.0f}->{thpt_t:.0f} tok/s"
+                  f" | TPOT: {tpot_b:.0f}->{tpot_t:.0f}ms"
+                  f" | SLO: {slo_b:.1f}%->{slo_t:.1f}%")
