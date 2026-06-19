@@ -281,3 +281,7 @@ bash-test/*
 
 # AFlex launch logs (runtime artifacts)
 af_launch_logs/
+
+# Local model download scripts/logs (may contain credentials)
+download_mixtral.py
+download.log

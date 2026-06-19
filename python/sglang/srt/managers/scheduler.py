@@ -535,6 +535,11 @@ class Scheduler(
         if getattr(self.server_args, "afd_dvfs_enabled", False):
             self._init_afd_dvfs(self.server_args)
 
+        # Idle freq lock state (Tier 2 optimization for reducing idle power)
+        self._idle_freq_locked = False
+        self._idle_lock_freq = getattr(self.server_args, "afd_dvfs_idle_lock_freq", 210)
+        self._idle_lock_enabled = getattr(self.server_args, "afd_dvfs_idle_lock", False)
+
         # Unified single-knob DVFS (PD / Native baselines, non-AF instances)
         self._unified_dvfs_ctrl = None
         self._last_unified_decode_t = None
@@ -1544,6 +1549,15 @@ class Scheduler(
                     and not self.running_batch.is_empty()
                 ):
                     self._afd_ffn_cleanup_all()
+
+                # Idle freq lock for FFN (Prefill) side while waiting
+                if (self._idle_lock_enabled
+                        and not self._idle_freq_locked
+                        and self._dvfs_hw_list
+                        and disagg_mode == DisaggregationMode.PREFILL):
+                    for hw in self._dvfs_hw_list:
+                        hw.lock_sm_clock(self._idle_lock_freq)
+                    self._idle_freq_locked = True
                 continue
 
             # FFN side: clear stale chunked_req — we force extend_lens=[1] after
@@ -1638,6 +1652,17 @@ class Scheduler(
                     if afd_is_ffn():
                         self._afd_ffn_cleanup_all()
                     self.self_check_during_idle()
+
+                # Idle freq lock: reduce GPU frequency when no batch is pending.
+                # Only applies to PREFILL instances — Decode side has tight
+                # iteration loops where frequent lock/unlock would add overhead.
+                if (self._idle_lock_enabled
+                        and not self._idle_freq_locked
+                        and self._dvfs_hw_list
+                        and disagg_mode == DisaggregationMode.PREFILL):
+                    for hw in self._dvfs_hw_list:
+                        hw.lock_sm_clock(self._idle_lock_freq)
+                    self._idle_freq_locked = True
 
             # F3: overlap — process last batch (while GPU runs current batch)
             if afd_overlap:
@@ -2282,6 +2307,7 @@ class Scheduler(
                 online_calibration=getattr(self.server_args, "afd_dvfs_online_calibration", False),
                 calibration_ema=getattr(self.server_args, "afd_dvfs_calibration_ema", 0.2),
                 moe_freq_floor=0,  # disabled: MoE freq floor needs more research
+                headroom_aggressive_threshold=0.0,
             )
             logger.info("AFD DVFS controller initialized")
 
@@ -2564,6 +2590,14 @@ class Scheduler(
 
     def _afd_dvfs_before_batch(self, batch):
         """Select and apply frequency before running a batch."""
+        # Restore from idle freq lock: set GPU back to last active frequency
+        if self._idle_freq_locked and self._dvfs_hw_list:
+            from sglang.srt.layers.afd import afd_is_attn
+            target_f = self._cur_f_a if afd_is_attn() else self._cur_f_f
+            for hw in self._dvfs_hw_list:
+                hw.lock_sm_clock(target_f)
+            self._idle_freq_locked = False
+
         # Poll Tier 1 freq config (for non-PA processes)
         if not getattr(self.server_args, "enable_tier1_pa", False):
             self._poll_tier1_freq_config()

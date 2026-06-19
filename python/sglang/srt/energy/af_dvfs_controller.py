@@ -90,6 +90,7 @@ class AFDVFSController:
         online_calibration: bool = False,
         calibration_ema: float = 0.2,
         moe_freq_floor: int = 0,
+        headroom_aggressive_threshold: float = 0.0,
     ):
         self.predictor = predictor
         self.num_layers = num_layers
@@ -101,6 +102,7 @@ class AFDVFSController:
         self._baseline_f_a = baseline_f_a or F_MAX
         self._baseline_f_f = baseline_f_f or F_MAX
         self._moe_freq_floor = moe_freq_floor
+        self._headroom_aggressive_threshold = headroom_aggressive_threshold
         self._decode_state = DecodeWindowState(
             cur_f_a=self._baseline_f_a,
             cur_f_f=self._baseline_f_f,
@@ -419,9 +421,30 @@ class AFDVFSController:
                 else:
                     self._stats_switch_down += 1
 
-            self._update_decode_state(f_a, f_f, bs, switched)
             total_lat = t_layer * self.num_layers + drain
             total_e = e * self.num_layers
+
+            # Headroom-aggressive (V1): reduce f_a when latency is far below SLO
+            if (self._headroom_aggressive_threshold > 0
+                    and total_lat < self._headroom_aggressive_threshold * slo_tpot_us
+                    and f_a > F_MIN):
+                for alt_fa in sorted(self.freqs):
+                    if alt_fa >= f_a:
+                        break
+                    try:
+                        alt_t = self._layer_latency("decode", alt_fa, f_f, bs, il, ol, M)
+                        alt_total = alt_t * self.num_layers + drain
+                        if (alt_total * calib) <= slo_tpot_us:
+                            f_a = alt_fa
+                            total_lat = alt_total
+                            alt_e_layer = self._layer_energy("decode", alt_fa, f_f, bs, il, ol)
+                            total_e = alt_e_layer * self.num_layers
+                            switched = True
+                            break
+                    except (RuntimeError, ValueError):
+                        continue
+
+            self._update_decode_state(f_a, f_f, bs, switched)
             logger.debug(
                 "Decode DVFS: bs=%d il=%d ol=%d → f_a=%d f_f=%d "
                 "switched=%s lat=%.0fus energy=%.1fmJ "
@@ -525,6 +548,28 @@ class AFDVFSController:
                     self._stats_switch_up += 1
                 else:
                     self._stats_switch_down += 1
+
+            # Headroom-aggressive: when latency is far below SLO, try to
+            # reduce f_a further to save DA idle power between iterations.
+            if (self._headroom_aggressive_threshold > 0
+                    and lat < self._headroom_aggressive_threshold * slo_tpot_us
+                    and f_a > F_MIN):
+                for alt_fa in sorted(self.freqs):
+                    if alt_fa >= f_a:
+                        break
+                    alt_lat = self.predictor.predict_iteration_latency(
+                        M, alt_fa, f_f, bs, il, tp_a=self.tp_a, tp_f=self.tp_f,
+                        lif=lif, max_expert_tokens=max_expert_tokens, els=els)
+                    if alt_lat is not None and (alt_lat * calib) <= slo_tpot_us:
+                        f_a = alt_fa
+                        lat = alt_lat
+                        alt_e = self.predictor.predict_iteration_energy(
+                            M, alt_fa, f_f, bs, il, tp_a=self.tp_a, tp_f=self.tp_f,
+                            lif=lif, max_expert_tokens=max_expert_tokens, els=els)
+                        if alt_e is not None:
+                            total_e = alt_e[0] + alt_e[1]
+                        switched = True
+                        break
 
             self._update_decode_state(f_a, f_f, bs, switched)
             return DVFSDecision(

@@ -209,29 +209,120 @@ class MixtralDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = config.rope_parameters["rope_theta"]
-        self.self_attn = MixtralAttention(
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            max_position=config.max_position_embeddings,
-            num_kv_heads=config.num_key_value_heads,
-            layer_id=layer_id,
-            rope_theta=rope_theta,
-            quant_config=quant_config,
-            prefix=add_prefix("self_attn", prefix),
-        )
-        self.block_sparse_moe = MixtralMoE(
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            layer_id=layer_id,
-            quant_config=quant_config,
-            prefix=add_prefix("block_sparse_moe", prefix),
-        )
+
+        from sglang.srt.layers.afd import get_afd_perspective
+        from sglang.srt.layers.afd_type import AFDPerspective
+
+        perspective = get_afd_perspective()
+
+        # For FFN perspective, skip creating attention (save memory)
+        if perspective != AFDPerspective.AFD_PERSPECTIVE_FFN:
+            self.self_attn = MixtralAttention(
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                max_position=config.max_position_embeddings,
+                num_kv_heads=config.num_key_value_heads,
+                layer_id=layer_id,
+                rope_theta=rope_theta,
+                quant_config=quant_config,
+                prefix=add_prefix("self_attn", prefix),
+            )
+        else:
+            self.self_attn = None
+
+        # For Attn perspective, skip creating the huge MoE layer (save memory)
+        if perspective != AFDPerspective.AFD_PERSPECTIVE_ATTN:
+            self.block_sparse_moe = MixtralMoE(
+                num_experts=config.num_local_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                layer_id=layer_id,
+                quant_config=quant_config,
+                prefix=add_prefix("block_sparse_moe", prefix),
+            )
+            self.mlp = self.block_sparse_moe
+        else:
+            self.block_sparse_moe = None
+            self.mlp = None
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+
+        self.layer_id = layer_id
+
+        if perspective is not None:
+            from sglang.srt.layers.communicator import (
+                LayerCommunicator,
+                LayerScatterModes,
+            )
+
+            self.is_layer_sparse = True
+            is_previous_layer_sparse = True
+            is_next_layer_sparse = True
+
+            self.layer_scatter_modes = LayerScatterModes.init_new(
+                layer_id=layer_id,
+                num_layers=config.num_hidden_layers,
+                is_layer_sparse=self.is_layer_sparse,
+                is_previous_layer_sparse=is_previous_layer_sparse,
+                is_next_layer_sparse=is_next_layer_sparse,
+            )
+            self.layer_communicator = LayerCommunicator(
+                layer_scatter_modes=self.layer_scatter_modes,
+                input_layernorm=self.input_layernorm,
+                post_attention_layernorm=self.post_attention_layernorm,
+                is_last_layer=(layer_id == config.num_hidden_layers - 1),
+            )
+
+            from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+            AFDDecoderLayerMixin._afd_init(self)
+
+    def forward_afd_A(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_A(
+            self, positions, hidden_states, forward_batch, residual
+        )
+
+    def forward_afd_F(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        from sglang.srt.layers.afd_mixin import AFDDecoderLayerMixin
+
+        return AFDDecoderLayerMixin.forward_afd_F(
+            self, hidden_states, forward_batch, residual
+        )
+
+    def _run_mlp(self, hidden_states: torch.Tensor, forward_batch) -> torch.Tensor:
+        import os
+        if os.environ.get("AFD_DEBUG_MLP", "0") == "1" and self.layer_id == 0:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            if rank == 0:
+                n = hidden_states.norm().item()
+                mn = hidden_states.mean().item()
+                logger.info(f"[DBG] L{self.layer_id} _run_mlp input: shape={hidden_states.shape} norm={n:.4f} mean={mn:.6f}")
+        out = self.mlp(hidden_states)
+        if os.environ.get("AFD_DEBUG_MLP", "0") == "1" and self.layer_id == 0:
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            if rank == 0:
+                n = out.norm().item()
+                mn = out.mean().item()
+                logger.info(f"[DBG] L{self.layer_id} _run_mlp output: shape={out.shape} norm={n:.4f} mean={mn:.6f}")
+        return out
 
     def forward(
         self,
@@ -266,6 +357,7 @@ class MixtralModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.pp_group = get_pp_group()
@@ -313,6 +405,31 @@ class MixtralModel(nn.Module):
             assert pp_proxy_tensors is not None
             hidden_states = pp_proxy_tensors["hidden_states"]
             residual = pp_proxy_tensors["residual"]
+
+        from sglang.srt.layers.afd import get_afd_perspective
+
+        if get_afd_perspective() is not None:
+            from sglang.srt.layers.afd import model_forward_afd
+            from sglang.srt.layers.communicator import ScatterMode
+
+            hidden_states, residual = model_forward_afd(
+                layers=self.layers,
+                positions=positions,
+                forward_batch=forward_batch,
+                hidden_states=hidden_states,
+                residual=residual,
+                input_data_scatter_mode=ScatterMode.model_input_output(),
+            )
+            if not self.pp_group.is_last_rank:
+                return PPProxyTensors(
+                    {"hidden_states": hidden_states, "residual": residual}
+                )
+            if hidden_states.shape[0] != 0:
+                if residual is not None:
+                    hidden_states, _ = self.norm(hidden_states, residual)
+                else:
+                    hidden_states = self.norm(hidden_states)
+            return hidden_states
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
@@ -386,6 +503,17 @@ class MixtralForCausalLM(nn.Module):
         return self.model.end_layer
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        from sglang.srt.layers.afd import get_afd_perspective
+        from sglang.srt.layers.afd_mixin import AFDWeightFilter
+
+        afd_perspective = get_afd_perspective()
+        if afd_perspective is not None:
+            weights = (
+                (name, tensor)
+                for name, tensor in weights
+                if AFDWeightFilter.should_load(name, afd_perspective)
+            )
+
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),

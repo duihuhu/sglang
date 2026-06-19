@@ -189,11 +189,60 @@ def train_and_save(df: pd.DataFrame, feature_cols: list, target_col: str,
     return models
 
 
+def train_prefill_models(prefill_path: str, output_dir: str,
+                         folds: int = 5, skip_cv: bool = False) -> None:
+    """Fit Prefill layer models from prefill_data_v1.txt (same format as V1)."""
+    from energy_model_v1 import evaluate_models, fit_final_models, load_prefill
+
+    df_p = load_prefill(prefill_path)
+    feat_cols = ["gpu_clock", "input_len", "batch_size"]
+    tasks = [
+        ("Prefill_A", "A_energy_mj"),
+        ("Prefill_F", "F_energy_mj"),
+        ("Prefill_A_lat", "A"),
+        ("Prefill_F_lat", "F"),
+    ]
+
+    print(f"\n[Prefill] Loading {prefill_path} ({len(df_p)} rows)")
+
+    if not skip_cv:
+        print(f"\n[Prefill] {folds}-fold cross-validation")
+        print(f"\n{'Label':<20} {'LUT MAPE%':>12} {'LinearReg%':>12} {'GBDT%':>12}")
+        print("-" * 60)
+        for label, target in tasks:
+            sys.stdout.write(f"{label:<20} ")
+            sys.stdout.flush()
+            res = evaluate_models(df_p, feat_cols, target, label, n_splits=folds)
+            lut_str = f"{res['LUT'][0]:.2f}±{res['LUT'][1]:.2f}" if "LUT" in res else "N/A"
+            lr_str = f"{res['LinearReg'][0]:.2f}±{res['LinearReg'][1]:.2f}" if "LinearReg" in res else "N/A"
+            gbdt_str = f"{res['GBDT'][0]:.2f}±{res['GBDT'][1]:.2f}" if "GBDT" in res else "N/A"
+            print(f"{lut_str:>12} {lr_str:>12} {gbdt_str:>12}")
+
+    print(f"\n[Prefill] Training final models on full data")
+    for label, target in tasks:
+        models = fit_final_models(df_p, feat_cols, target, label)
+        for mname, model in models.items():
+            path = os.path.join(output_dir, f"{label}_{mname}.pkl")
+            with open(path, "wb") as f:
+                pickle.dump(model, f)
+            print(f"    Saved: {path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Energy Model V2: Decode Pipeline Coupled Training")
-    parser.add_argument("--data", type=str,
-                        default=str(SCRIPT_DIR / "data/decode_pipeline_v1.txt"))
+        description="Energy Model V2: Prefill layer + Decode pipeline training")
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=str(SCRIPT_DIR / "data/v2_pipeline_profile"),
+        help="Self-contained V2 dataset directory",
+    )
+    parser.add_argument(
+        "--decode-data",
+        type=str,
+        default=None,
+        help="Decode pipeline file (relative to --data-dir or absolute path)",
+    )
     parser.add_argument("--output-dir", type=str,
                         default=str(SCRIPT_DIR / "models_v2"))
     parser.add_argument("--folds", type=int, default=5)
@@ -201,15 +250,29 @@ def main():
                         help="Skip cross-validation, just train final models")
     args = parser.parse_args()
 
+    data_dir = Path(args.data_dir)
+    prefill_path = str(data_dir / "prefill_data_v1.txt")
+    if args.decode_data:
+        decode_path = Path(args.decode_data)
+        if not decode_path.is_absolute():
+            decode_path = data_dir / decode_path
+    else:
+        decode_path = data_dir / "decode_pipeline_v1.txt"
+    decode_path = str(decode_path)
+
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("=" * 70)
-    print(" Energy Model V2: Decode Pipeline Coupled Training")
+    print(" Energy Model V2: Prefill Layer + Decode Pipeline Training")
     print("=" * 70)
+    print(f" Data dir: {data_dir}")
 
-    # Load data
-    print(f"\n[1] Loading data from {args.data}")
-    df = load_pipeline_data(args.data)
+    train_prefill_models(prefill_path, args.output_dir,
+                         folds=args.folds, skip_cv=args.skip_cv)
+
+    # Load decode pipeline data
+    print(f"\n[Decode] Loading data from {decode_path}")
+    df = load_pipeline_data(decode_path)
     print(f"    Rows: {len(df)}")
     print(f"    M values: {sorted(df['M'].unique())}")
     print(f"    f_A range: {df['f_A'].min()}-{df['f_A'].max()}")

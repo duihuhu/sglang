@@ -68,12 +68,19 @@ def load_all_data():
         dfs.append(df)
         print(f"  TP2: {len(df)} rows")
 
-    # Hetero data
+    # Hetero data (DA-TP2, DF-TP4)
     hetero_path = DATA_DIR / "decode_pipeline_moe_hetero_2a4f.txt"
     if hetero_path.exists():
         df = pd.read_csv(hetero_path, sep="\t")
         dfs.append(df)
-        print(f"  Hetero: {len(df)} rows")
+        print(f"  Hetero 2A4F: {len(df)} rows")
+
+    # Hetero data (DA-TP1, DF-TP4)
+    hetero_1a4f_path = DATA_DIR / "decode_pipeline_moe_1a4f.txt"
+    if hetero_1a4f_path.exists():
+        df = pd.read_csv(hetero_1a4f_path, sep="\t")
+        dfs.append(df)
+        print(f"  Hetero 1A4F: {len(df)} rows")
 
     # V4 expert data
     v4_path = DATA_DIR / "decode_pipeline_moe_v4_expert.txt"

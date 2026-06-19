@@ -454,7 +454,8 @@ class DeploymentManager:
             dvfs_args = ["--afd-dvfs-enabled",
                          "--afd-energy-model-dir", ENERGY_MODEL_DIR,
                          "--afd-ttft-slo-ms", "2000",
-                         "--afd-tpot-slo-us", "250000"]
+                         "--afd-tpot-slo-us", "250000",
+                         "--afd-dvfs-idle-lock"]
 
         def _env(cvd, ucx_base, sched_port, peer_device, nvml_idx, ffn_host=None):
             e = env_base.copy()
@@ -552,7 +553,8 @@ class DeploymentManager:
             dvfs_args = ["--afd-dvfs-enabled",
                          "--afd-energy-model-dir", ENERGY_MODEL_DIR,
                          "--afd-ttft-slo-ms", "2000",
-                         "--afd-tpot-slo-us", "250000"]
+                         "--afd-tpot-slo-us", "250000",
+                         "--afd-dvfs-idle-lock"]
 
         # Prefill side: PF TP=2 (2GPU) + PA TP=1 (1GPU) = 3 GPU
         p_cvd = "0,1,2"
@@ -680,6 +682,146 @@ class DeploymentManager:
                  micro_batch, self.tier)
         return ROUTER_PORT
 
+    def start_pdaf_asym_4p4d(self, micro_batch=2):
+        """Start 4P+4D: PA(TP2)+PF(TP2) on 4GPU + DA(TP2)+DF(TP2) on 4GPU.
+        Balanced layout with higher Decode Attn parallelism.
+        """
+        return self._start_pdaf_asym_4p4d_impl(micro_batch)
+
+    def _start_pdaf_asym_4p4d_impl(self, micro_batch):
+        """4P+4D: PA(TP2,GPU2,3)+PF(TP2,GPU0,1) | DA(TP2,GPU6,7)+DF(TP2,GPU4,5)."""
+        env_base = self._common_env()
+        env_base["AFD_UCX_TLS"] = "rc,tcp,cuda_copy,cuda_ipc"
+        env_base["SGLANG_DISAGGREGATION_THREAD_POOL_SIZE"] = "128"
+        env_base["AFD_ASYNC_PIPELINE"] = "1"
+
+        dvfs_args = []
+        if self.tier:
+            dvfs_args = ["--afd-dvfs-enabled",
+                         "--afd-energy-model-dir", ENERGY_MODEL_DIR,
+                         "--afd-ttft-slo-ms", "2000",
+                         "--afd-tpot-slo-us", "250000",
+                         "--afd-dvfs-idle-lock"]
+
+        p_cvd = "0,1,2,3"
+        p_ffn_tp = 2
+        p_attn_tp = 2
+        d_cvd = "4,5,6,7"
+        d_ffn_tp = 2
+        d_attn_tp = 2
+
+        common_base = ["--model-path", MODEL,
+                       "--host", "127.0.0.1",
+                       "--afd-comm-backend", "ipc_cpp",
+                       "--afd-micro-batch", str(micro_batch),
+                       "--afd-dynamic-micro-batch",
+                       "--max-running-requests", "512",
+                       "--skip-server-warmup",
+                       "--disable-cuda-graph",
+                       "--disable-piecewise-cuda-graph",
+                       "--afd-disagg-interleave-poll",
+                       "--disable-radix-cache",
+                       "--num-reserved-decode-tokens", "512",
+                       "--disaggregation-transfer-backend", "mooncake",
+                       "--disaggregation-bootstrap-port", str(BS_PORT),
+                       "--disaggregation-ib-device", "mlx5_4",
+                       "--enable-return-routed-experts",
+                       "--enable-metrics"]
+
+        p_mem_frac = "0.80"
+        d_mem_frac = "0.80"
+
+        def _env(cvd, ucx_base, sched_port, peer_device, nvml_idx,
+                 ffn_host=None):
+            e = env_base.copy()
+            e["CUDA_VISIBLE_DEVICES"] = cvd
+            e["AFD_UCX_BASE_PORT"] = str(ucx_base)
+            e["AFD_SCHED_PORT"] = str(sched_port)
+            e["AFD_IPC_SYNC_MODE"] = "ipc_event"
+            e["AFD_IPC_PEER_DEVICE"] = str(peer_device)
+            e["AFD_NVML_DEVICE_INDICES"] = str(nvml_idx)
+            e["AFD_NVML_DEVICE_INDEX"] = str(nvml_idx).split(",")[0]
+            e["SGLANG_DISAGGREGATION_BOOTSTRAP_TIMEOUT"] = "600"
+            e["SGLANG_DISAGGREGATION_WAITING_TIMEOUT"] = "600"
+            e["AFD_LIF_SHARED_PATH"] = "/tmp/afd_lif_shared.txt"
+            if ffn_host:
+                e["AFD_UCX_FFN_HOST"] = ffn_host
+            return e
+
+        def _cmd(port, perspective, disagg, tp, base_gpu_id,
+                 attn_tp=None, ffn_tp=None, mem_frac="0.80"):
+            cmd = [PYTHON, "-m", "sglang.launch_server",
+                   "--port", str(port),
+                   "--tp", str(tp),
+                   "--afd-perspective", perspective,
+                   "--disaggregation-mode", disagg,
+                   "--base-gpu-id", str(base_gpu_id),
+                   "--mem-fraction-static", mem_frac]
+            cmd += common_base + dvfs_args
+            if attn_tp is not None:
+                cmd += ["--afd-attn-tp", str(attn_tp)]
+            if ffn_tp is not None:
+                cmd += ["--afd-ffn-tp", str(ffn_tp)]
+            return cmd
+
+        # PF (FFN, TP=2, GPU0,1, base=0)
+        self._popen("pf",
+                    _cmd(PF_PORT, "ffn", "prefill", tp=p_ffn_tp,
+                         base_gpu_id=0, attn_tp=p_attn_tp,
+                         ffn_tp=p_ffn_tp, mem_frac=p_mem_frac),
+                    _env(p_cvd, UCX_P, SCHED_P, peer_device=2,
+                         nvml_idx="0,1"))
+        time.sleep(5)
+
+        # PA (Attn, TP=2, GPU2,3, base=2)
+        self._popen("pa",
+                    _cmd(PA_PORT, "attn", "prefill", tp=p_attn_tp,
+                         base_gpu_id=2, attn_tp=p_attn_tp,
+                         ffn_tp=p_ffn_tp, mem_frac=p_mem_frac),
+                    _env(p_cvd, UCX_P, SCHED_P, peer_device=0,
+                         nvml_idx="2,3", ffn_host="127.0.0.1"))
+        time.sleep(5)
+
+        # DF (FFN, TP=2, GPU4,5, base=0)
+        self._popen("df",
+                    _cmd(DF_PORT, "ffn", "decode", tp=d_ffn_tp,
+                         base_gpu_id=0, attn_tp=d_attn_tp,
+                         ffn_tp=d_ffn_tp, mem_frac=d_mem_frac),
+                    _env(d_cvd, UCX_D, SCHED_D, peer_device=2,
+                         nvml_idx="4,5"))
+        time.sleep(8)
+
+        # DA (Attn, TP=2, GPU6,7, base=2)
+        self._popen("da",
+                    _cmd(DA_PORT, "attn", "decode", tp=d_attn_tp,
+                         base_gpu_id=2, attn_tp=d_attn_tp,
+                         ffn_tp=d_ffn_tp, mem_frac=d_mem_frac),
+                    _env(d_cvd, UCX_D, SCHED_D, peer_device=0,
+                         nvml_idx="6,7", ffn_host="127.0.0.1"))
+
+        log.info("Waiting for PDAF 4P4D servers...")
+        checks = [(PA_PORT, "PA", False), (PF_PORT, "PF", True),
+                  (DA_PORT, "DA", False), (DF_PORT, "DF", True)]
+        for port, name, use_model_info in checks:
+            if not wait_health(port, 600,
+                               check_model_info=use_model_info):
+                log.error("  %s (port %d) failed to start", name, port)
+                return None
+            log.info("  %s ready (port %d)", name, port)
+
+        cmd_r = [PYTHON, "-m", "sglang_router.launch_router",
+                 "--pd-disaggregation", "--mini-lb",
+                 "--prefill", f"http://127.0.0.1:{PA_PORT}",
+                 "--decode", f"http://127.0.0.1:{DA_PORT}",
+                 "--host", "127.0.0.1", "--port", str(ROUTER_PORT)]
+        self._popen("router", cmd_r, os.environ.copy())
+        if not wait_health(ROUTER_PORT, 60):
+            log.error("PDAF 4P4D router failed")
+            return None
+        log.info("PDAF 4P4D ready (M=%d, tier=%s, PA-TP2+PF-TP2 | DA-TP2+DF-TP2)",
+                 micro_batch, self.tier)
+        return ROUTER_PORT
+
     def start_pdaf_dp(self, micro_batch=2, n_instances=2):
         """Start PDAF DP2: 2x (PA+PF+DA+DF) on 8 GPUs.
         Instance 0: PF(GPU0)+PA(GPU1)+DF(GPU2)+DA(GPU3)
@@ -695,7 +837,8 @@ class DeploymentManager:
             dvfs_args = ["--afd-dvfs-enabled",
                          "--afd-energy-model-dir", ENERGY_MODEL_DIR,
                          "--afd-ttft-slo-ms", "2000",
-                         "--afd-tpot-slo-us", "250000"]
+                         "--afd-tpot-slo-us", "250000",
+                         "--afd-dvfs-idle-lock"]
 
         all_pa_ports = []
         all_da_ports = []
@@ -1096,6 +1239,8 @@ DEPLOY_CONFIGS = {
     "pdaf_tp2_tier": {"method": "pdaf", "micro_batch": 2, "tier": True},
     "pdaf_asym_1p6d": {"method": "pdaf_asym", "tier": False},
     "pdaf_asym_1p6d_tier": {"method": "pdaf_asym", "tier": True},
+    "pdaf_asym_4p4d": {"method": "pdaf_asym_4p4d", "tier": False},
+    "pdaf_asym_4p4d_tier": {"method": "pdaf_asym_4p4d", "tier": True},
 }
 
 
@@ -1154,6 +1299,8 @@ def main():
             port = mgr.start_pdaf(micro_batch=cfg["micro_batch"])
         elif cfg["method"] == "pdaf_asym":
             port = mgr.start_pdaf_asym(micro_batch=cfg.get("micro_batch", 2))
+        elif cfg["method"] == "pdaf_asym_4p4d":
+            port = mgr.start_pdaf_asym_4p4d(micro_batch=cfg.get("micro_batch", 2))
         elif cfg["method"] == "pdaf_dp":
             port = mgr.start_pdaf_dp(micro_batch=cfg["micro_batch"])
 

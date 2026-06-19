@@ -654,6 +654,8 @@ class ServerArgs:
     afd_dvfs_feedback_hold: int = 30  # hold forced freq for N iterations
     afd_dvfs_online_calibration: bool = False  # Tier2 online calibration: correct predictor bias with observed TPOT
     afd_dvfs_calibration_ema: float = 0.2  # EMA weight for calibration factor update
+    afd_dvfs_idle_lock: bool = False  # Lock GPU to min freq when scheduler is idle (no pending batch)
+    afd_dvfs_idle_lock_freq: int = 210  # Frequency (MHz) to lock during idle periods
 
     # Unified single-knob DVFS (PD / Native baselines, no AF disaggregation)
     dvfs_enabled: bool = False
@@ -5662,6 +5664,20 @@ class ServerArgs:
             type=float,
             default=ServerArgs.afd_dvfs_calibration_ema,
             help="EMA weight for online calibration factor update. Default: 0.2.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-idle-lock",
+            action="store_true",
+            default=ServerArgs.afd_dvfs_idle_lock,
+            help="Lock GPU to minimum frequency when the AFD scheduler is idle "
+            "(no pending batch). Reduces idle power consumption significantly "
+            "for light workloads where Prefill GPUs are mostly idle.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-idle-lock-freq",
+            type=int,
+            default=ServerArgs.afd_dvfs_idle_lock_freq,
+            help="SM clock frequency (MHz) to lock during idle periods. Default: 210.",
         )
 
         parser.add_argument(

@@ -93,31 +93,35 @@ class SLOConfig:
 # ═══════════════════════════════════════════════════════════════════════
 
 @dataclass
-class _PoolCandidate:
-    """One viable (tp, freq) configuration for a single pool."""
+class _OpCandidate:
+    """One viable (tp, freq) for a single operator (A or F)."""
     tp: int
     freq: int
+    t_us: float       # latency of this operator only
+    e_mj: float       # energy of this operator only
+
+
+@dataclass
+class _AFPairCandidate:
+    """A joint (tp_A, freq_A, tp_F, freq_F) AF-pair candidate.
+
+    This is the correct optimization unit: one pair runs Attention on
+    tp_A GPUs at freq_A, and FFN on tp_F GPUs at freq_F.
+    """
+    tp_a: int
+    freq_a: int
+    tp_f: int
+    freq_f: int
     t_a_us: float
     t_f_us: float
     e_a_mj: float
     e_f_mj: float
-    t_layer_us: float = 0.0       # M=1: t_A + t_F + t_comm
-    e_total_mj: float = 0.0        # E_A + E_F per layer
-    throughput_per_pair: float = 0.0  # req/s for one pipeline pair
+    t_pair_us: float = 0.0         # t_A + t_F + t_comm (M=1 layer time)
+    e_pair_mj: float = 0.0         # E_A + E_F (correct: no double-count)
+    throughput_per_pair: float = 0.0
 
     def __post_init__(self):
-        self.e_total_mj = self.e_a_mj + self.e_f_mj
-
-    def e_bubble_mj(self, M: int = _DEFAULT_M) -> float:
-        """Pipeline bubble energy: idle power × wait time × (M-1)/M.
-
-        The faster side waits for the slower side. During the wait, the idle
-        GPU consumes P_idle at its own frequency.
-        """
-        if M <= 1:
-            return 0.0
-        t_wait_us = abs(self.t_a_us - self.t_f_us)
-        return _P_IDLE_W * t_wait_us / 1_000_000.0 * 1000.0 * (M - 1) / M
+        self.e_pair_mj = self.e_a_mj + self.e_f_mj
 
 
 @dataclass
@@ -246,47 +250,36 @@ class Tier1Solver:
             G, workload.lambda_prefill, workload.n_active_decode, alpha,
         )
 
-        # ── Phase 1: enumerate candidates per pool ─────────────────
-        cand_pa = self._enumerate_pool(
-            "prefill", "A", workload.bs_avg_p, workload.il_rep_p,
+        # ── Phase 1: enumerate AF-pair candidates ──────────────────
+        pairs_p = self._enumerate_pairs(
+            "prefill", workload.bs_avg_p, workload.il_rep_p,
             slo.ttft_ms, beta, workload,
         )
-        cand_pf = self._enumerate_pool(
-            "prefill", "F", workload.bs_avg_p, workload.il_rep_p,
-            slo.ttft_ms, beta, workload,
-        )
-        cand_da = self._enumerate_pool(
-            "decode", "A", workload.bs_avg_d, workload.il_rep_d,
-            slo.tpot_ms, beta, workload, workload.ol_rep_d,
-        )
-        cand_df = self._enumerate_pool(
-            "decode", "F", workload.bs_avg_d, workload.il_rep_d,
+        pairs_d = self._enumerate_pairs(
+            "decode", workload.bs_avg_d, workload.il_rep_d,
             slo.tpot_ms, beta, workload, workload.ol_rep_d,
         )
 
         logger.info(
-            "Candidates after pruning: PA=%d PF=%d DA=%d DF=%d",
-            len(cand_pa), len(cand_pf), len(cand_da), len(cand_df),
+            "AF-pair candidates after pruning: prefill=%d decode=%d",
+            len(pairs_p), len(pairs_d),
         )
-        if not all([cand_pa, cand_pf, cand_da, cand_df]):
-            logger.warning("Tier1Solver: at least one pool has zero candidates")
+        if not pairs_p or not pairs_d:
+            logger.warning(
+                "Tier1Solver: no feasible AF-pair for at least one phase"
+            )
             return Tier1Solution(feasible=False)
 
-        # ── Phase 2: Pareto filter per pool ────────────────────────
-        cand_pa = self._pareto_filter(cand_pa)
-        cand_pf = self._pareto_filter(cand_pf)
-        cand_da = self._pareto_filter(cand_da)
-        cand_df = self._pareto_filter(cand_df)
+        # ── Phase 2: Pareto filter per phase ─────────────────────
+        pairs_p = self._pareto_filter_pairs(pairs_p)
+        pairs_d = self._pareto_filter_pairs(pairs_d)
         logger.info(
-            "After Pareto: PA=%d PF=%d DA=%d DF=%d",
-            len(cand_pa), len(cand_pf), len(cand_da), len(cand_df),
+            "After Pareto: prefill=%d decode=%d",
+            len(pairs_p), len(pairs_d),
         )
 
-        # ── Phase 3: enumerate (k_P, k_D) ──────────────────────────
-        best = self._search_kp_kd(
-            G, cand_pa, cand_pf, cand_da, cand_df,
-            workload, alpha,
-        )
+        # ── Phase 3: enumerate (k_P, k_D) ───────────────────────
+        best = self._search_kp_kd(G, pairs_p, pairs_d, workload, alpha)
 
         if best is None:
             logger.warning("Tier1Solver: no feasible (k_P,k_D) assignment found")
@@ -296,56 +289,86 @@ class Tier1Solver:
 
     # ── Candidate enumeration ────────────────────────────────────────────
 
-    def _enumerate_pool(
+    def _enumerate_op_candidates(
         self,
         phase: str,
         op: str,
+        bs: int,
+        il: int,
+        workload: WorkloadProfile,
+        ol: Optional[int] = None,
+    ) -> list[_OpCandidate]:
+        """Enumerate all feasible (tp, freq) for one operator (A or F)."""
+        candidates: list[_OpCandidate] = []
+        for tp in _VALID_TP:
+            if op == "A" and not self._check_attn_memory(
+                phase, tp, bs, il, workload
+            ):
+                continue
+            if op == "F" and not self._check_ffn_memory(tp):
+                continue
+            for freq in _VALID_FREQS:
+                try:
+                    m = self.pt.query_metrics(phase, tp, freq, bs, il, ol)
+                except (RuntimeError, ValueError):
+                    continue
+                t = m.t_a_us if op == "A" else m.t_f_us
+                e = m.e_a_mj if op == "A" else m.e_f_mj
+                candidates.append(_OpCandidate(
+                    tp=tp, freq=freq, t_us=t, e_mj=e,
+                ))
+        return candidates
+
+    def _enumerate_pairs(
+        self,
+        phase: str,
         bs: int,
         il: int,
         slo_ms: float,
         beta: float,
         workload: WorkloadProfile,
         ol: Optional[int] = None,
-    ) -> list[_PoolCandidate]:
-        """Enumerate all feasible (tp, freq) for one pool, with hard pruning."""
-        candidates: list[_PoolCandidate] = []
-        t_comm_us = self.pt.get_comm_us(bs, il if phase == "prefill" else 1)
+    ) -> list[_AFPairCandidate]:
+        """Enumerate all feasible AF-pair candidates with joint pruning.
+
+        Searches over (tp_A, freq_A) × (tp_F, freq_F), applying:
+          - Memory pruning per operator
+          - Joint SLO pruning: t_A(tp_A,f_A) + t_F(tp_F,f_F) + comm
+          - A/F balance pruning on the real pair
+        """
+        t_comm_us = self.pt.get_comm_us(
+            bs, il if phase == "prefill" else 1
+        )
         slo_per_layer_us = (slo_ms * 1000.0) / self.num_layers
 
-        for tp in _VALID_TP:
-            # Memory pruning
-            if op == "A" and not self._check_attn_memory(phase, tp, bs, il, workload):
-                continue
-            if op == "F" and not self._check_ffn_memory(tp):
-                continue
+        cands_a = self._enumerate_op_candidates(
+            phase, "A", bs, il, workload, ol
+        )
+        cands_f = self._enumerate_op_candidates(
+            phase, "F", bs, il, workload, ol
+        )
 
-            for freq in _VALID_FREQS:
-                try:
-                    m = self.pt.query_metrics(phase, tp, freq, bs, il, ol)
-                except (RuntimeError, ValueError):
+        pairs: list[_AFPairCandidate] = []
+        for ca in cands_a:
+            for cf in cands_f:
+                t_pair = ca.t_us + cf.t_us + t_comm_us
+                if t_pair > slo_per_layer_us:
                     continue
-
-                t_layer = m.t_a_us + m.t_f_us + t_comm_us
-
-                # SLO pruning (M=1 conservative)
-                if t_layer > slo_per_layer_us:
+                t_max = max(ca.t_us, cf.t_us)
+                if t_max > 0 and abs(ca.t_us - cf.t_us) > beta * t_max:
                     continue
-
-                # A/F balance pruning
-                t_max = max(m.t_a_us, m.t_f_us)
-                if t_max > 0 and abs(m.t_a_us - m.t_f_us) > beta * t_max:
-                    continue
-
-                thpt = self._pair_throughput(bs, t_layer, self.num_layers, phase)
-                candidates.append(_PoolCandidate(
-                    tp=tp, freq=freq,
-                    t_a_us=m.t_a_us, t_f_us=m.t_f_us,
-                    e_a_mj=m.e_a_mj, e_f_mj=m.e_f_mj,
-                    t_layer_us=t_layer,
+                thpt = self._pair_throughput(
+                    bs, t_pair, self.num_layers, phase
+                )
+                pairs.append(_AFPairCandidate(
+                    tp_a=ca.tp, freq_a=ca.freq,
+                    tp_f=cf.tp, freq_f=cf.freq,
+                    t_a_us=ca.t_us, t_f_us=cf.t_us,
+                    e_a_mj=ca.e_mj, e_f_mj=cf.e_mj,
+                    t_pair_us=t_pair,
                     throughput_per_pair=thpt,
                 ))
-
-        return candidates
+        return pairs
 
     @staticmethod
     def _pair_throughput(
@@ -405,25 +428,23 @@ class Tier1Solver:
     # ── Pareto filtering ─────────────────────────────────────────────────
 
     @staticmethod
-    def _pareto_filter(candidates: list[_PoolCandidate]) -> list[_PoolCandidate]:
-        """Keep only non-dominated configs (lower latency AND lower energy is better).
+    def _pareto_filter_pairs(
+        pairs: list[_AFPairCandidate],
+    ) -> list[_AFPairCandidate]:
+        """Keep only non-dominated AF-pair configs.
 
-        A config dominates B if it has ≤ latency AND ≤ energy, with at least
-        one strictly better.
+        A pair dominates another if it has ≤ latency AND ≤ energy,
+        with at least one strictly better.
         """
-        if len(candidates) <= 1:
-            return candidates
-
-        # Sort by latency ascending
-        sorted_c = sorted(candidates, key=lambda c: c.t_layer_us)
-        pareto: list[_PoolCandidate] = []
+        if len(pairs) <= 1:
+            return pairs
+        sorted_p = sorted(pairs, key=lambda p: p.t_pair_us)
+        pareto: list[_AFPairCandidate] = []
         min_energy = float("inf")
-
-        for c in sorted_c:
-            if c.e_total_mj < min_energy:
-                pareto.append(c)
-                min_energy = c.e_total_mj
-
+        for p in sorted_p:
+            if p.e_pair_mj < min_energy:
+                pareto.append(p)
+                min_energy = p.e_pair_mj
         return pareto
 
     # ── (k_P, k_D) search ───────────────────────────────────────────────
@@ -431,10 +452,8 @@ class Tier1Solver:
     def _search_kp_kd(
         self,
         G: int,
-        cand_pa: list[_PoolCandidate],
-        cand_pf: list[_PoolCandidate],
-        cand_da: list[_PoolCandidate],
-        cand_df: list[_PoolCandidate],
+        pairs_p: list[_AFPairCandidate],
+        pairs_d: list[_AFPairCandidate],
         workload: WorkloadProfile,
         alpha: float,
         M: int = _DEFAULT_M,
@@ -443,57 +462,40 @@ class Tier1Solver:
         best_solution: Optional[Tier1Solution] = None
         best_energy = float("inf")
 
-        max_k = G // 2  # each pair needs at least 2 GPUs (tp_A=1 + tp_F=1)
+        max_k = G // 2
 
         for k_p in range(1, max_k + 1):
             for k_d in range(1, max_k + 1):
-                # Quick resource check — need at least min feasible TP per pair
-                min_tp_p = min(c.tp for c in cand_pa) + min(c.tp for c in cand_pf)
-                min_tp_d = min(c.tp for c in cand_da) + min(c.tp for c in cand_df)
-                if k_p * min_tp_p + k_d * min_tp_d > G:
+                sel_p = self._select_pair(
+                    pairs_p, k_p, workload.lambda_prefill, alpha,
+                )
+                sel_d = self._select_pair(
+                    pairs_d, k_d, workload.n_active_decode, alpha,
+                )
+                if sel_p is None or sel_d is None:
                     continue
 
-                # Select best config for each pool given (k_p, k_d)
-                sel_pa = self._select_for_pool(
-                    cand_pa, k_p, workload.lambda_prefill, alpha,
-                )
-                sel_pf = self._select_for_pool(
-                    cand_pf, k_p, workload.lambda_prefill, alpha,
-                )
-                sel_da = self._select_for_pool(
-                    cand_da, k_d, workload.n_active_decode, alpha,
-                )
-                sel_df = self._select_for_pool(
-                    cand_df, k_d, workload.n_active_decode, alpha,
-                )
-
-                if sel_pa is None or sel_pf is None or sel_da is None or sel_df is None:
-                    continue
-
-                gpu_used = (
-                    k_p * (sel_pa.tp + sel_pf.tp)
-                    + k_d * (sel_da.tp + sel_df.tp)
-                )
+                gpu_per_p = sel_p.tp_a + sel_p.tp_f
+                gpu_per_d = sel_d.tp_a + sel_d.tp_f
+                gpu_used = k_p * gpu_per_p + k_d * gpu_per_d
                 if gpu_used > G:
                     continue
 
-                # Total energy per layer (weighted by pair count)
-                # Includes E_bubble: idle power during pipeline stall
-                e_bubble_p = self._pair_bubble_energy(sel_pa, sel_pf, M)
-                e_bubble_d = self._pair_bubble_energy(sel_da, sel_df, M)
+                e_bubble_p = self._pair_bubble_energy(sel_p, M)
+                e_bubble_d = self._pair_bubble_energy(sel_d, M)
                 e_total = (
-                    k_p * (sel_pa.e_total_mj + sel_pf.e_total_mj + e_bubble_p)
-                    + k_d * (sel_da.e_total_mj + sel_df.e_total_mj + e_bubble_d)
+                    k_p * (sel_p.e_pair_mj + e_bubble_p)
+                    + k_d * (sel_d.e_pair_mj + e_bubble_d)
                 )
 
                 if e_total < best_energy:
                     best_energy = e_total
                     sol = Tier1Solution(
                         k_p=k_p, k_d=k_d,
-                        tp_pa=sel_pa.tp, tp_pf=sel_pf.tp,
-                        tp_da=sel_da.tp, tp_df=sel_df.tp,
-                        f_pa=sel_pa.freq, f_pf=sel_pf.freq,
-                        f_da=sel_da.freq, f_df=sel_df.freq,
+                        tp_pa=sel_p.tp_a, tp_pf=sel_p.tp_f,
+                        tp_da=sel_d.tp_a, tp_df=sel_d.tp_f,
+                        f_pa=sel_p.freq_a, f_pf=sel_p.freq_f,
+                        f_da=sel_d.freq_a, f_df=sel_d.freq_f,
                         total_energy_mj_per_layer=e_total,
                         gpu_used=gpu_used,
                         feasible=True,
@@ -505,45 +507,36 @@ class Tier1Solver:
 
     @staticmethod
     def _pair_bubble_energy(
-        cand_a: _PoolCandidate, cand_f: _PoolCandidate, M: int,
+        pair: _AFPairCandidate, M: int,
     ) -> float:
-        """Compute pipeline bubble energy for an A/F pair.
+        """Compute pipeline bubble energy for an AF pair.
 
-        E_bubble = P_idle × |t_A - t_F| × (M-1)/M  (mJ)
-
-        The faster side idles while waiting for the slower side to finish.
-        This penalizes configurations with large A/F latency imbalance.
+        E_bubble = P_idle * |t_A - t_F| * (M-1)/M  (mJ)
         """
         if M <= 1:
             return 0.0
-        t_wait_us = abs(cand_a.t_a_us - cand_f.t_f_us)
+        t_wait_us = abs(pair.t_a_us - pair.t_f_us)
         e_bubble_j = _P_IDLE_W * t_wait_us / 1_000_000.0 * (M - 1) / M
-        return e_bubble_j * 1000.0  # convert J to mJ
+        return e_bubble_j * 1000.0
 
     @staticmethod
-    def _select_for_pool(
-        candidates: list[_PoolCandidate],
+    def _select_pair(
+        pairs: list[_AFPairCandidate],
         k: int,
         demand: float,
         alpha: float,
-    ) -> Optional[_PoolCandidate]:
-        """Pick the min-energy candidate whose throughput × k meets demand.
+    ) -> Optional[_AFPairCandidate]:
+        """Pick the min-energy AF-pair whose throughput * k meets demand.
 
-        Args:
-            candidates: Pareto-filtered pool candidates, sorted by latency.
-            k: Number of pipeline pairs sharing the load.
-            demand: Request rate (λ or N_active).
-            alpha: Capacity margin.
-
-        Returns:
-            The lowest-energy candidate that satisfies the throughput constraint,
-            or None if no candidate can meet demand even with k pairs.
+        The throughput is the real pipeline-pair throughput, determined by
+        the bottleneck side (max(t_A, t_F) + comm), not each pool
+        independently.
         """
-        best: Optional[_PoolCandidate] = None
-        for c in candidates:
-            if k * c.throughput_per_pair >= (1 + alpha) * demand:
-                if best is None or c.e_total_mj < best.e_total_mj:
-                    best = c
+        best: Optional[_AFPairCandidate] = None
+        for p in pairs:
+            if k * p.throughput_per_pair >= (1 + alpha) * demand:
+                if best is None or p.e_pair_mj < best.e_pair_mj:
+                    best = p
         return best
 
     # ── Convenience ──────────────────────────────────────────────────────

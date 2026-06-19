@@ -311,14 +311,22 @@ def fit_final_models(df: pd.DataFrame, feature_cols: list[str],
 
 def main():
     parser = argparse.ArgumentParser(description="T2-1: Energy model fitting")
-    parser.add_argument("--prefill", type=str,
-                        default=str(SCRIPT_DIR / "hucc/paper" / "prefill_data_v1.txt"))
-    parser.add_argument("--decode", type=str,
-                        default=str(SCRIPT_DIR / "hucc/paper" / "decode_data_v1.txt"))
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=str(SCRIPT_DIR / "data/v1_layer_profile"),
+        help="Self-contained V1 dataset directory",
+    )
+    parser.add_argument("--prefill", type=str, default=None)
+    parser.add_argument("--decode", type=str, default=None)
     parser.add_argument("--output-dir", type=str,
                         default=str(SCRIPT_DIR / "energy_models"))
     parser.add_argument("--folds", type=int, default=5)
     args = parser.parse_args()
+
+    data_dir = Path(args.data_dir)
+    prefill_path = args.prefill or str(data_dir / "prefill_data_v1.txt")
+    decode_path = args.decode or str(data_dir / "decode_data_v1.txt")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
@@ -328,8 +336,8 @@ def main():
 
     # Load data
     print("\n[1/4] Loading data...")
-    df_p = load_prefill(args.prefill)
-    df_d = load_decode(args.decode)
+    df_p = load_prefill(prefill_path)
+    df_d = load_decode(decode_path)
     print(f"  Prefill: {len(df_p)} rows, cols: {df_p.columns.tolist()}")
     print(f"  Decode:  {len(df_d)} rows, cols: {df_d.columns.tolist()}")
 

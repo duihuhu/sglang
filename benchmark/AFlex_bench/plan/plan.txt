@@ -1,0 +1,109 @@
+按照当前最新代码重测数据：
+方案：1.Native DP；2.PD DP；3.PDAF TP。
+模型：Qwen3-32B
+测试计划：
+1.micro-benchmark
+四个定长数据集：
+场景	Chatbot	QA	RAG	Summary
+Input length	128	512	2048	4096
+Output length	1024	256	64	64
+以及一些之前构造过的变长变qps的数据集(注意展示一下这些数据集的输入输出qps的cdf图)
+
+测4卡->测试这四个数据集的qps取1/2/3
+测8卡->测试这四个数据集的qps取1/2/3/4/5/6
+展示指标：1.TPOT(去排队)；2.TTFT(去排队)；3.总能耗；4.SLO违背率
+
+
+2.macro-benchmark
+Azure构造的几个数据集(注意展示一下这些数据集的输入输出qps的cdf图)
+测试4卡和8卡
+
+注意：重新写进一个文件夹里。
+
+========================================================================
+测试进度记录 (截至 2026-06-16 20:46)
+========================================================================
+
+目录结构：/workspace/sglang-tier/benchmark/AFlex_bench/retesting/
+
+一、已完成
+----------
+
+1. Micro-benchmark 4卡 无Tier (GPU 0,1,2,3, 锁定最高频1410MHz)
+   结果文件：micro_benchmark/4gpu/results/micro_4gpu_20260616_114523.json
+   部署方案：PDAF TP1 / Native DP4 / PD DP2
+   场景：Chatbot(IL128/OL1024), QA(IL512/OL256), RAG(IL2048/OL64), Summary(IL4096/OL64)
+   QPS: 1, 2, 3
+   共计：3方案 × 4场景 × 3QPS = 36个测试点，全部PASS，SLO违背率0%
+
+   关键发现：
+   - TPOT：PDAF(47-59ms), NativeDP(43-48ms), PDDP(46-48ms)，NativeDP最低
+   - 能耗：PDAF < PD DP < Native DP（PDAF每token能耗最低）
+   - 例如QA_qps3: PDAF=939mJ/tok, PD=1182mJ/tok, Native=1878mJ/tok
+   - TTFT：NativeDP固定~90ms, PDDP 45-67ms最低, PDAF 49-486ms（Summary场景高QPS下较高）
+
+2. Micro-benchmark 4卡 +Tier PDAF (GPU 0,1,2,3, Tier DVFS动态调频)
+   结果在：micro_benchmark/4gpu/run_4gpu_tier.log
+   Energy model: models_v2 (含Prefill_A/F + Decode_A/F)
+   
+   PDAF+Tier 完成 12个workload：
+   - chatbot_qps1: Thpt=29.2 TTFT=71.4ms TPOT=58.9ms E=73660J mJ/tok=12381.9 SLO=0.0%
+   - chatbot_qps2: Thpt=30.9 TTFT=440.1ms TPOT=467.6ms E=60614J mJ/tok=10199.1 SLO=98.0% ⚠️
+   - chatbot_qps3: Thpt=59.9 TTFT=185.6ms TPOT=176.0ms E=63065J mJ/tok=5266.8 SLO=28.5% ⚠️
+   - qa_qps1: Thpt=237.8 TTFT=65.3ms TPOT=61.1ms E=86653J mJ/tok=1692.5 SLO=0.0%
+   - qa_qps2: Thpt=442.4 TTFT=77.7ms TPOT=65.2ms E=47579J mJ/tok=929.3 SLO=0.0%
+   - qa_qps3: Thpt=613.7 TTFT=79.8ms TPOT=70.9ms E=34760J mJ/tok=678.9 SLO=0.0%
+   - rag_qps1: Thpt=62.7 TTFT=132.9ms TPOT=59.2ms E=82526J mJ/tok=6447.4 SLO=0.0%
+   - rag_qps2: Thpt=123.1 TTFT=167.2ms TPOT=60.2ms E=45003J mJ/tok=3515.9 SLO=0.0%
+   - rag_qps3: Thpt=181.1 TTFT=219.7ms TPOT=60.6ms E=31809J mJ/tok=2485.1 SLO=0.0%
+   - summary_qps1: Thpt=54.2 TTFT=266.4ms TPOT=59.6ms E=84527J mJ/tok=7715.8 SLO=0.0%
+   - summary_qps2: Thpt=96.9 TTFT=396.9ms TPOT=68.7ms E=46802J mJ/tok=4613.3 SLO=0.0%
+   - summary_qps3: Thpt=136.8 TTFT=546.8ms TPOT=61.0ms E=34492J mJ/tok=3557.7 SLO=0.0%
+   
+   注意：chatbot_qps2/3 SLO违背率高(Tier降频过于激进，低QPS+长输出场景)
+
+3. Macro-benchmark 8卡 PDAF TP2 无Tier (GPU 0-7, 锁定1410MHz, 部分完成)
+   结果在：macro_benchmark/8gpu/run_8gpu.log
+   已完成的 Azure workloads:
+   - conv_light(979req):  Thpt=312.8 TTFT=132.0ms TPOT=92.2ms  E=311773J  2915.3mJ/tok SLO=0.0%
+   - conv_medium(1761req): Thpt=564.4 TTFT=142.3ms TPOT=102.5ms E=325857J  1736.4mJ/tok SLO=0.0%
+   - conv_heavy(2997req): Thpt=764.9 TTFT=124.5ms TPOT=113.0ms E=415184J  1374.1mJ/tok SLO=0.1%
+   - code_light(681req):  Thpt=45.7  TTFT=123.1ms TPOT=82.3ms  E=283130J  19877.1mJ/tok SLO=0.0%
+   - code_medium(1600req): Thpt=101.1 TTFT=198.4ms TPOT=85.5ms  E=359237J  10286.2mJ/tok SLO=0.0%
+   - code_heavy: Thpt=200.2 TTFT=310.9ms TPOT=126.1ms E=388503J  5999.6mJ/tok SLO=12.1%
+   (被中断，未测 Native DP / PD DP)
+
+4. 数据集CDF图已生成：
+   - retesting/workloads/charts/macro_azure_cdf.png
+   - retesting/workloads/charts/workload_overview_cdf.png
+
+二、未完成
+----------
+
+1. Micro-benchmark 4卡 +Tier: Native DP / PD DP
+   原因：energy model路径配置错误(models_v3缺少Prefill模型)，已修复为models_v2
+   状态：需要重跑
+
+2. Micro-benchmark 8卡（已取消，按用户要求只测4卡）
+
+3. Macro-benchmark 完整测试：
+   - 8GPU 无Tier: 只完成了PDAF，还需要 Native DP8 / PD DP4
+   - 8GPU +Tier: pdaf / native_dp / pd_dp 全部未测
+   - 4GPU 无Tier: pdaf / native_dp / pd_dp 全部未测
+   - 4GPU +Tier: pdaf / native_dp / pd_dp 全部未测
+
+三、脚本位置
+----------
+- Micro-bench runner: retesting/scripts/run_micro_bench.py (支持--gpus, --tier, --deploy)
+- Macro-bench runner: retesting/scripts/run_macro_bench.py (支持--ngpu, --tier, --deploy)
+- Workload生成: retesting/scripts/gen_workloads.py
+- 绘图: retesting/micro_benchmark/4gpu/plot_micro_comparison.py
+- CDF图: retesting/scripts/plot_workload_cdf.py
+
+四、配置说明
+----------
+- Energy model (DVFS/Tier): models_v2 路径 = 03_sensitivity/slo_sweep/retrain/models_v2/
+  (包含 Prefill_A/F + Decode_A/F 的 LUT/LinearReg 模型)
+- PDAF使用 --afd-dvfs-enabled + --afd-energy-model-dir
+- Native DP / PD DP 使用 --dvfs-enabled + --dvfs-energy-model-dir
+- SLO设置: TTFT=5000ms, TPOT=300ms (对应 --dvfs-tpot-slo-us=300000)

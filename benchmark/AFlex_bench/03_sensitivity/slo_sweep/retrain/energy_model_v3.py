@@ -170,23 +170,48 @@ def train_and_save(df: pd.DataFrame, feature_cols: list, target_col: str,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Energy Model V3: Decode Pipeline with Heterogeneous TP")
-    parser.add_argument("--data", type=str,
-                        default=str(SCRIPT_DIR / "data/decode_pipeline_merged.txt"))
+        description="Energy Model V3: Prefill layer + Decode pipeline (heterogeneous TP)")
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=str(SCRIPT_DIR / "data/v2_pipeline_profile"),
+        help="Self-contained V2/V3 dataset directory",
+    )
+    parser.add_argument(
+        "--decode-data",
+        type=str,
+        default=None,
+        help="Decode pipeline file (relative to --data-dir or absolute path)",
+    )
     parser.add_argument("--output-dir", type=str,
                         default=str(SCRIPT_DIR / "models_v3"))
     parser.add_argument("--folds", type=int, default=5)
     parser.add_argument("--skip-cv", action="store_true")
     args = parser.parse_args()
 
+    data_dir = Path(args.data_dir)
+    prefill_path = str(data_dir / "prefill_data_v1.txt")
+    if args.decode_data:
+        decode_path = Path(args.decode_data)
+        if not decode_path.is_absolute():
+            decode_path = data_dir / decode_path
+    else:
+        decode_path = data_dir / "decode_pipeline_merged.txt"
+    decode_path = str(decode_path)
+
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("=" * 70)
-    print(" Energy Model V3: Decode Pipeline + Heterogeneous TP Training")
+    print(" Energy Model V3: Prefill Layer + Decode Pipeline (Heterogeneous TP)")
     print("=" * 70)
+    print(f" Data dir: {data_dir}")
 
-    print(f"\n[1] Loading data from {args.data}")
-    df = load_pipeline_data(args.data)
+    from energy_model_v2 import train_prefill_models
+    train_prefill_models(prefill_path, args.output_dir,
+                         folds=args.folds, skip_cv=args.skip_cv)
+
+    print(f"\n[Decode] Loading data from {decode_path}")
+    df = load_pipeline_data(decode_path)
     print(f"    Rows: {len(df)}")
     print(f"    TP combinations: {sorted(df[['tp_a','tp_f']].drop_duplicates().values.tolist())}")
     print(f"    M values: {sorted(df['M'].unique())}")

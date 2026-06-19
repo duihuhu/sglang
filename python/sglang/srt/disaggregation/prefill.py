@@ -454,6 +454,13 @@ class SchedulerDisaggregationPrefillMixin:
                 self.waiting_queue.extend(bootstrapped)
 
             if SchedulerAFDMixin.afd_ffn_should_wait(self):
+                # Idle freq lock for FFN (Prefill) side while waiting
+                if (self._idle_lock_enabled
+                        and not self._idle_freq_locked
+                        and self._dvfs_hw_list):
+                    for hw in self._dvfs_hw_list:
+                        hw.lock_sm_clock(self._idle_lock_freq)
+                    self._idle_freq_locked = True
                 continue
 
             batch = self.get_next_disagg_prefill_batch_to_run()
@@ -482,6 +489,13 @@ class SchedulerDisaggregationPrefillMixin:
                 self.self_check_during_idle()
                 if hasattr(self, "_tier1_collector") and self._tier1_collector is not None:
                     self._tier1_collector.record_idle_start()
+                # Idle freq lock for Attn (PA) side when no batch
+                if (self._idle_lock_enabled
+                        and not self._idle_freq_locked
+                        and self._dvfs_hw_list):
+                    for hw in self._dvfs_hw_list:
+                        hw.lock_sm_clock(self._idle_lock_freq)
+                    self._idle_freq_locked = True
 
             if not afd_is_ffn():
                 self.process_disagg_prefill_inflight_queue()
