@@ -200,8 +200,6 @@ class DeployManager:
             port = 53200 + i * 10
             env = env_base.copy()
             env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-            env["AFD_NVML_DEVICE_INDEX"] = str(gpu)
-            env["AFD_NVML_DEVICE_INDICES"] = str(gpu)
             cmd = [PYTHON, "-m", "sglang.launch_server",
                    "--model-path", MODEL, "--tp", "1",
                    "--host", "127.0.0.1", "--port", str(port),
@@ -250,8 +248,6 @@ class DeployManager:
         for idx, inst in enumerate(instances):
             env_p = env_base.copy()
             env_p["CUDA_VISIBLE_DEVICES"] = inst["p_cvd"]
-            env_p["AFD_NVML_DEVICE_INDEX"] = inst["p_cvd"]
-            env_p["AFD_NVML_DEVICE_INDICES"] = inst["p_cvd"]
             cmd_p = [PYTHON, "-m", "sglang.launch_server",
                      "--model-path", MODEL, "--tp", "1",
                      "--host", "127.0.0.1", "--port", str(inst["p_port"]),
@@ -263,18 +259,11 @@ class DeployManager:
                      "--disaggregation-transfer-backend", "mooncake",
                      "--disaggregation-bootstrap-port", str(inst["bs_port"]),
                      "--disaggregation-ib-device", "mlx5_4"]
-            if self.tier:
-                cmd_p += ["--dvfs-enabled",
-                          "--dvfs-energy-model-dir", AFD_ENERGY_MODEL_DIR,
-                          "--dvfs-ttft-slo-ms", str(int(TTFT_SLO_MS)),
-                          "--dvfs-tpot-slo-us", str(int(TPOT_SLO_MS * 1000))]
             self._popen(f"pd{idx}_p", cmd_p, env_p)
             time.sleep(3)
 
             env_d = env_base.copy()
             env_d["CUDA_VISIBLE_DEVICES"] = inst["d_cvd"]
-            env_d["AFD_NVML_DEVICE_INDEX"] = inst["d_cvd"]
-            env_d["AFD_NVML_DEVICE_INDICES"] = inst["d_cvd"]
             cmd_d = [PYTHON, "-m", "sglang.launch_server",
                      "--model-path", MODEL, "--tp", "1",
                      "--host", "127.0.0.1", "--port", str(inst["d_port"]),
@@ -437,8 +426,7 @@ async def send_one(session, url, req, base_time, results):
         await asyncio.sleep(delay)
     payload = {"text": "x" * req["input_len"],
                "sampling_params": {"max_new_tokens": req["output_len"],
-                                   "temperature": 0.0,
-                                   "ignore_eos": True},
+                                   "temperature": 0.0},
                "stream": True}
     t0 = time.monotonic()
     first_token_time = None

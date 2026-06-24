@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Micro-benchmark runner for Qwen3-32B (Dense).
+"""Micro-benchmark runner for Mixtral-8x7B (MoE).
 
-Tests 3 architectures x multiple QPS on fixed-length workloads.
-  4GPU: Native DP4 / PD DP2 / PDAF TP1, QPS=1/2/3
-  8GPU: Native DP8 / PD DP4 / PDAF TP2, QPS=1/2/3/4/5/6
+Tests 2 architectures (Native/PD) on 4 GPU with TP=2.
+PDAF requires 8 GPUs for MoE models (TP=2 per component).
+
+  4GPU: Native DP2(TP=2) / PD(P-TP2+D-TP2), QPS=1/2/3
 
 Usage:
     python run_micro_bench.py --ngpu 4 --deploy all
-    python run_micro_bench.py --ngpu 8 --deploy native_dp,pd_dp --scenario chatbot
-    python run_micro_bench.py --ngpu 8 --deploy all --scenario all --qps 1,2,3
+    python run_micro_bench.py --ngpu 4 --deploy native_dp,pd_dp --scenario chatbot
 """
 import argparse
 import asyncio
@@ -34,12 +34,12 @@ logging.basicConfig(
 log = logging.getLogger("micro_bench")
 
 PYTHON = "/workspace/env/sglang-test/bin/python"
-MODEL = "/models/Qwen/Qwen3-32B/"
+MODEL = "/models/Mixtral/Mixtral-8x7B/"
 HERE = Path(__file__).resolve().parent
 BASE = HERE.parent
-WORKLOAD_DIR = BASE / "workloads"
-ENERGY_MODEL_DIR = "/workspace/sglang/benchmark/AFlex_bench/03_sensitivity/slo_sweep/retrain/models_v2"
-AFD_ENERGY_MODEL_DIR = "/workspace/sglang/benchmark/AFlex_bench/03_sensitivity/slo_sweep/retrain/models_v2"
+WORKLOAD_DIR = Path("/workspace/sglang/benchmark/AFlex_bench/retesting/workloads")
+ENERGY_MODEL_DIR = "/workspace/sglang/benchmark/AFlex_bench/06_others/Mixtral_test/energy_model/models_v2"
+AFD_ENERGY_MODEL_DIR = "/workspace/sglang/benchmark/AFlex_bench/06_others/Mixtral_test/energy_model/models_v2"
 
 MAX_GPU_FREQ = 1410
 ROUTER_PORT = 42000
@@ -69,7 +69,6 @@ def kill_all():
         r = subprocess.run(["ss", "-tlnp", f"sport = :{port}"],
                            capture_output=True, text=True)
         if "pid=" in r.stdout:
-            import re
             for m in re.finditer(r"pid=(\d+)", r.stdout):
                 pid = int(m.group(1))
                 try:
@@ -192,18 +191,16 @@ class DeployManager:
 
     # --- Native DP ---
     def start_native_dp(self, gpus):
-        """Start N independent TP=1 instances + round-robin router."""
-        n = len(gpus)
+        """Start DP instances with TP=2 (Mixtral needs 2 GPUs per instance)."""
+        n = len(gpus) // 2  # DP parallelism
         env_base = self._base_env()
         ports = []
-        for i, gpu in enumerate(gpus):
+        for i in range(n):
             port = 53200 + i * 10
             env = env_base.copy()
-            env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-            env["AFD_NVML_DEVICE_INDEX"] = str(gpu)
-            env["AFD_NVML_DEVICE_INDICES"] = str(gpu)
+            env["CUDA_VISIBLE_DEVICES"] = f"{gpus[i*2]},{gpus[i*2+1]}"
             cmd = [PYTHON, "-m", "sglang.launch_server",
-                   "--model-path", MODEL, "--tp", "1",
+                   "--model-path", MODEL, "--tp", "2",
                    "--host", "127.0.0.1", "--port", str(port),
                    "--nccl-port", str(33300 + i * 10),
                    "--mem-fraction-static", "0.85",
@@ -211,7 +208,7 @@ class DeployManager:
                    "--skip-server-warmup"]
             if self.tier:
                 cmd += ["--dvfs-enabled",
-                        "--dvfs-energy-model-dir", AFD_ENERGY_MODEL_DIR,
+                        "--dvfs-energy-model-dir", ENERGY_MODEL_DIR,
                         "--dvfs-ttft-slo-ms", str(int(TTFT_SLO_MS)),
                         "--dvfs-tpot-slo-us", str(int(TPOT_SLO_MS * 1000))]
             self._popen(f"dp_{i}", cmd, env)
@@ -237,12 +234,12 @@ class DeployManager:
 
     # --- PD DP ---
     def start_pd_dp(self, gpu_pairs):
-        """Start PD DP: each pair = (p_gpu, d_gpu), TP=1."""
+        """Start PD: each pair = (p_gpus, d_gpus) as comma-sep strings, TP=2."""
         env_base = self._base_env()
         instances = []
-        for i, (p_gpu, d_gpu) in enumerate(gpu_pairs):
+        for i, (p_gpus, d_gpus) in enumerate(gpu_pairs):
             instances.append({
-                "p_cvd": str(p_gpu), "d_cvd": str(d_gpu),
+                "p_cvd": p_gpus, "d_cvd": d_gpus,
                 "p_port": 53100 + i * 10, "d_port": 53101 + i * 10,
                 "bs_port": 49100 + i * 10,
             })
@@ -250,10 +247,8 @@ class DeployManager:
         for idx, inst in enumerate(instances):
             env_p = env_base.copy()
             env_p["CUDA_VISIBLE_DEVICES"] = inst["p_cvd"]
-            env_p["AFD_NVML_DEVICE_INDEX"] = inst["p_cvd"]
-            env_p["AFD_NVML_DEVICE_INDICES"] = inst["p_cvd"]
             cmd_p = [PYTHON, "-m", "sglang.launch_server",
-                     "--model-path", MODEL, "--tp", "1",
+                     "--model-path", MODEL, "--tp", "2",
                      "--host", "127.0.0.1", "--port", str(inst["p_port"]),
                      "--nccl-port", str(34000 + idx * 10),
                      "--mem-fraction-static", "0.85",
@@ -263,20 +258,13 @@ class DeployManager:
                      "--disaggregation-transfer-backend", "mooncake",
                      "--disaggregation-bootstrap-port", str(inst["bs_port"]),
                      "--disaggregation-ib-device", "mlx5_4"]
-            if self.tier:
-                cmd_p += ["--dvfs-enabled",
-                          "--dvfs-energy-model-dir", AFD_ENERGY_MODEL_DIR,
-                          "--dvfs-ttft-slo-ms", str(int(TTFT_SLO_MS)),
-                          "--dvfs-tpot-slo-us", str(int(TPOT_SLO_MS * 1000))]
             self._popen(f"pd{idx}_p", cmd_p, env_p)
             time.sleep(3)
 
             env_d = env_base.copy()
             env_d["CUDA_VISIBLE_DEVICES"] = inst["d_cvd"]
-            env_d["AFD_NVML_DEVICE_INDEX"] = inst["d_cvd"]
-            env_d["AFD_NVML_DEVICE_INDICES"] = inst["d_cvd"]
             cmd_d = [PYTHON, "-m", "sglang.launch_server",
-                     "--model-path", MODEL, "--tp", "1",
+                     "--model-path", MODEL, "--tp", "2",
                      "--host", "127.0.0.1", "--port", str(inst["d_port"]),
                      "--nccl-port", str(34001 + idx * 10),
                      "--mem-fraction-static", "0.85",
@@ -288,7 +276,7 @@ class DeployManager:
                      "--disaggregation-ib-device", "mlx5_4"]
             if self.tier:
                 cmd_d += ["--dvfs-enabled",
-                          "--dvfs-energy-model-dir", AFD_ENERGY_MODEL_DIR,
+                          "--dvfs-energy-model-dir", ENERGY_MODEL_DIR,
                           "--dvfs-ttft-slo-ms", str(int(TTFT_SLO_MS)),
                           "--dvfs-tpot-slo-us", str(int(TPOT_SLO_MS * 1000))]
             self._popen(f"pd{idx}_d", cmd_d, env_d)
@@ -316,15 +304,108 @@ class DeployManager:
         log.info("PD DP%d ready (tier=%s)", len(gpu_pairs), self.tier)
         return ROUTER_PORT
 
+    # --- PD Asymmetric (1P + nD) ---
+    def start_pd_1pnd(self, p_gpus, d_gpu_list):
+        """Start PD with 1 Prefill (TP=2) + N Decode (TP=2 each).
+        
+        Args:
+            p_gpus: comma-sep GPU IDs for prefill, e.g. "2,3"
+            d_gpu_list: list of comma-sep GPU IDs for each decode instance,
+                       e.g. ["4,5", "6,7"]
+        """
+        env_base = self._base_env()
+        bs_port = 49100
+
+        # Start Prefill
+        env_p = env_base.copy()
+        env_p["CUDA_VISIBLE_DEVICES"] = p_gpus
+        p_port = 53100
+        cmd_p = [PYTHON, "-m", "sglang.launch_server",
+                 "--model-path", MODEL, "--tp", "2",
+                 "--host", "127.0.0.1", "--port", str(p_port),
+                 "--nccl-port", "34000",
+                 "--mem-fraction-static", "0.85",
+                 "--disable-cuda-graph", "--disable-piecewise-cuda-graph",
+                 "--skip-server-warmup",
+                 "--disaggregation-mode", "prefill",
+                 "--disaggregation-transfer-backend", "mooncake",
+                 "--disaggregation-bootstrap-port", str(bs_port),
+                 "--disaggregation-ib-device", "mlx5_4"]
+        self._popen("pd_p", cmd_p, env_p)
+        time.sleep(3)
+
+        # Start Decode instances
+        d_ports = []
+        for i, d_gpus in enumerate(d_gpu_list):
+            env_d = env_base.copy()
+            env_d["CUDA_VISIBLE_DEVICES"] = d_gpus
+            d_port = 53110 + i * 10
+            cmd_d = [PYTHON, "-m", "sglang.launch_server",
+                     "--model-path", MODEL, "--tp", "2",
+                     "--host", "127.0.0.1", "--port", str(d_port),
+                     "--nccl-port", str(34010 + i * 10),
+                     "--mem-fraction-static", "0.85",
+                     "--disable-cuda-graph",
+                     "--disable-piecewise-cuda-graph",
+                     "--skip-server-warmup",
+                     "--disaggregation-mode", "decode",
+                     "--disaggregation-transfer-backend", "mooncake",
+                     "--disaggregation-bootstrap-port", str(bs_port),
+                     "--disaggregation-ib-device", "mlx5_4"]
+            if self.tier:
+                cmd_d += ["--dvfs-enabled",
+                          "--dvfs-energy-model-dir", ENERGY_MODEL_DIR,
+                          "--dvfs-ttft-slo-ms", str(int(TTFT_SLO_MS)),
+                          "--dvfs-tpot-slo-us",
+                          str(int(TPOT_SLO_MS * 1000))]
+            self._popen(f"pd_d{i}", cmd_d, env_d)
+            d_ports.append(d_port)
+            time.sleep(3)
+
+        # Wait for health
+        if not wait_health(p_port, 300):
+            log.error("PD P failed (port %d)", p_port)
+            return None
+        log.info("  P ready (port %d)", p_port)
+        for i, dp in enumerate(d_ports):
+            if not wait_health(dp, 300):
+                log.error("PD D%d failed (port %d)", i, dp)
+                return None
+            log.info("  D%d ready (port %d)", i, dp)
+
+        # Router
+        cmd_r = [PYTHON, "-m", "sglang_router.launch_router",
+                 "--pd-disaggregation",
+                 "--host", "127.0.0.1", "--port", str(ROUTER_PORT),
+                 "--prefill", f"http://127.0.0.1:{p_port}",
+                 str(bs_port)]
+        for dp in d_ports:
+            cmd_r += ["--decode", f"http://127.0.0.1:{dp}"]
+        self._popen("pd_router", cmd_r, os.environ.copy())
+        if not wait_health(ROUTER_PORT, 60):
+            log.error("PD 1P%dD router failed", len(d_gpu_list))
+            return None
+        log.info("PD 1P+%dD ready (tier=%s)", len(d_gpu_list), self.tier)
+        return ROUTER_PORT
+
     # --- PDAF ---
-    def start_pdaf(self, p_cvd, d_cvd, tp, micro_batch=2):
-        """Start PDAF: PA+PF on p_cvd, DA+DF on d_cvd, each TP=tp."""
+    def start_pdaf(self, p_cvd, d_cvd, tp, micro_batch=2,
+                   tp_attn=None, tp_ffn=None):
+        """Start PDAF: PA+PF on p_cvd, DA+DF on d_cvd.
+        
+        Supports heterogeneous TP: tp_attn/tp_ffn override tp for A/F.
+        E.g. tp_attn=1, tp_ffn=2 for MoE where FFN is larger.
+        """
+        if tp_attn is None:
+            tp_attn = tp
+        if tp_ffn is None:
+            tp_ffn = tp
         env_base = self._base_env()
         env_base["AFD_UCX_TLS"] = "rc,tcp,cuda_copy,cuda_ipc"
         env_base["SGLANG_DISAGGREGATION_THREAD_POOL_SIZE"] = "128"
         env_base["AFD_ASYNC_PIPELINE"] = "1"
 
-        common = ["--model-path", MODEL, "--tp", str(tp),
+        common = ["--model-path", MODEL,
                   "--host", "127.0.0.1",
                   "--afd-comm-backend", "ipc_cpp",
                   "--afd-micro-batch", str(micro_batch),
@@ -352,9 +433,6 @@ class DeployManager:
         ucx_p, ucx_d = 28200, 28300
         sched_p, sched_d = 68400, 68500
 
-        # Determine base_gpu_id for attn (peer offset)
-        peer_base = tp  # attn base = tp (after ffn GPUs)
-
         def _env(cvd, ucx_base, sched_port, peer_device, nvml_idx, ffn_host=None):
             e = env_base.copy()
             e["CUDA_VISIBLE_DEVICES"] = cvd
@@ -370,38 +448,42 @@ class DeployManager:
                 e["AFD_UCX_FFN_HOST"] = ffn_host
             return e
 
-        def _cmd(port, perspective, disagg, base_gpu_id):
+        def _cmd(port, perspective, disagg, base_gpu_id, comp_tp):
             return [PYTHON, "-m", "sglang.launch_server",
                     "--port", str(port),
+                    "--tp", str(comp_tp),
                     "--afd-perspective", perspective,
                     "--disaggregation-mode", disagg,
                     "--base-gpu-id", str(base_gpu_id)] + common + dvfs_args
 
-        # Parse GPU indices for NVML
+        # GPU layout: [FFN GPUs ... | Attn GPUs ...]
+        # For heterogeneous TP: FFN uses first tp_ffn GPUs, Attn uses next tp_attn
         p_gpus = p_cvd.split(",")
         d_gpus = d_cvd.split(",")
-        p_ffn_nvml = ",".join(p_gpus[:tp])
-        p_attn_nvml = ",".join(p_gpus[tp:])
-        d_ffn_nvml = ",".join(d_gpus[:tp])
-        d_attn_nvml = ",".join(d_gpus[tp:])
+        p_ffn_nvml = ",".join(p_gpus[:tp_ffn])
+        p_attn_nvml = ",".join(p_gpus[tp_ffn:tp_ffn + tp_attn])
+        d_ffn_nvml = ",".join(d_gpus[:tp_ffn])
+        d_attn_nvml = ",".join(d_gpus[tp_ffn:tp_ffn + tp_attn])
 
-        # PF (FFN, base=0)
-        self._popen("pf", _cmd(PF_PORT, "ffn", "prefill", 0),
-                    _env(p_cvd, ucx_p, sched_p, peer_device=tp,
+        # PF (FFN, base=0, TP=tp_ffn)
+        # IPC peer: Attn rank0 is at logical index tp_ffn
+        self._popen("pf", _cmd(PF_PORT, "ffn", "prefill", 0, tp_ffn),
+                    _env(p_cvd, ucx_p, sched_p, peer_device=tp_ffn,
                          nvml_idx=p_ffn_nvml))
-        time.sleep(5)
-        # PA (Attn, base=tp)
-        self._popen("pa", _cmd(PA_PORT, "attn", "prefill", tp),
+        time.sleep(8)
+        # PA (Attn, base=tp_ffn, TP=tp_attn)
+        # IPC peer: FFN rank0 is at logical index 0
+        self._popen("pa", _cmd(PA_PORT, "attn", "prefill", tp_ffn, tp_attn),
                     _env(p_cvd, ucx_p, sched_p, peer_device=0,
                          nvml_idx=p_attn_nvml, ffn_host="127.0.0.1"))
-        time.sleep(5)
-        # DF (FFN, base=0)
-        self._popen("df", _cmd(DF_PORT, "ffn", "decode", 0),
-                    _env(d_cvd, ucx_d, sched_d, peer_device=tp,
-                         nvml_idx=d_ffn_nvml))
         time.sleep(8)
-        # DA (Attn, base=tp)
-        self._popen("da", _cmd(DA_PORT, "attn", "decode", tp),
+        # DF (FFN, base=0, TP=tp_ffn)
+        self._popen("df", _cmd(DF_PORT, "ffn", "decode", 0, tp_ffn),
+                    _env(d_cvd, ucx_d, sched_d, peer_device=tp_ffn,
+                         nvml_idx=d_ffn_nvml))
+        time.sleep(10)
+        # DA (Attn, base=tp_ffn, TP=tp_attn)
+        self._popen("da", _cmd(DA_PORT, "attn", "decode", tp_ffn, tp_attn),
                     _env(d_cvd, ucx_d, sched_d, peer_device=0,
                          nvml_idx=d_attn_nvml, ffn_host="127.0.0.1"))
 
@@ -423,7 +505,7 @@ class DeployManager:
         if not wait_health(ROUTER_PORT, 60):
             log.error("PDAF router failed")
             return None
-        log.info("PDAF TP%d ready (tier=%s)", tp, self.tier)
+        log.info("PDAF A-TP%d F-TP%d ready (tier=%s)", tp_attn, tp_ffn, self.tier)
         return ROUTER_PORT
 
 
@@ -437,8 +519,7 @@ async def send_one(session, url, req, base_time, results):
         await asyncio.sleep(delay)
     payload = {"text": "x" * req["input_len"],
                "sampling_params": {"max_new_tokens": req["output_len"],
-                                   "temperature": 0.0,
-                                   "ignore_eos": True},
+                                   "temperature": 0.0},
                "stream": True}
     t0 = time.monotonic()
     first_token_time = None
@@ -569,7 +650,7 @@ def get_deploy_configs(ngpu, gpus=None):
     assert len(gpus) == ngpu, f"Expected {ngpu} GPUs, got {len(gpus)}: {gpus}"
 
     if ngpu == 4:
-        g = gpus  # e.g. [1,2,5,6]
+        g = gpus  # e.g. [0,1,2,3]
         p_cvd = f"{g[0]},{g[1]}"
         d_cvd = f"{g[2]},{g[3]}"
         return {
@@ -578,11 +659,32 @@ def get_deploy_configs(ngpu, gpus=None):
                 "gpus": g,
             },
             "pd_dp": {
-                "start": lambda mgr: mgr.start_pd_dp([(g[0], g[1]), (g[2], g[3])]),
+                "start": lambda mgr: mgr.start_pd_dp([(p_cvd, d_cvd)]),
+                "gpus": g,
+            },
+        }
+    elif ngpu == 6:
+        # 6-GPU configs for Mixtral:
+        # Native: TP2 × DP3 (all 6 GPUs)
+        # PD: 1P(TP2) + 2D(TP2) (all 6 GPUs)
+        # PDAF: PA(TP1)+PF(TP2) | DA(TP1)+DF(TP2) (all 6 GPUs)
+        g = gpus
+        p_cvd = f"{g[0]},{g[1]},{g[2]}"
+        d_cvd = f"{g[3]},{g[4]},{g[5]}"
+        return {
+            "native_dp": {
+                "start": lambda mgr: mgr.start_native_dp(g),
+                "gpus": g,
+            },
+            "pd_dp": {
+                "start": lambda mgr: mgr.start_pd_1pnd(
+                    f"{g[0]},{g[1]}",
+                    [f"{g[2]},{g[3]}", f"{g[4]},{g[5]}"]),
                 "gpus": g,
             },
             "pdaf": {
-                "start": lambda mgr, _p=p_cvd, _d=d_cvd: mgr.start_pdaf(_p, _d, tp=1),
+                "start": lambda mgr, _p=p_cvd, _d=d_cvd: mgr.start_pdaf(
+                    _p, _d, tp=2, tp_attn=1, tp_ffn=2),
                 "gpus": g,
             },
         }
@@ -597,7 +699,8 @@ def get_deploy_configs(ngpu, gpus=None):
             },
             "pd_dp": {
                 "start": lambda mgr: mgr.start_pd_dp(
-                    [(g[0], g[1]), (g[2], g[3]), (g[4], g[5]), (g[6], g[7])]),
+                    [(f"{g[0]},{g[1]}", f"{g[2]},{g[3]}"),
+                     (f"{g[4]},{g[5]}", f"{g[6]},{g[7]}")]),
                 "gpus": g,
             },
             "pdaf": {
@@ -620,7 +723,7 @@ def main():
                        (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ngpu", type=int, required=True, choices=[4, 8])
+    parser.add_argument("--ngpu", type=int, required=True, choices=[4, 6, 8])
     parser.add_argument("--gpus", default=None,
                         help="Explicit GPU IDs (comma-sep), e.g. '1,2,5,6'")
     parser.add_argument("--deploy", default="all",

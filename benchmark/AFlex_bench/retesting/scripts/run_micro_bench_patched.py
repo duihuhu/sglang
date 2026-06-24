@@ -33,8 +33,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("micro_bench")
 
-PYTHON = "/workspace/env/sglang-test/bin/python"
-MODEL = "/models/Qwen/Qwen3-32B/"
+PYTHON = "/usr/bin/python3"
+MODEL = "/models/Qwen3-32B/"
 HERE = Path(__file__).resolve().parent
 BASE = HERE.parent
 WORKLOAD_DIR = BASE / "workloads"

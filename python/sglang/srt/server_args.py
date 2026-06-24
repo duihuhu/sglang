@@ -683,6 +683,12 @@ class ServerArgs:
     """If set, Tier1 re-planning never triggers a full model reload (TP/k change).
     The frequency portion of the new solution is still applied (freq-only transition),
     so Tier1 acts as a workload-aware *re-frequency* controller without restarting servers."""
+    tier1_graceful_reload: bool = True
+    """Use graceful drain-then-switch reload instead of kill-all restart.
+    When True, inflight requests are drained before modules are restarted."""
+    tier1_drain_timeout: float = 30.0
+    """Maximum seconds to wait for inflight requests to drain during graceful reload.
+    After timeout, remaining requests are aborted and the module is force-killed."""
 
     enable_torch_compile: bool = False
     disable_piecewise_cuda_graph: bool = False
@@ -5785,6 +5791,26 @@ class ServerArgs:
             "re-plans and applies the new frequency (freq-only transition), but "
             "never restarts servers / reloads weights. Use to isolate Tier1's "
             "re-frequency behaviour from its resource re-planning.",
+        )
+        parser.add_argument(
+            "--tier1-graceful-reload",
+            action="store_true",
+            default=ServerArgs.tier1_graceful_reload,
+            help="Use graceful drain-then-switch reload instead of kill-all restart. "
+            "Inflight requests are drained before modules are restarted. Default: True.",
+        )
+        parser.add_argument(
+            "--tier1-no-graceful-reload",
+            action="store_false",
+            dest="tier1_graceful_reload",
+            help="Disable graceful reload; use legacy kill-all restart.",
+        )
+        parser.add_argument(
+            "--tier1-drain-timeout",
+            type=float,
+            default=ServerArgs.tier1_drain_timeout,
+            help="Max seconds to wait for inflight request drain during graceful "
+            "reload. After timeout, remaining requests are aborted. Default: 30.0.",
         )
 
         parser.add_argument(

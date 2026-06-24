@@ -51,6 +51,12 @@ class MiniLoadBalancer:
         self.prefill_dp_size = None
         self.decode_dp_size = None
 
+        # Graceful reload state: URLs being drained (no new traffic)
+        self.draining_prefill_urls: set = set()
+        self.draining_decode_urls: set = set()
+        # When all prefill/decode are draining, reject new requests
+        self.is_draining_all = False
+
     def _validate_router_args(self, router_args: RouterArgs):
         logger.warning(
             "\x1b[33mMiniLB is only for debugging purposes, it only supports random policy!\033[0m"
@@ -103,8 +109,26 @@ class MiniLoadBalancer:
     def select_pair(self):
         assert len(self.prefill_urls) > 0, "No prefill servers available"
         assert len(self.decode_urls) > 0, "No decode servers available"
-        pidx = random.randint(0, len(self.prefill_urls) - 1)
-        didx = random.randint(0, len(self.decode_urls) - 1)
+
+        # Filter out draining servers
+        active_prefill = [
+            (i, url) for i, url in enumerate(self.prefill_urls)
+            if url not in self.draining_prefill_urls
+        ]
+        active_decode = [
+            url for url in self.decode_urls
+            if url not in self.draining_decode_urls
+        ]
+
+        if not active_prefill or not active_decode:
+            # All servers draining — fallback to any available
+            pidx = random.randint(0, len(self.prefill_urls) - 1)
+            didx = random.randint(0, len(self.decode_urls) - 1)
+        else:
+            p_choice = random.choice(active_prefill)
+            pidx = p_choice[0]
+            didx = self.decode_urls.index(random.choice(active_decode))
+
         return (
             self.prefill_urls[pidx],
             self.prefill_bootstrap_ports[pidx],
@@ -353,6 +377,11 @@ async def get_model_info():
 
 @app.post("/generate")
 async def handle_generate_request(request_data: dict):
+    if lb.is_draining_all:
+        return Response(
+            content="Service temporarily unavailable: modules reloading",
+            status_code=503,
+        )
     prefill_server, bootstrap_port, decode_server = lb.select_pair()
 
     # Parse and transform prefill_server for bootstrap data
@@ -391,6 +420,11 @@ async def handle_generate_request(request_data: dict):
 
 
 async def _forward_to_backend(request_data: dict, endpoint_name: str):
+    if lb.is_draining_all:
+        return Response(
+            content="Service temporarily unavailable: modules reloading",
+            status_code=503,
+        )
     prefill_server, bootstrap_port, decode_server = lb.select_pair()
 
     # Parse and transform prefill_server for bootstrap data
@@ -458,3 +492,110 @@ async def get_models():
             return ORJSONResponse(content=await response.json())
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Admin endpoints for graceful reload ──────────────────────────────────
+
+
+@app.post("/admin/drain_module")
+async def drain_module(request_data: dict):
+    """Mark modules as draining — router stops sending new requests to them.
+
+    Body:
+        {"prefill_urls": ["http://..."], "decode_urls": ["http://..."]}
+    Either field is optional. Only specified URLs are drained.
+    """
+    prefill = request_data.get("prefill_urls", [])
+    decode = request_data.get("decode_urls", [])
+    for url in prefill:
+        lb.draining_prefill_urls.add(url)
+    for url in decode:
+        lb.draining_decode_urls.add(url)
+    lb.is_draining_all = (
+        lb.draining_prefill_urls >= set(lb.prefill_urls)
+        or lb.draining_decode_urls >= set(lb.decode_urls)
+    )
+    logger.info(
+        "[MiniLB] Draining modules: prefill=%s decode=%s (all_draining=%s)",
+        prefill, decode, lb.is_draining_all,
+    )
+    return ORJSONResponse(
+        content={"status": "ok", "draining_prefill": list(lb.draining_prefill_urls),
+                 "draining_decode": list(lb.draining_decode_urls)},
+        status_code=200,
+    )
+
+
+@app.post("/admin/activate_module")
+async def activate_module(request_data: dict):
+    """Activate new module URLs and remove old draining ones.
+
+    Body:
+        {
+            "add_prefill_urls": [["http://new:8000", 9000]],
+            "add_decode_urls": ["http://new:8001"],
+            "remove_prefill_urls": ["http://old:8000"],
+            "remove_decode_urls": ["http://old:8001"]
+        }
+    All fields are optional.
+    """
+    # Remove old modules
+    remove_prefill = set(request_data.get("remove_prefill_urls", []))
+    remove_decode = set(request_data.get("remove_decode_urls", []))
+
+    if remove_prefill:
+        new_prefill = []
+        new_bootstrap = []
+        for url, bp in zip(lb.prefill_urls, lb.prefill_bootstrap_ports):
+            if url not in remove_prefill:
+                new_prefill.append(url)
+                new_bootstrap.append(bp)
+        lb.prefill_urls = new_prefill
+        lb.prefill_bootstrap_ports = new_bootstrap
+        lb.draining_prefill_urls -= remove_prefill
+
+    if remove_decode:
+        lb.decode_urls = [u for u in lb.decode_urls if u not in remove_decode]
+        lb.draining_decode_urls -= remove_decode
+
+    # Add new modules
+    for entry in request_data.get("add_prefill_urls", []):
+        if isinstance(entry, list) and len(entry) == 2:
+            lb.prefill_urls.append(entry[0])
+            lb.prefill_bootstrap_ports.append(entry[1])
+        elif isinstance(entry, str):
+            lb.prefill_urls.append(entry)
+            lb.prefill_bootstrap_ports.append(None)
+
+    for url in request_data.get("add_decode_urls", []):
+        lb.decode_urls.append(url)
+
+    # Clear draining state
+    lb.is_draining_all = False
+    lb.prefill_dp_size = None
+    lb.decode_dp_size = None
+
+    logger.info(
+        "[MiniLB] Activated modules: prefill=%s decode=%s",
+        lb.prefill_urls, lb.decode_urls,
+    )
+    return ORJSONResponse(
+        content={"status": "ok", "prefill_urls": lb.prefill_urls,
+                 "decode_urls": lb.decode_urls},
+        status_code=200,
+    )
+
+
+@app.get("/admin/status")
+async def admin_status():
+    """Return current router module state (for orchestrator polling)."""
+    return ORJSONResponse(
+        content={
+            "prefill_urls": lb.prefill_urls,
+            "decode_urls": lb.decode_urls,
+            "draining_prefill": list(lb.draining_prefill_urls),
+            "draining_decode": list(lb.draining_decode_urls),
+            "is_draining_all": lb.is_draining_all,
+        },
+        status_code=200,
+    )

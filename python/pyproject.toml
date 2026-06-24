@@ -59,6 +59,7 @@ dependencies = [
   "scipy",
   "sentencepiece",
   "setproctitle",
+  "socksio", # httpx SOCKS support when all_proxy is set (e.g. clashon) during pip/maturin builds
   "flash-attn-4>=4.0.0b4",
   "sglang-kernel==0.4.0",
   "soundfile==0.13.1",
@@ -79,6 +80,10 @@ dependencies = [
   "watchfiles",
   "xgrammar==0.1.27",
   "smg-grpc-servicer>=0.5.0",
+  # UCX-Py + bundled UCX libs for AFD `--afd-comm-backend ucx` (Attn–FFN tensor RDMA).
+  # libucx-cu12 is pulled transitively by ucx-py-cu12 (>=1.15.0,<1.19); do not pin 1.19.0 here
+  # or pip's resolver will fail.
+  "ucx-py-cu12==0.45.0",
 ]
 
 [[tool.uv.index]]
@@ -128,14 +133,6 @@ tracing = [
   "opentelemetry-exporter-otlp",
   "opentelemetry-exporter-otlp-proto-grpc",
   "opentelemetry-sdk",
-]
-
-# UCX-Py + bundled UCX libs for AFD `--afd-comm-backend ucx` (Attn–FFN tensor RDMA).
-# Note: ucx-py-cu12 0.45 declares libucx-cu12<1.19; pinning 1.19.0 may make pip report a
-# conflict — override is intentional when using a newer libucx wheel.
-afd-ucx = [
-  "ucx-py-cu12==0.45.0",
-  "libucx-cu12==1.19.0",
 ]
 
 test = [

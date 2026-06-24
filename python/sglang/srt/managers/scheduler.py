@@ -1813,8 +1813,9 @@ class Scheduler(
 
         Two modes:
           - Frequency-only: if TP/k unchanged, apply new frequencies immediately
-          - Full reload: if TP/k changed, spawn reload_orchestrator to kill all
-            processes and restart with new TP configuration
+          - Full reload: if TP/k changed, spawn orchestrator to restart modules.
+            Uses graceful_orchestrator (drain-then-switch) by default, or legacy
+            reload_orchestrator (kill-all) if --tier1-no-graceful-reload is set.
         """
         from sglang.srt.layers.afd import afd_is_attn
         from sglang.srt.disaggregation.utils import DisaggregationMode
@@ -1847,7 +1848,7 @@ class Scheduler(
                     old.tp_da, new.tp_da, old.tp_df, new.tp_df,
                     old.k_p, new.k_p, old.k_d, new.k_d,
                 )
-                self._trigger_full_reload(new)
+                self._trigger_full_reload(old, new)
                 return
 
         # Frequency-only transition
@@ -1870,11 +1871,15 @@ class Scheduler(
 
         self._write_tier1_freq_config(new)
 
-    def _trigger_full_reload(self, new: "Tier1Solution"):
-        """Spawn reload_orchestrator to kill all processes and restart with new TP.
+    def _trigger_full_reload(self, old: "Tier1Solution", new: "Tier1Solution"):
+        """Spawn orchestrator to reload modules with new TP configuration.
+
+        Uses graceful_orchestrator (drain-then-switch) by default.
+        Falls back to legacy reload_orchestrator (kill-all) when
+        --tier1-no-graceful-reload is set.
 
         The orchestrator runs as an independent process (start_new_session=True)
-        because it needs to kill this PA process as well.
+        because it may need to kill this PA process as well (legacy mode).
         """
         import json
         import subprocess
@@ -1889,16 +1894,36 @@ class Scheduler(
         # Build reload config from server_args
         reload_config = self._build_reload_config(new, signal_path)
 
+        use_graceful = getattr(server_args, "tier1_graceful_reload", True)
+
+        if use_graceful:
+            # Add old_solution and drain_timeout for graceful orchestrator
+            reload_config["old_solution"] = {
+                "tp_pa": old.tp_pa, "tp_pf": old.tp_pf,
+                "tp_da": old.tp_da, "tp_df": old.tp_df,
+                "f_pa": old.f_pa, "f_pf": old.f_pf,
+                "f_da": old.f_da, "f_df": old.f_df,
+                "k_p": old.k_p, "k_d": old.k_d,
+            }
+            reload_config["drain_timeout_s"] = getattr(
+                server_args, "tier1_drain_timeout", 30.0
+            )
+            orchestrator_module = "sglang.srt.energy.graceful_orchestrator"
+            logger.info("[Tier1] Spawning graceful_orchestrator (drain-then-switch)")
+        else:
+            orchestrator_module = "sglang.srt.energy.reload_orchestrator"
+            logger.info("[Tier1] Spawning reload_orchestrator (kill-all)")
+
         # Write config to file
         config_path = os.path.join(signal_dir, "tier1_reload_config.json")
         with open(config_path, "w") as f:
             json.dump(reload_config, f, indent=2)
 
-        logger.info("[Tier1] Spawning reload_orchestrator: %s", config_path)
+        logger.info("[Tier1] Config written: %s", config_path)
 
         # Spawn orchestrator as independent process
         subprocess.Popen(
-            [sys.executable, "-m", "sglang.srt.energy.reload_orchestrator",
+            [sys.executable, "-m", orchestrator_module,
              "--config", config_path],
             start_new_session=True,
             stdout=open(os.path.join(signal_dir, "reload_orchestrator.log"), "w"),

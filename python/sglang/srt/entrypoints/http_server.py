@@ -1390,6 +1390,17 @@ async def continue_generation(obj: ContinueGenerationReqInput, request: Request)
     )
 
 
+@app.get("/is_idle")
+async def is_idle():
+    """Check if the server has no inflight requests (used by graceful reload)."""
+    tm = _global_state.tokenizer_manager
+    inflight = len(tm.rid_to_state)
+    return ORJSONResponse(
+        content={"idle": inflight == 0, "inflight": inflight},
+        status_code=200,
+    )
+
+
 ##### OpenAI-compatible API endpoints #####
 
 

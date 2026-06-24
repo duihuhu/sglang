@@ -24,6 +24,22 @@ class _ModelUnpickler(pickle.Unpickler):
     _class_cache: dict = {}
 
     def find_class(self, module: str, name: str):
+        # V1 models (from energy_model.py / energy_model_v1.py)
+        if module in ("energy_model", "energy_model_v1") and name in (
+            "LookupTableModel", "LinearRegressionModel", "GBDTModel",
+        ):
+            if f"v1_{name}" not in self._class_cache:
+                import importlib.util
+                em_path = (
+                    Path(__file__).resolve().parents[4]
+                    / "benchmark" / "test_motivation" / "energy_model.py"
+                )
+                spec = importlib.util.spec_from_file_location("_energy_model", em_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                for cn in ("LookupTableModel", "LinearRegressionModel", "GBDTModel"):
+                    self._class_cache[f"v1_{cn}"] = getattr(mod, cn)
+            return self._class_cache[f"v1_{name}"]
         # V2/V3 models (from energy_model_v2.py / energy_model_v3.py)
         if module in ("__main__", "energy_model_v2", "energy_model_v3") and name in ("GBDTModel", "LookupModel"):
             v2_key = f"v2_{name}"
@@ -39,22 +55,12 @@ class _ModelUnpickler(pickle.Unpickler):
                 self._class_cache["v2_GBDTModel"] = getattr(mod, "GBDTModel")
                 self._class_cache["v2_LookupModel"] = getattr(mod, "LookupModel")
             return self._class_cache[v2_key]
-        # V1 models (from energy_model.py)
-        if module in ("__main__", "energy_model") and name in (
-            "LookupTableModel", "LinearRegressionModel",
-        ):
-            if name not in self._class_cache:
-                import importlib.util
-                em_path = (
-                    Path(__file__).resolve().parents[4]
-                    / "benchmark" / "test_motivation" / "energy_model.py"
-                )
-                spec = importlib.util.spec_from_file_location("_energy_model", em_path)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                for cn in ("LookupTableModel", "LinearRegressionModel", "GBDTModel"):
-                    self._class_cache[cn] = getattr(mod, cn)
-            return self._class_cache[name]
+        # Fallback for __main__ (V2-style)
+        if module == "__main__" and name in ("GBDTModel", "LookupModel", "LookupTableModel", "LinearRegressionModel"):
+            if name in ("GBDTModel", "LookupModel"):
+                return self.find_class("energy_model_v2", name)
+            else:
+                return self.find_class("energy_model", name)
         return super().find_class(module, name)
 
 logger = logging.getLogger(__name__)
@@ -410,7 +416,7 @@ class AFProfilePredictor:
 
         # Fallback to V2 (single tp, only if tp_a == tp_f)
         if self._v2_available and _tp_a == _tp_f:
-            features = np.array([[_tp_a, M, f_a, f_f, il, bs]], dtype=float)
+            features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
             result = self._v2_predict("Decode_iter_lat", features)
             if result is not None:
                 return result * self._lif_correction(lif)
@@ -479,7 +485,7 @@ class AFProfilePredictor:
 
         # Fallback to V2 (single tp)
         if self._v2_available and _tp_a == _tp_f:
-            features = np.array([[_tp_a, M, f_a, f_f, il, bs]], dtype=float)
+            features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
             da_e = self._v2_predict("Decode_iter_energy_A", features)
             df_e = self._v2_predict("Decode_iter_energy_F", features)
             if da_e is not None and df_e is not None:
