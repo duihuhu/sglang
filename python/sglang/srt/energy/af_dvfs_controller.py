@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from sglang.srt.energy.af_profile_predictor import AFProfilePredictor, VALID_FREQS
+from sglang.srt.energy.idle_power import layer_bubble_energy_mj, scheduler_idle_energy_mj
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,9 @@ class DVFSDecision:
     energy_mj: float
     latency_us: float
     switched: bool = False
+    energy_compute_mj: float = 0.0
+    energy_bubble_mj: float = 0.0
+    energy_idle_mj: float = 0.0
 
 
 @dataclass
@@ -91,6 +95,10 @@ class AFDVFSController:
         calibration_ema: float = 0.2,
         moe_freq_floor: int = 0,
         headroom_aggressive_threshold: float = 0.0,
+        include_idle_energy: bool = True,
+        idle_lock_enabled: bool = False,
+        idle_lock_freq: int = 210,
+        decode_compositional: bool = False,
     ):
         self.predictor = predictor
         self.num_layers = num_layers
@@ -99,10 +107,19 @@ class AFDVFSController:
         self.t_comm_us = t_comm_us
         self.t_drain_us = t_drain_us
         self.freqs = freqs or VALID_FREQS
+        self._include_idle_energy = include_idle_energy
+        self._idle_lock_enabled = idle_lock_enabled
+        self._idle_lock_freq = idle_lock_freq
+        self._decode_compositional = decode_compositional
+        self._n_af_gpus = self.tp_a + self.tp_f
         self._baseline_f_a = baseline_f_a or F_MAX
         self._baseline_f_f = baseline_f_f or F_MAX
         self._moe_freq_floor = moe_freq_floor
         self._headroom_aggressive_threshold = headroom_aggressive_threshold
+
+        # Compositional mode latency cache: {(bs, il, ol): {(f_a, f_f): layer_lat_us}}
+        self._comp_lat_cache: dict = {}
+        self._comp_cache_key: tuple = (0, 0, 0)
         self._decode_state = DecodeWindowState(
             cur_f_a=self._baseline_f_a,
             cur_f_f=self._baseline_f_f,
@@ -120,8 +137,11 @@ class AFDVFSController:
         # Separate factors for pipelined (M>1) vs serial (M=1) execution
         self._calibration_enabled = online_calibration
         self._calibration_ema = calibration_ema
-        self._calibration_factor = 1.0  # multiplier for M>1 (pipelined)
-        self._calibration_factor_serial = 1.0  # multiplier for M=1 (serial)
+        # For compositional mode, V1 layer models predict only compute time
+        # and miss IPC overhead, so start with a higher initial factor.
+        init_calib = 1.0
+        self._calibration_factor = init_calib  # multiplier for M>1 (pipelined)
+        self._calibration_factor_serial = init_calib  # multiplier for M=1 (serial)
 
         self._precompute_freq_pairs()
 
@@ -142,8 +162,8 @@ class AFDVFSController:
                            M: int = 2):
         """Update online calibration factor using observed vs predicted TPOT.
 
-        Maintains separate calibration factors for pipelined (M>1) and serial
-        (M=1) execution modes, since latency models differ significantly.
+        In compositional mode, also adaptively learns t_comm_us from the
+        residual between observed and predicted compute-only iteration time.
 
         Args:
             observed_tpot_us: Actual measured TPOT (microseconds).
@@ -156,13 +176,22 @@ class AFDVFSController:
             return
 
         ratio = observed_tpot_us / predicted_tpot_us
-        ratio = max(0.5, min(ratio, 3.0))
+        ratio = max(0.5, min(ratio, 10.0))
 
         alpha = self._calibration_ema
         if M > 1:
             self._calibration_factor = (1.0 - alpha) * self._calibration_factor + alpha * ratio
         else:
             self._calibration_factor_serial = (1.0 - alpha) * self._calibration_factor_serial + alpha * ratio
+
+        # Compositional mode: adaptively learn t_comm_us from residual
+        if self._decode_compositional and self.num_layers > 0:
+            obs_per_layer = observed_tpot_us / self.num_layers
+            pred_compute_per_layer = predicted_tpot_us / self.num_layers - self.t_comm_us
+            if pred_compute_per_layer > 0:
+                residual = obs_per_layer - pred_compute_per_layer
+                residual = max(0.0, residual)
+                self.t_comm_us = (1.0 - alpha) * self.t_comm_us + alpha * residual
 
     @property
     def calibration_factor(self) -> float:
@@ -199,18 +228,59 @@ class AFDVFSController:
         drain = self.t_drain_us if M > 1 else 0.0
         return t_layer * self.num_layers + drain
 
+    def _layer_energy_detail(
+        self, phase: str, f_a: int, f_f: int,
+        bs: int, il: int, ol: Optional[int], M: int = 1,
+    ) -> tuple[float, float, float]:
+        """Compute single-layer energy breakdown: (total, compute, bubble) in mJ."""
+        lat_a = self.predictor.predict_latency(
+            phase, "A", self.tp_a, f_a, bs, il, ol).value
+        lat_f = self.predictor.predict_latency(
+            phase, "F", self.tp_f, f_f, bs, il, ol).value
+        e_a = self.predictor.predict_energy(
+            phase, "A", self.tp_a, f_a, bs, il, ol).value
+        e_f = self.predictor.predict_energy(
+            phase, "F", self.tp_f, f_f, bs, il, ol).value
+        e_compute = e_a + e_f
+        e_bubble = 0.0
+        if self._include_idle_energy:
+            e_bubble = layer_bubble_energy_mj(
+                lat_a, lat_f, f_a, f_f, self.tp_a, self.tp_f, M)
+        return e_compute + e_bubble, e_compute, e_bubble
+
     def _layer_energy(self, phase: str, f_a: int, f_f: int,
-                      bs: int, il: int, ol: Optional[int]) -> float:
-        """Compute single-layer energy (mJ)."""
-        e_a = self.predictor.predict_energy(phase, "A", self.tp_a, f_a, bs, il, ol).value
-        e_f = self.predictor.predict_energy(phase, "F", self.tp_f, f_f, bs, il, ol).value
-        return e_a + e_f
+                      bs: int, il: int, ol: Optional[int],
+                      M: int = 1) -> float:
+        """Compute single-layer energy (mJ), including pipeline bubble when enabled."""
+        total, _, _ = self._layer_energy_detail(
+            phase, f_a, f_f, bs, il, ol, M)
+        return total
+
+    def _scheduler_idle_energy(
+        self, batch_lat_us: float, inter_arrival_us: float,
+        f_a: int, f_f: int,
+    ) -> float:
+        """Estimate scheduler idle energy between consecutive prefill batches."""
+        if not self._include_idle_energy or inter_arrival_us <= 0:
+            return 0.0
+        t_idle_us = max(0.0, inter_arrival_us - batch_lat_us)
+        if t_idle_us <= 0:
+            return 0.0
+        if self._idle_lock_enabled:
+            idle_freq = self._idle_lock_freq
+        else:
+            # Without idle-lock, GPUs stay at their operating frequencies.
+            e_a = scheduler_idle_energy_mj(t_idle_us, f_a, self.tp_a)
+            e_f = scheduler_idle_energy_mj(t_idle_us, f_f, self.tp_f)
+            return e_a + e_f
+        return scheduler_idle_energy_mj(t_idle_us, idle_freq, self._n_af_gpus)
 
     # ── Prefill: per-request DVFS ──────────────────────────────────
 
     def select_freq_prefill(
         self, bs: int, il: int, slack_us: float, M: int = 1,
         remaining_layers: Optional[int] = None,
+        inter_arrival_us: float = 0.0,
     ) -> DVFSDecision:
         """Select (f_A, f_F) for a prefill batch.
 
@@ -220,6 +290,8 @@ class AFDVFSController:
             slack_us: Time budget = min(deadline - elapsed) across batch (us).
             M: Number of microbatches in pipeline.
             remaining_layers: Layers left to process (default: all).
+            inter_arrival_us: Estimated time between consecutive prefill batches (us).
+                Used to model scheduler idle static power between batches.
 
         Returns:
             DVFSDecision with chosen frequencies and predicted metrics.
@@ -240,32 +312,48 @@ class AFDVFSController:
                 continue
 
             try:
-                e_layer = self._layer_energy("prefill", f_a, f_f, bs, il, None)
+                e_layer, e_compute_layer, e_bubble_layer = self._layer_energy_detail(
+                    "prefill", f_a, f_f, bs, il, None, M)
             except (RuntimeError, ValueError):
                 continue
 
-            total_e = e_layer * remaining_layers
+            e_compute = e_compute_layer * remaining_layers
+            e_bubble = e_bubble_layer * remaining_layers
+            e_idle = self._scheduler_idle_energy(total_lat, inter_arrival_us, f_a, f_f)
+            total_e = e_compute + e_bubble + e_idle
             if best is None or total_e < best.energy_mj:
                 best = DVFSDecision(
                     f_a=f_a, f_f=f_f,
                     energy_mj=total_e, latency_us=total_lat,
+                    energy_compute_mj=e_compute,
+                    energy_bubble_mj=e_bubble,
+                    energy_idle_mj=e_idle,
                 )
 
         if best is None:
             self._stats_fallback += 1
             logger.warning("Prefill DVFS: no feasible combo, fallback to max freq")
             t_layer = self._layer_latency("prefill", F_MAX, F_MAX, bs, il, None, M)
-            e_layer = self._layer_energy("prefill", F_MAX, F_MAX, bs, il, None)
+            e_layer, e_compute_layer, e_bubble_layer = self._layer_energy_detail(
+                "prefill", F_MAX, F_MAX, bs, il, None, M)
+            total_lat = t_layer * remaining_layers
+            e_compute = e_compute_layer * remaining_layers
+            e_bubble = e_bubble_layer * remaining_layers
+            e_idle = self._scheduler_idle_energy(total_lat, inter_arrival_us, F_MAX, F_MAX)
             best = DVFSDecision(
                 f_a=F_MAX, f_f=F_MAX,
-                energy_mj=e_layer * remaining_layers,
-                latency_us=t_layer * remaining_layers,
+                energy_mj=e_compute + e_bubble + e_idle,
+                latency_us=total_lat,
+                energy_compute_mj=e_compute,
+                energy_bubble_mj=e_bubble,
+                energy_idle_mj=e_idle,
             )
 
         logger.debug(
             "Prefill DVFS: bs=%d il=%d → f_a=%d f_f=%d "
-            "lat=%.0fus energy=%.1fmJ",
+            "lat=%.0fus energy=%.1fmJ (compute=%.1f bubble=%.1f idle=%.1f)",
             bs, il, best.f_a, best.f_f, best.latency_us, best.energy_mj,
+            best.energy_compute_mj, best.energy_bubble_mj, best.energy_idle_mj,
         )
         return best
 
@@ -283,6 +371,16 @@ class AFDVFSController:
             REEVAL_WINDOW_EXPIRED, REEVAL_BS_CHANGE, REEVAL_SLO_URGENT.
         """
         st = self._decode_state
+        # During hold at max freq (fallback): suppress all re-evals
+        # until hold expires — bs changes don't matter at max freq
+        if st.hold_iters_remaining > 0:
+            consec_fb = getattr(self, '_consec_fallback', 0)
+            if consec_fb >= 1 and st.cur_f_a >= F_MAX and st.cur_f_f >= F_MAX:
+                return REEVAL_NONE
+            # Not at max freq (hold from forced step-up): allow bs_change
+            if st.last_bs > 0 and abs(current_bs - st.last_bs) / st.last_bs > 0.3:
+                return REEVAL_BS_CHANGE
+            return REEVAL_NONE
         if st.iters_since_decision >= st.window_size:
             return REEVAL_WINDOW_EXPIRED
         if st.last_bs > 0 and abs(current_bs - st.last_bs) / st.last_bs > 0.3:
@@ -326,8 +424,14 @@ class AFDVFSController:
                 energy_mj=0, latency_us=0, switched=False,
             )
         elif st.hold_iters_remaining > 0:
-            # Non-urgent re-eval during hold: allow (window expired or bs change)
-            pass
+            # During hold: only re-eval on significant bs change, skip window expiry
+            if reeval_reason == REEVAL_BS_CHANGE:
+                pass  # allow re-eval
+            else:
+                return DVFSDecision(
+                    f_a=st.cur_f_a, f_f=st.cur_f_f,
+                    energy_mj=0, latency_us=0, switched=False,
+                )
 
         if reeval_reason == REEVAL_WINDOW_EXPIRED:
             w_remaining = st.window_size
@@ -335,34 +439,100 @@ class AFDVFSController:
             w_remaining = st.window_size - st.iters_since_decision
 
         # ─── V2 Coupled Model Path ───────────────────────────────────────
-        # If the coupled iteration-level model is available, use it directly
-        # for more accurate latency/energy predictions (accounts for IPC,
-        # pipeline drain, and micro-batch overlap).
+        # If the coupled iteration-level model is available AND compositional
+        # mode is not forced, use V2 directly for latency/energy predictions.
         if (self.predictor is not None
-                and self.predictor.has_coupled_model):
+                and self.predictor.has_coupled_model
+                and not self._decode_compositional):
             return self._select_freq_decode_coupled(
                 bs, il, ol, slo_tpot_us, M, reeval_reason, st, w_remaining,
                 lif, max_expert_tokens, els)
 
         # ─── V1 Formula-based Path (fallback) ────────────────────────────
+        # Cache per-freq lookup tables: only recompute when (bs, il, ol) changes.
+        _cache_key = (bs, il, ol)
+        if _cache_key == self._comp_cache_key and self._comp_lat_cache:
+            _lat_a_lut = self._comp_lat_cache["lat_a"]
+            _lat_f_lut = self._comp_lat_cache["lat_f"]
+            _e_a_lut = self._comp_lat_cache["e_a"]
+            _e_f_lut = self._comp_lat_cache["e_f"]
+        else:
+            # Pre-compute per-freq latency lookup (7+7 = 14 predict calls)
+            _lat_a_lut = {}
+            _lat_f_lut = {}
+            for f in self.freqs:
+                try:
+                    _lat_a_lut[f] = self.predictor.predict_latency(
+                        "decode", "A", self.tp_a, f, bs, il, ol).value
+                except (RuntimeError, ValueError):
+                    _lat_a_lut[f] = float("inf")
+                try:
+                    _lat_f_lut[f] = self.predictor.predict_latency(
+                        "decode", "F", self.tp_f, f, bs, il, ol).value
+                except (RuntimeError, ValueError):
+                    _lat_f_lut[f] = float("inf")
+
+            # Pre-compute per-freq energy lookup (7+7 = 14 calls)
+            _e_a_lut = {}
+            _e_f_lut = {}
+            for f in self.freqs:
+                try:
+                    _e_a_lut[f] = self.predictor.predict_energy(
+                        "decode", "A", self.tp_a, f, bs, il, ol).value
+                except (RuntimeError, ValueError):
+                    _e_a_lut[f] = float("inf")
+                try:
+                    _e_f_lut[f] = self.predictor.predict_energy(
+                        "decode", "F", self.tp_f, f, bs, il, ol).value
+                except (RuntimeError, ValueError):
+                    _e_f_lut[f] = float("inf")
+
+            # Save to cache
+            self._comp_cache_key = _cache_key
+            self._comp_lat_cache = {
+                "lat_a": _lat_a_lut, "lat_f": _lat_f_lut,
+                "e_a": _e_a_lut, "e_f": _e_f_lut,
+            }
+
         # Sort candidates by energy (ascending) for early exit
         candidates = []
         freq_floor_v1 = self._moe_freq_floor
+        # In compositional mode, enforce a minimum frequency to limit TPOT increase.
+        # V1 models underestimate the scheduler overhead at very low frequencies.
+        if self._decode_compositional and freq_floor_v1 < 1050:
+            freq_floor_v1 = 1050
         for f_a, f_f in self._freq_pairs:
             if freq_floor_v1 > 0 and (f_a < freq_floor_v1 or f_f < freq_floor_v1):
                 continue
-            try:
-                e = self._layer_energy("decode", f_a, f_f, bs, il, ol)
-                candidates.append((e, f_a, f_f))
-            except (RuntimeError, ValueError):
+            lat_a = _lat_a_lut.get(f_a, float("inf"))
+            lat_f = _lat_f_lut.get(f_f, float("inf"))
+            e_a = _e_a_lut.get(f_a, float("inf"))
+            e_f = _e_f_lut.get(f_f, float("inf"))
+            if any(v == float("inf") for v in (lat_a, lat_f, e_a, e_f)):
                 continue
+            e = (e_a + e_f) * self.num_layers
+            candidates.append((e, f_a, f_f, lat_a, lat_f))
         candidates.sort()
 
-        for e, f_a, f_f in candidates:
-            try:
-                t_layer = self._layer_latency("decode", f_a, f_f, bs, il, ol, M)
-            except (RuntimeError, ValueError):
-                continue
+        if not candidates:
+            logger.warning(
+                "V1 comp: no candidates! freqs=%s lut_a_keys=%s lut_f_keys=%s "
+                "bs=%d il=%d ol=%d tp_a=%d tp_f=%d slo_us=%.0f "
+                "sample_lat_a=%s sample_e_a=%s",
+                self.freqs[:3],
+                list(_lat_a_lut.keys())[:3],
+                list(_lat_f_lut.keys())[:3],
+                bs, il, ol, self.tp_a, self.tp_f, slo_tpot_us,
+                list(_lat_a_lut.values())[:3],
+                list(_e_a_lut.values())[:3],
+            )
+
+        for e, f_a, f_f, lat_a, lat_f in candidates:
+            # Compute layer latency from pre-computed lat values
+            if M > 1:
+                t_layer = max(lat_a, lat_f) + self.t_comm_us / M
+            else:
+                t_layer = lat_a + lat_f + self.t_comm_us
 
             # Use full iteration latency (pipeline + drain) for SLO check
             drain = self.t_drain_us if M > 1 else 0.0
@@ -397,7 +567,8 @@ class AFDVFSController:
                     st.iters_since_decision = 0
                     st.hold_iters_remaining = self._feedback_hold
                     t_layer_up = self._layer_latency("decode", f_a_up, f_f_up, bs, il, ol, M)
-                    e_up = self._layer_energy("decode", f_a_up, f_f_up, bs, il, ol)
+                    e_up, _, _ = self._layer_energy_detail(
+                        "decode", f_a_up, f_f_up, bs, il, ol, M)
                     drain_up = self.t_drain_us if M > 1 else 0.0
                     return DVFSDecision(
                         f_a=f_a_up, f_f=f_f_up,
@@ -422,7 +593,11 @@ class AFDVFSController:
                     self._stats_switch_down += 1
 
             total_lat = t_layer * self.num_layers + drain
-            total_e = e * self.num_layers
+            e_layer, e_compute_layer, e_bubble_layer = self._layer_energy_detail(
+                "decode", f_a, f_f, bs, il, ol, M)
+            total_e = e_layer * self.num_layers
+            e_compute = e_compute_layer * self.num_layers
+            e_bubble = e_bubble_layer * self.num_layers
 
             # Headroom-aggressive (V1): reduce f_a when latency is far below SLO
             if (self._headroom_aggressive_threshold > 0
@@ -437,7 +612,8 @@ class AFDVFSController:
                         if (alt_total * calib) <= slo_tpot_us:
                             f_a = alt_fa
                             total_lat = alt_total
-                            alt_e_layer = self._layer_energy("decode", alt_fa, f_f, bs, il, ol)
+                            alt_e_layer, _, _ = self._layer_energy_detail(
+                                "decode", alt_fa, f_f, bs, il, ol, M)
                             total_e = alt_e_layer * self.num_layers
                             switched = True
                             break
@@ -445,6 +621,7 @@ class AFDVFSController:
                         continue
 
             self._update_decode_state(f_a, f_f, bs, switched)
+            self._consec_fallback = 0  # reset on successful freq selection
             logger.debug(
                 "Decode DVFS: bs=%d il=%d ol=%d → f_a=%d f_f=%d "
                 "switched=%s lat=%.0fus energy=%.1fmJ "
@@ -457,22 +634,62 @@ class AFDVFSController:
                 f_a=f_a, f_f=f_f,
                 energy_mj=total_e, latency_us=total_lat,
                 switched=switched,
+                energy_compute_mj=e_compute,
+                energy_bubble_mj=e_bubble,
             )
 
         # Fallback: max frequency
         self._stats_fallback += 1
-        logger.warning("Decode DVFS: no feasible combo, fallback to max freq")
+        self._consec_fallback = getattr(self, '_consec_fallback', 0) + 1
+        if self._consec_fallback <= 3:
+            # Debug: log the first candidate's details
+            if candidates:
+                e0, fa0, ff0, la0, lf0 = candidates[0]
+                t_l0 = (la0 + lf0 + self.t_comm_us) if M <= 1 else (max(la0, lf0) + self.t_comm_us / M)
+                t_i0 = t_l0 * self.num_layers
+                c = self.get_calibration_factor(M)
+                logger.warning(
+                    "Decode DVFS: no feasible (cands=%d) first=(%d,%d) t_iter=%.0fus "
+                    "calib=%.2f product=%.0fus slo=%.0fus M=%d t_comm=%.0f",
+                    len(candidates), fa0, ff0, t_i0, c, t_i0 * c, slo_tpot_us, M, self.t_comm_us)
+            else:
+                logger.warning("Decode DVFS: no feasible combo (empty candidates), fallback to max freq")
+        # After first fallback in compositional mode, immediately set large hold
+        # since max-freq is likely the steady state (SLO too tight for any saving)
+        if self._decode_compositional and self._consec_fallback >= 1:
+            st.hold_iters_remaining = max(st.hold_iters_remaining, 500)
+        elif self._consec_fallback >= 3:
+            st.hold_iters_remaining = max(st.hold_iters_remaining, 500)
         self._stats_switch_up += 1
         self._update_decode_state(F_MAX, F_MAX, bs, switched=True)
         t_layer = self._layer_latency("decode", F_MAX, F_MAX, bs, il, ol, M)
-        e = self._layer_energy("decode", F_MAX, F_MAX, bs, il, ol)
+        e, e_compute, e_bubble = self._layer_energy_detail(
+            "decode", F_MAX, F_MAX, bs, il, ol, M)
         drain = self.t_drain_us if M > 1 else 0.0
         return DVFSDecision(
             f_a=F_MAX, f_f=F_MAX,
             energy_mj=e * self.num_layers,
             latency_us=t_layer * self.num_layers + drain,
             switched=True,
+            energy_compute_mj=e_compute * self.num_layers,
+            energy_bubble_mj=e_bubble * self.num_layers,
         )
+
+    def _coupled_iteration_bubble_mj(
+        self, f_a: int, f_f: int, bs: int, il: int, ol: int, M: int,
+    ) -> float:
+        """Per-iteration bubble energy for coupled decode model."""
+        if not self._include_idle_energy:
+            return 0.0
+        try:
+            lat_a = self.predictor.predict_latency(
+                "decode", "A", self.tp_a, f_a, bs, il, ol).value
+            lat_f = self.predictor.predict_latency(
+                "decode", "F", self.tp_f, f_f, bs, il, ol).value
+        except (RuntimeError, ValueError):
+            return 0.0
+        return layer_bubble_energy_mj(
+            lat_a, lat_f, f_a, f_f, self.tp_a, self.tp_f, M) * self.num_layers
 
     def _select_freq_decode_coupled(
         self, bs: int, il: int, ol: int,
@@ -498,6 +715,8 @@ class AFDVFSController:
                 lif=lif, max_expert_tokens=max_expert_tokens, els=els)
             if energy is not None:
                 total_e = energy[0] + energy[1]
+                total_e += self._coupled_iteration_bubble_mj(
+                    f_a, f_f, bs, il, ol, M)
                 candidates.append((total_e, f_a, f_f))
         candidates.sort()
 

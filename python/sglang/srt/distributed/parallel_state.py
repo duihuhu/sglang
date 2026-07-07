@@ -1800,26 +1800,42 @@ def initialize_model_parallel(
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
-    if world_size != tensor_model_parallel_size * pipeline_model_parallel_size:
+    inplace_max_tp = int(os.environ.get("SGLANG_INPLACE_RESHARD_MAX_TP", "0") or "0")
+    inplace_active_tp = int(os.environ.get("SGLANG_INPLACE_RESHARD_ACTIVE_TP", "0") or "0")
+    inplace_mode = inplace_max_tp > 0 and inplace_active_tp > 0
+    if not inplace_mode and world_size != tensor_model_parallel_size * pipeline_model_parallel_size:
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
             f"pipeline_model_parallel_size ({pipeline_model_parallel_size})"
         )
+    if inplace_mode:
+        assert pipeline_model_parallel_size == 1
+        assert world_size == inplace_max_tp
+        assert tensor_model_parallel_size == inplace_active_tp
 
     # Build the tensor model-parallel groups.
-    num_tensor_model_parallel_groups: int = world_size // tensor_model_parallel_size
+    num_tensor_model_parallel_groups: int = 1 if inplace_mode else world_size // tensor_model_parallel_size
     global _TP
     assert _TP is None, "tensor model parallel group is already initialized"
     group_ranks = []
-    for tp_group_idx in range(num_tensor_model_parallel_groups):
-        ranks = list(
-            range(
-                tp_group_idx * tensor_model_parallel_size,
-                (tp_group_idx + 1) * tensor_model_parallel_size,
+    if inplace_mode:
+        rank = torch.distributed.get_rank()
+        if rank < inplace_active_tp:
+            group_ranks.append(list(range(inplace_active_tp)))
+        else:
+            # Standby ranks need valid group objects during initialization but
+            # must not participate in the active serving TP collectives yet.
+            group_ranks.append([rank])
+    else:
+        for tp_group_idx in range(num_tensor_model_parallel_groups):
+            ranks = list(
+                range(
+                    tp_group_idx * tensor_model_parallel_size,
+                    (tp_group_idx + 1) * tensor_model_parallel_size,
+                )
             )
-        )
-        group_ranks.append(ranks)
+            group_ranks.append(ranks)
 
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(
@@ -2214,6 +2230,235 @@ def get_moe_tensor_parallel_world_size():
 def get_moe_tensor_parallel_rank():
     """Return my rank for the moe tensor parallel group."""
     return get_moe_tp_group().rank_in_group
+
+
+def rebuild_inplace_reshard_parallel_state(
+    new_active_tp: int,
+    attention_data_parallel_size: int = 1,
+    pipeline_model_parallel_size: int = 1,
+    expert_model_parallel_size: int = 1,
+    attention_context_model_parallel_size: int = 1,
+    moe_data_model_parallel_size: int = 1,
+    duplicate_tp_group: bool = False,
+    backend: Optional[str] = None,
+) -> None:
+    """Rebuild model-parallel groups after in-place TP reshard.
+
+    Every world rank must call this together. Unlike per-rank
+    initialize_model_parallel() in inplace standby mode, all ranks iterate the
+    same new_group() sequence so torch.distributed stays aligned.
+    """
+    from sglang.srt.layers.sampler import SYNC_TOKEN_IDS_ACROSS_TP
+
+    destroy_model_parallel()
+    max_tp = int(os.environ.get("SGLANG_INPLACE_RESHARD_MAX_TP", "0") or "0")
+    if max_tp <= 0:
+        raise RuntimeError("SGLANG_INPLACE_RESHARD_MAX_TP is not set")
+    if new_active_tp > max_tp:
+        raise RuntimeError(
+            f"new_active_tp {new_active_tp} exceeds max_tp {max_tp}"
+        )
+    os.environ["SGLANG_INPLACE_RESHARD_ACTIVE_TP"] = str(new_active_tp)
+
+    assert torch.distributed.is_initialized()
+    world_size: int = torch.distributed.get_world_size()
+    assert world_size == max_tp
+    backend = backend or torch.distributed.get_backend(get_world_group().device_group)
+
+    tensor_model_parallel_size = new_active_tp
+    num_tensor_model_parallel_groups = 1
+    inplace_standby = max_tp > new_active_tp
+
+    tp_subgroup_defs = [list(range(new_active_tp))]
+    tp_subgroup_defs.extend([[r] for r in range(new_active_tp, max_tp)])
+
+    global _TP
+    assert _TP is None, "tensor model parallel group is already initialized"
+    _TP = init_model_parallel_group(
+        tp_subgroup_defs,
+        get_world_group().local_rank,
+        backend,
+        use_message_queue_broadcaster=get_bool_env_var(
+            "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
+        ),
+        group_name="tp",
+        pynccl_use_current_stream=duplicate_tp_group,
+    )
+
+    if duplicate_tp_group:
+        global _PDMUX_PREFILL_TP_GROUP
+        assert (
+            _PDMUX_PREFILL_TP_GROUP is None
+        ), "tensor model parallel group for PD-Multiplexing Prefill is already initialized"
+        _PDMUX_PREFILL_TP_GROUP = init_model_parallel_group(
+            tp_subgroup_defs,
+            get_world_group().local_rank,
+            backend,
+            use_message_queue_broadcaster=get_bool_env_var(
+                "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
+            ),
+            group_name="pdmux_prefill_tp",
+            pynccl_use_current_stream=True,
+        )
+        if _TP.pynccl_comm:
+            _TP.pynccl_comm.disabled = False
+            _PDMUX_PREFILL_TP_GROUP.pynccl_comm.disabled = False
+
+    attn_dp_size = attention_data_parallel_size
+    attn_cp_size = attention_context_model_parallel_size
+    attn_tp_size = tensor_model_parallel_size // attn_cp_size // attn_dp_size
+
+    global _ATTN_CP
+    assert (
+        _ATTN_CP is None
+    ), "attention context model parallel group is already initialized"
+    if attn_cp_size == tensor_model_parallel_size or inplace_standby:
+        _ATTN_CP = _TP
+    else:
+        attn_cp_defs = []
+        for tp_group_idx in range(num_tensor_model_parallel_groups):
+            for dp_idx in range(attn_dp_size):
+                for attn_tp_idx in range(attn_tp_size):
+                    st = (
+                        tp_group_idx * tensor_model_parallel_size
+                        + dp_idx * attn_tp_size * attn_cp_size
+                        + attn_tp_idx
+                    )
+                    en = (
+                        tp_group_idx * tensor_model_parallel_size
+                        + (dp_idx + 1) * attn_tp_size * attn_cp_size
+                        + attn_tp_idx
+                    )
+                    attn_cp_defs.append(list(range(st, en, attn_tp_size)))
+        _ATTN_CP = init_model_parallel_group(
+            attn_cp_defs,
+            get_world_group().local_rank,
+            backend,
+            group_name="attn_cp",
+        )
+
+    global _ATTN_TP
+    assert (
+        _ATTN_TP is None
+    ), "attention tensor model parallel group is already initialized"
+    if attn_tp_size == tensor_model_parallel_size or inplace_standby:
+        _ATTN_TP = _TP
+    else:
+        attn_tp_defs = []
+        for tp_group_idx in range(num_tensor_model_parallel_groups):
+            for cp_dp_combined_idx in range(attn_cp_size * attn_dp_size):
+                st = (
+                    tp_group_idx * tensor_model_parallel_size
+                    + cp_dp_combined_idx * attn_tp_size
+                )
+                en = (
+                    tp_group_idx * tensor_model_parallel_size
+                    + (cp_dp_combined_idx + 1) * attn_tp_size
+                )
+                attn_tp_defs.append(list(range(st, en)))
+        _ATTN_TP = init_model_parallel_group(
+            attn_tp_defs,
+            get_world_group().local_rank,
+            backend,
+            use_pynccl=SYNC_TOKEN_IDS_ACROSS_TP,
+            use_mscclpp_allreduce=False,
+            use_custom_allreduce=False,
+            use_torch_symm_mem_allreduce=False,
+            group_name="attention_tp",
+        )
+
+    moe_ep_size = expert_model_parallel_size
+    moe_dp_size = moe_data_model_parallel_size
+    moe_tp_size = tensor_model_parallel_size // moe_ep_size // moe_dp_size
+
+    global _MOE_DP
+    assert _MOE_DP is None, "moe data parallel group is already initialized"
+    if moe_dp_size == tensor_model_parallel_size or inplace_standby:
+        _MOE_DP = _TP
+    else:
+        moe_dp_defs = []
+        for tp_group_idx in range(num_tensor_model_parallel_groups):
+            for tp_ep_combined_idx in range(moe_tp_size * moe_ep_size):
+                st = tp_group_idx * tensor_model_parallel_size + tp_ep_combined_idx
+                en = (
+                    tp_group_idx + 1
+                ) * tensor_model_parallel_size + tp_ep_combined_idx
+                moe_dp_defs.append(list(range(st, en, moe_tp_size * moe_ep_size)))
+        _MOE_DP = init_model_parallel_group(
+            moe_dp_defs,
+            get_world_group().local_rank,
+            backend,
+            group_name="moe_dp",
+        )
+
+    global _MOE_EP
+    assert _MOE_EP is None, "expert model parallel group is already initialized"
+    if moe_ep_size == tensor_model_parallel_size or inplace_standby:
+        _MOE_EP = _TP
+    else:
+        moe_ep_defs = []
+        for tp_group_idx in range(num_tensor_model_parallel_groups):
+            for moe_dp_idx in range(moe_dp_size):
+                for moe_tp_idx in range(moe_tp_size):
+                    st = (
+                        tp_group_idx * tensor_model_parallel_size
+                        + moe_dp_idx * moe_ep_size * moe_tp_size
+                        + moe_tp_idx
+                    )
+                    en = st + moe_ep_size * moe_tp_size
+                    moe_ep_defs.append(list(range(st, en, moe_tp_size)))
+        _MOE_EP = init_model_parallel_group(
+            moe_ep_defs,
+            get_world_group().local_rank,
+            backend,
+            group_name="moe_ep",
+        )
+
+    global _MOE_TP
+    assert _MOE_TP is None, "expert model parallel group is already initialized"
+    if moe_tp_size == tensor_model_parallel_size or inplace_standby:
+        _MOE_TP = _TP
+    else:
+        moe_tp_defs = []
+        for tp_group_idx in range(num_tensor_model_parallel_groups):
+            for ep_dp_combined_idx in range(moe_ep_size * moe_dp_size):
+                st = (
+                    tp_group_idx * tensor_model_parallel_size
+                    + ep_dp_combined_idx * moe_tp_size
+                )
+                en = (
+                    tp_group_idx * tensor_model_parallel_size
+                    + (ep_dp_combined_idx + 1) * moe_tp_size
+                )
+                moe_tp_defs.append(list(range(st, en)))
+        _MOE_TP = init_model_parallel_group(
+            moe_tp_defs,
+            get_world_group().local_rank,
+            backend,
+            group_name="moe_tp",
+        )
+
+    num_pipeline_model_parallel_groups: int = world_size // pipeline_model_parallel_size
+    global _PP
+    assert _PP is None, "pipeline model parallel group is already initialized"
+    pp_subgroup_defs = []
+    for pp_group_idx in range(num_pipeline_model_parallel_groups):
+        pp_subgroup_defs.append(
+            list(
+                range(
+                    pp_group_idx,
+                    world_size,
+                    num_pipeline_model_parallel_groups,
+                )
+            )
+        )
+    _PP = init_model_parallel_group(
+        pp_subgroup_defs,
+        get_world_group().local_rank,
+        backend,
+        use_custom_allreduce=False,
+        group_name="pp",
+    )
 
 
 def destroy_model_parallel():

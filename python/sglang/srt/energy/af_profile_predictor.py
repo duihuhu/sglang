@@ -416,7 +416,7 @@ class AFProfilePredictor:
 
         # Fallback to V2 (single tp, only if tp_a == tp_f)
         if self._v2_available and _tp_a == _tp_f:
-            features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
+            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs]], dtype=float)
             result = self._v2_predict("Decode_iter_lat", features)
             if result is not None:
                 return result * self._lif_correction(lif)
@@ -485,7 +485,7 @@ class AFProfilePredictor:
 
         # Fallback to V2 (single tp)
         if self._v2_available and _tp_a == _tp_f:
-            features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
+            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs]], dtype=float)
             da_e = self._v2_predict("Decode_iter_energy_A", features)
             df_e = self._v2_predict("Decode_iter_energy_F", features)
             if da_e is not None and df_e is not None:

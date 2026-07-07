@@ -1144,6 +1144,44 @@ async def update_weight_version(obj: UpdateWeightVersionReqInput, request: Reque
     if obj.abort_all_requests:
         _global_state.tokenizer_manager.abort_request(abort_all=True)
 
+
+@app.post("/admin/export_weights_ipc")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def export_weights_ipc(request: Request):
+    """Export model weights as CUDA IPC handles for graceful reshard.
+
+    Body (optional):
+        {"ipc_dir": "/tmp/sglang_reshard", "module_type": "prefill", "perspective": "full"}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    from sglang.srt.managers.io_struct import ReshardReqInput
+    obj = ReshardReqInput(
+        action="export_weights",
+        new_tp_size=0, new_tp_rank=0,
+        ipc_dir=body.get("ipc_dir", "/tmp/sglang_reshard"),
+        module_type=body.get("module_type", "prefill"),
+        perspective=body.get("perspective", "full"),
+    )
+    try:
+        result = await _global_state.tokenizer_manager.handle_reshard(obj, request)
+        if isinstance(result, list):
+            result = result[0]
+        return ORJSONResponse({
+            "success": result.success,
+            "message": result.message,
+            "elapsed_s": result.elapsed_s,
+        })
+    except Exception as e:
+        import traceback
+        return ORJSONResponse(
+            {"success": False, "message": str(e), "traceback": traceback.format_exc()},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+
     # Use a simple approach without the complex lock mechanism for now
     # since weight_version update is a simple operation that doesn't affect model weights
     try:
@@ -1166,6 +1204,137 @@ async def update_weight_version(obj: UpdateWeightVersionReqInput, request: Reque
             },
             status_code=HTTPStatus.BAD_REQUEST,
         )
+
+
+@app.post("/admin/ipc_reconnect")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def ipc_reconnect(request: Request):
+    """Trigger IPC reconnect on this module's communicator.
+
+    Called during graceful reshard when the peer module (e.g. PA) has restarted
+    and this module (e.g. PF) needs to re-establish IPC communication.
+    Sends the reconnect command to the scheduler subprocess where the actual
+    IPC communicator lives.
+    """
+    try:
+        from sglang.srt.managers.io_struct import ReshardReqInput
+        obj = ReshardReqInput(
+            action="ipc_reconnect",
+            new_tp_size=0, new_tp_rank=0,
+        )
+        result = await _global_state.tokenizer_manager.handle_reshard(obj, request)
+        if isinstance(result, list):
+            result = result[0]
+        return ORJSONResponse({
+            "success": result.success,
+            "message": result.message,
+            "elapsed_s": result.elapsed_s,
+        })
+    except Exception as e:
+        import traceback
+        return ORJSONResponse(
+            {"success": False, "message": str(e), "traceback": traceback.format_exc()},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+
+
+@app.post("/reshard_tp")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def reshard_tp(request: Request):
+    """Live TP reshard: expand TP without killing the process.
+
+    Achieves <5s downtime by:
+      1. Draining in-flight requests
+      2. Transferring weights via NCCL/NVLink to new workers
+      3. Hot-reconnecting UCX to PF
+      4. Resuming generation
+
+    Body:
+        {"new_tp_size": 2, "nccl_port": 29500}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    new_tp = body.get("new_tp_size")
+    if new_tp is None:
+        return ORJSONResponse(
+            {"success": False, "message": "new_tp_size is required"},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
+    from sglang.srt.managers.io_struct import ReshardReqInput
+    obj = ReshardReqInput(
+        action="live_reshard_tp",
+        new_tp_size=int(new_tp),
+        new_tp_rank=0,
+        nccl_port=int(body.get("nccl_port", 29500)),
+    )
+    try:
+        # Experimental true in-place mode launches standby scheduler ranks that are
+        # awakened through a world-level control path. Do not block this HTTP
+        # request on the tokenizer communicator result path; the reshard result is
+        # verified via scheduler logs and subsequent /generate requests.
+        if _global_state.tokenizer_manager.server_args.inplace_reshard_max_tp is not None:
+            import json
+            from pathlib import Path
+            ctrl = Path("/tmp/sglang_inplace_reshard_cmd.json")
+            ctrl.write_text(json.dumps({
+                "action": "live_reshard_tp",
+                "new_tp_size": int(new_tp),
+                "new_tp_rank": 0,
+                "nccl_port": int(body.get("nccl_port", 29500)),
+            }))
+            logger.info("/reshard_tp accepted: wrote in-place reshard control file %s", ctrl)
+            return ORJSONResponse({
+                "success": True,
+                "message": f"in-place TP reshard to TP{int(new_tp)} accepted",
+                "elapsed_s": 0.0,
+            }, status_code=HTTPStatus.ACCEPTED)
+
+        result = await _global_state.tokenizer_manager.handle_reshard(obj, request)
+        if isinstance(result, list):
+            result = result[0]
+        return ORJSONResponse({
+            "success": result.success,
+            "message": result.message,
+            "elapsed_s": result.elapsed_s,
+        }, status_code=HTTPStatus.OK if result.success else HTTPStatus.INTERNAL_SERVER_ERROR)
+    except Exception as e:
+        import traceback
+        return ORJSONResponse(
+            {"success": False, "message": str(e), "traceback": traceback.format_exc()},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+
+
+@app.get("/inplace_reshard_status")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def inplace_reshard_status():
+    """Return the latest in-place TP reshard phase written by rank0 scheduler."""
+    import json
+    from pathlib import Path
+
+    default = {
+        "phase": "idle",
+        "active_tp": _global_state.tokenizer_manager.server_args.tp_size,
+        "target_tp": None,
+        "old_tp": None,
+        "message": "no status file",
+        "started_at": None,
+        "updated_at": None,
+        "done_at": None,
+        "elapsed_s": None,
+        "timings": None,
+    }
+    ctrl = Path("/tmp/sglang_inplace_reshard_status.json")
+    if not ctrl.exists():
+        return ORJSONResponse(default)
+    try:
+        return ORJSONResponse(json.loads(ctrl.read_text()))
+    except Exception as e:
+        return ORJSONResponse({**default, "message": f"read error: {e}"})
 
 
 @app.api_route("/get_weights_by_name", methods=["GET", "POST"])

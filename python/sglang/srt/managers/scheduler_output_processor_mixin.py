@@ -858,6 +858,13 @@ class SchedulerOutputProcessorMixin:
         skip_req: Optional[Req] = None,
     ):
         """Stream the output to detokenizer."""
+        if (
+            self.server_args.inplace_reshard_max_tp is not None
+            and self.tp_size > 1
+            and self.tp_rank != 0
+            and not getattr(self, "is_inplace_standby_rank", False)
+        ):
+            return
         if self.is_generation:
             self.stream_output_generation(reqs, return_logprob, skip_req)
         else:  # embedding or reward model

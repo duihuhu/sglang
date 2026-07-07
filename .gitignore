@@ -171,13 +171,11 @@ cython_debug/
 # Documentation
 docs/_build
 
-# SGL
+# SGL benchmark datasets (large / external)
 benchmark/mmlu/data
 benchmark/mmlu/data.tar
 benchmark/llava_bench/images
 benchmark/llava_bench/mme_pack
-*.jsonl
-tmp*.txt
 
 # Torch Compile logs
 tl_out/
@@ -185,12 +183,10 @@ tl_out/
 # Plots
 *.png
 *.pdf
-
-# personnal
-work_dirs/
-*.csv
-
 !logo.png
+
+# Personal / local working dirs
+work_dirs/
 
 # Prerequisites
 *.d
@@ -276,12 +272,59 @@ sgl-kernel/csrc/**/*_musa/
 bash-test/*
 .claude
 
-*.tsv
-*.pkl
-
 # AFlex launch logs (runtime artifacts)
 af_launch_logs/
 
 # Local model download scripts/logs (may contain credentials)
 download_mixtral.py
 download.log
+
+# =============================================================================
+# Benchmark & experiment data artifacts
+# =============================================================================
+
+# Generated result / profile directories
+benchmark/**/data/**/*.txt
+benchmark/**/data/**/*.json
+benchmark/**/data/**/*.csv
+benchmark/**/data/**/*.tsv
+benchmark/**/data/**/*.jsonl
+benchmark/**/data/**/*.pkl
+benchmark/**/data/**/*.bak
+benchmark/**/results/**
+benchmark/**/results_*/**
+benchmark/**/output/**
+benchmark/**/outputs/**
+benchmark/**/figs/**
+benchmark/**/more_trying/results/**
+benchmark/**/trace_processed/**
+benchmark/**/lt/bash-test/*.json
+benchmark/**/.unison.results.*/**
+benchmark/**/golden_diff/**
+
+# Benchmark notes and profile dumps (not build artifacts)
+benchmark/**/*.txt
+
+# Benchmark experiment json (keep kernel tuning configs)
+benchmark/**/*.json
+!benchmark/kernels/
+
+# Ad-hoc bench outputs at repo root / in tests
+hicache_*.json
+loogle_*.json
+test/srt/bench_*_result.json
+test/srt/bench_*_smoke.json
+
+# Core dumps / nested dataset clones (LooGLE: clone from HuggingFace locally)
+core.*
+benchmark/hicache/LooGLE/
+
+# Common data / artifact formats
+*.csv
+*.tsv
+*.jsonl
+*.pkl
+*.parquet
+*.npy
+*.bak
+tmp*.txt

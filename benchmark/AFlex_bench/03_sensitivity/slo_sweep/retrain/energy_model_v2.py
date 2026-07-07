@@ -36,14 +36,19 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 def load_pipeline_data(path: str) -> pd.DataFrame:
-    """Load pipeline profiling data."""
+    """Load pipeline profiling data (supports both tp and tp_a/tp_f formats)."""
     df = pd.read_csv(path, sep="\t")
     df.columns = df.columns.str.strip()
-    required = ["tp", "M", "f_A", "f_F", "input_len",
+    # Support both legacy (tp) and new (tp_a/tp_f) column formats
+    if "tp_a" in df.columns and "tp_f" in df.columns and "tp" not in df.columns:
+        pass  # new format, keep tp_a/tp_f as-is
+    elif "tp" in df.columns and "tp_a" not in df.columns:
+        df["tp_a"] = df["tp"]
+        df["tp_f"] = df["tp"]
+    required = ["tp_a", "tp_f", "M", "f_A", "f_F", "input_len",
                 "batch_size", "iter_lat_us", "DA_energy_mj", "DF_energy_mj"]
     for col in required:
         assert col in df.columns, f"Missing column: {col}. Have: {df.columns.tolist()}"
-    # Drop any invalid rows
     df = df.dropna(subset=["iter_lat_us", "DA_energy_mj", "DF_energy_mj"])
     df = df[df["iter_lat_us"] > 0]
     return df
@@ -257,7 +262,7 @@ def main():
         if not decode_path.is_absolute():
             decode_path = data_dir / decode_path
     else:
-        decode_path = data_dir / "decode_pipeline_v1.txt"
+        decode_path = data_dir / "decode_pipeline_merged.txt"
     decode_path = str(decode_path)
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -281,7 +286,8 @@ def main():
     print(f"    IL range: {df['input_len'].min()}-{df['input_len'].max()}")
 
     # Feature columns for coupled model (no output_len — decode is OL-independent)
-    feature_cols = ["M", "f_A", "f_F", "input_len", "batch_size"]
+    # Include tp_a/tp_f to distinguish different TP configurations
+    feature_cols = ["tp_a", "tp_f", "M", "f_A", "f_F", "input_len", "batch_size"]
 
     # 3 target models
     targets = [

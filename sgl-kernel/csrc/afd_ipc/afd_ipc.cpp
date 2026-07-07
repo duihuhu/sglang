@@ -75,6 +75,8 @@ AfdIpcComm::AfdIpcComm(bool is_ffn, int local_device, int peer_device,
         if (err != cudaSuccess && err != cudaErrorPeerAccessAlreadyEnabled) {
             // Non-fatal: P2P copy will fall back to staged transfer
         }
+        // Clear the error state so subsequent CUDA calls don't see it
+        cudaGetLastError();
     }
 
     setup_shm();

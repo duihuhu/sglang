@@ -365,6 +365,7 @@ class ServerArgs:
     # Runtime options
     device: Optional[str] = None
     tp_size: int = 1
+    inplace_reshard_max_tp: Optional[int] = None
     pp_size: int = 1
     pp_max_micro_batch_size: Optional[int] = None
     pp_async_batch_depth: int = 0
@@ -656,12 +657,17 @@ class ServerArgs:
     afd_dvfs_calibration_ema: float = 0.2  # EMA weight for calibration factor update
     afd_dvfs_idle_lock: bool = False  # Lock GPU to min freq when scheduler is idle (no pending batch)
     afd_dvfs_idle_lock_freq: int = 210  # Frequency (MHz) to lock during idle periods
+    afd_dvfs_decode_compositional: bool = False  # Use V1 compositional model + comm for decode (instead of V2 coupled pipeline)
+    afd_dvfs_comm_us: float = 2900.0  # Initial AF IPC overhead per layer (us), adaptively learned via online calibration
+    afd_dvfs_headroom_aggressive: float = 0.0  # If >0, when predicted decode latency < this fraction of TPOT SLO, aggressively lower attn freq to save DA idle energy (SLO-safe). E.g. 0.6 = engage when latency below 60% of SLO.
 
     # Unified single-knob DVFS (PD / Native baselines, no AF disaggregation)
     dvfs_enabled: bool = False
     dvfs_energy_model_dir: Optional[str] = None
     dvfs_ttft_slo_ms: float = 5000.0
     dvfs_tpot_slo_us: float = 50000.0
+    dvfs_objective: str = "energy"  # "energy" (min-energy) or "freq" (min-freq under SLO)
+    dvfs_policy: str = "unified"  # "unified" (DynamoLLM) or "biscale" (BiScale Tier 2)
 
     # Tier 1: Joint ILP resource planning + dynamic monitoring
     enable_tier1_pa: bool = False
@@ -3345,16 +3351,28 @@ class ServerArgs:
         Validate IB devices before passing to mooncake.
 
         Args:
-            device_str: Comma-separated IB device names (e.g., "mlx5_0,mlx5_1")
+            device_str: Comma-separated IB device names (e.g., "mlx5_0,mlx5_1"),
+                       a JSON mapping (e.g., '{"0":"mlx5_0","2":"mlx5_1"}'),
+                       or a path to a .json file.
 
         Returns:
-            Normalized comma-separated string of validated device names, or None if input is None.
+            Normalized string of validated device names, or None if input is None.
         """
         if device_str is None:
             logger.warning(
                 "No IB devices specified for Mooncake backend, falling back to auto discovery."
             )
             return None
+
+        stripped = device_str.strip()
+
+        # Pass through JSON file paths — validated at runtime by get_ib_devices_for_gpu
+        if stripped.endswith(".json"):
+            return stripped
+
+        # Pass through JSON dict format — validated at runtime by get_ib_devices_for_gpu
+        if stripped.startswith("{"):
+            return stripped
 
         # Strip whitespace from device names
         devices = [d.strip() for d in device_str.split(",") if d.strip()]
@@ -4122,6 +4140,15 @@ class ServerArgs:
             type=int,
             default=ServerArgs.tp_size,
             help="The tensor parallelism size.",
+        )
+        parser.add_argument(
+            "--inplace-reshard-max-tp",
+            type=int,
+            default=ServerArgs.inplace_reshard_max_tp,
+            help=(
+                "Experimental: pre-launch this many single-node scheduler workers for "
+                "true in-place TP reshard while --tp-size remains the initially active TP."
+            ),
         )
         parser.add_argument(
             "--attention-context-parallel-size",
@@ -5640,6 +5667,22 @@ class ServerArgs:
             help="TPOT SLO (us) for unified decode DVFS. Default: 50000.",
         )
         parser.add_argument(
+            "--dvfs-objective",
+            type=str,
+            choices=["energy", "freq"],
+            default=ServerArgs.dvfs_objective,
+            help="Unified DVFS objective: 'energy' = min-energy under SLO (default); "
+            "'freq' = min-frequency under SLO (DynamoLLM classic).",
+        )
+        parser.add_argument(
+            "--dvfs-policy",
+            type=str,
+            choices=["unified", "biscale"],
+            default=ServerArgs.dvfs_policy,
+            help="Unified DVFS policy: 'unified' = single-step search (DynamoLLM); "
+            "'biscale' = prefill MPC + decode ascending min-freq (BiScale Tier 2).",
+        )
+        parser.add_argument(
             "--afd-dvfs-feedback",
             action="store_true",
             default=ServerArgs.afd_dvfs_feedback,
@@ -5684,6 +5727,31 @@ class ServerArgs:
             type=int,
             default=ServerArgs.afd_dvfs_idle_lock_freq,
             help="SM clock frequency (MHz) to lock during idle periods. Default: 210.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-decode-compositional",
+            action="store_true",
+            default=ServerArgs.afd_dvfs_decode_compositional,
+            help="Use V1 compositional model (layer A+F+comm) for decode DVFS "
+            "instead of V2 coupled pipeline model. Better for multi-TP configs.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-comm-us",
+            type=float,
+            default=ServerArgs.afd_dvfs_comm_us,
+            help="Initial AF IPC overhead per layer in microseconds. "
+            "Adaptively learned via online calibration. Default: 5000.0.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-headroom-aggressive",
+            type=float,
+            default=ServerArgs.afd_dvfs_headroom_aggressive,
+            help="If >0, when predicted decode iteration latency falls below this "
+            "fraction of the TPOT SLO, aggressively lower the attention (DA) "
+            "frequency to save idle energy between iterations. Only applies a "
+            "lower freq if the predicted latency still meets the SLO, so it is "
+            "SLO-safe. Useful for loose-SLO workloads (e.g. conv). Default: 0.0 "
+            "(disabled).",
         )
 
         parser.add_argument(
@@ -6396,9 +6464,16 @@ class ServerArgs:
 
     def check_server_args(self):
         # Check parallel size constraints
+        launch_tp_size = self.inplace_reshard_max_tp or self.tp_size
         assert (
-            self.tp_size * self.pp_size
-        ) % self.nnodes == 0, "tp_size must be divisible by number of nodes"
+            launch_tp_size * self.pp_size
+        ) % self.nnodes == 0, "launch TP size must be divisible by number of nodes"
+        if self.inplace_reshard_max_tp is not None:
+            assert self.nnodes == 1, "in-place TP reshard is currently single-node only"
+            assert self.pp_size == 1, "in-place TP reshard currently supports pp_size=1 only"
+            assert self.dp_size == 1, "in-place TP reshard currently supports dp_size=1 only"
+            assert self.inplace_reshard_max_tp >= self.tp_size
+            assert self.inplace_reshard_max_tp % self.tp_size == 0
 
         if self.pp_size > 1:
             assert (

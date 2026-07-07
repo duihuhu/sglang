@@ -122,6 +122,76 @@ class CppIpcTensorCommunicator:
         except Exception as e:
             logger.error("[CppIPC] handshake failed: %s", e)
 
+    def cleanup(self):
+        """Cleanup for reconnect: reset state. Only FFN (server) side removes socket."""
+        import os
+        self._ready.clear()
+        # Only remove socket if we are the server (FFN) side
+        if self.is_ffn:
+            suffix = f"_{self._rank}" if self.mb_id is None or self.mb_id < 0 else f"_{self._rank}_mb{self.mb_id}"
+            sock_path = f"/tmp/afd_ipc_cpp{suffix}.sock"
+            try:
+                os.unlink(sock_path)
+            except FileNotFoundError:
+                pass
+            logger.info("[CppIPC] cleanup done (rank=%d, socket=%s removed)", self._rank, sock_path)
+        else:
+            logger.info("[CppIPC] cleanup done (rank=%d, client side - no socket removal)", self._rank)
+
+    def reconnect(self):
+        """Destroy current C++ comm and re-create for new peer handshake.
+
+        This allows an FFN-side (PF) communicator to accept a new connection
+        from a restarted Attn-side (PA) process during graceful reshard.
+        Also works for ATTN-side (PA) to reconnect to a new FFN.
+        """
+        logger.info("[CppIPC] reconnect: re-creating comm (rank=%d)", self._rank)
+        self._ready.clear()
+
+        # Clear any pending CUDA errors from stale peer memory access
+        try:
+            torch.cuda.synchronize(self._local_device)
+        except Exception:
+            pass
+        try:
+            # cudaGetLastError clears the sticky error state
+            import ctypes
+            libcudart = ctypes.CDLL("libcudart.so")
+            libcudart.cudaGetLastError()
+        except Exception:
+            pass
+
+        # Force cleanup of old C++ comm object
+        import gc
+        old_comm = self._comm
+        self._comm = None
+        del old_comm
+        gc.collect()
+        logger.info("[CppIPC] reconnect: old comm deleted")
+
+        # Remove stale socket
+        self.cleanup()
+
+        # Re-create C++ communicator with same parameters
+        sync_mode = os.environ.get("AFD_IPC_SYNC_MODE", "ipc_event")
+        logger.info("[CppIPC] reconnect: creating new AfdIpcComm...")
+        self._comm = self._cpp_mod.AfdIpcComm(
+            self.is_ffn,
+            self._local_device,
+            self._peer_device,
+            self._rank,
+            self.mb_id if self.mb_id is not None else -1,
+            sync_mode,
+        )
+        logger.info("[CppIPC] reconnect: AfdIpcComm created, starting handshake thread...")
+        # Re-handshake in background
+        self._exchange_thread = threading.Thread(
+            target=self._handshake_background,
+            daemon=True,
+        )
+        self._exchange_thread.start()
+        logger.info("[CppIPC] reconnect: new comm created, waiting for peer...")
+
     def _wait_ready(self):
         """Block until handshake completes."""
         if not self._ready.is_set():
@@ -180,6 +250,19 @@ class CppIpcTensorCommunicator:
         """
         self._wait_ready()
         return self._comm.recv_tensor_gpu()
+
+    def get_fused_pipeline(self):
+        """Get or create FusedPipeline for this communicator.
+
+        FusedPipeline provides send_recv() in a single C++ call,
+        eliminating one Python→C++ boundary per layer.
+        """
+        if not hasattr(self, '_fused_pipeline') or self._fused_pipeline is None:
+            self._wait_ready()
+            use_comm_stream = os.environ.get("AFD_FUSED_COMM_STREAM", "0") == "1"
+            self._fused_pipeline = self._cpp_mod.FusedPipeline(
+                self._comm, use_comm_stream)
+        return self._fused_pipeline
 
     def reset_cache(self):
         """Reset metadata cache (call when tensor shape changes)."""

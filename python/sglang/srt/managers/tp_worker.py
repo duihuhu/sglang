@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
-from sglang.srt.distributed import get_pp_group, get_world_group
+from sglang.srt.distributed import get_pp_group, get_tp_group, get_world_group
 from sglang.srt.managers.io_struct import (
     DestroyWeightsUpdateGroupReqInput,
     GetWeightsByNameReqInput,
@@ -286,8 +286,25 @@ class TpModelWorker(BaseTpWorker):
         self.device = self.model_runner.device
 
         # Init nccl groups
+        self.tp_group = get_tp_group()
         self.pp_group = get_pp_group()
         self.world_group = get_world_group()
+
+        self.is_inplace_standby_rank = bool(
+            getattr(self.model_runner, "is_inplace_standby_rank", False)
+        )
+        if self.is_inplace_standby_rank:
+            self.max_total_num_tokens = 1
+            self.max_prefill_tokens = 1
+            self.max_running_requests = 1
+            self.max_queued_requests = server_args.max_queued_requests
+            self.max_req_len = 1
+            self.max_req_input_len = 1
+            self.random_seed = server_args.random_seed
+            self.enable_overlap = False
+            self.enable_spec = False
+            self.hicache_layer_transfer_counter = None
+            return
 
         # Profile number of tokens
         self.max_total_num_tokens = self.model_runner.max_total_num_tokens
@@ -310,9 +327,9 @@ class TpModelWorker(BaseTpWorker):
         # Sync random seed across TP workers
         self.random_seed = broadcast_pyobj(
             [server_args.random_seed],
-            self.tp_size * self.pp_rank + tp_rank,
-            self.world_group.cpu_group,
-            src=self.world_group.ranks[0],
+            self.tp_group.rank,
+            self.tp_group.cpu_group,
+            src=self.tp_group.ranks[0],
         )[0]
         set_random_seed(self.random_seed)
 
@@ -407,7 +424,35 @@ class TpModelWorker(BaseTpWorker):
         if self.hicache_layer_transfer_counter is not None:
             self.hicache_layer_transfer_counter.set_consumer(consumer_index)
 
+    def finalize_inplace_reshard_activation(self):
+        """Recompute worker limits after a standby rank is activated into TP."""
+        self.is_inplace_standby_rank = False
+        self.max_total_num_tokens = self.model_runner.max_total_num_tokens
+        self.max_prefill_tokens = self.server_args.max_prefill_tokens
+        self.max_running_requests = self.model_runner.max_running_requests
+        self.max_req_len = min(
+            self.model_config.context_len - 1,
+            self.model_runner.max_token_pool_size - 1,
+        )
+        self.max_req_input_len = self.max_req_len - 5
+        self.enable_overlap = not self.server_args.disable_overlap_schedule
+
     def get_worker_info(self):
+        if getattr(self, "is_inplace_standby_rank", False):
+            return (
+                self.max_total_num_tokens,
+                self.max_prefill_tokens,
+                self.max_running_requests,
+                self.max_queued_requests,
+                self.max_req_len,
+                self.max_req_input_len,
+                self.random_seed,
+                self.device,
+                self.model_runner.forward_stream,
+                1,
+                1,
+                1,
+            )
         return (
             self.max_total_num_tokens,
             self.max_prefill_tokens,

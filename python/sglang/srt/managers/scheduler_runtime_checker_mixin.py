@@ -248,6 +248,8 @@ class SchedulerRuntimeCheckerMixin:
         ), f"Mem Leak Detected! {total_tokens=} vs {self.max_total_num_tokens=}"
 
     def _check_req_pool(self: Scheduler):
+        if self._should_skip_memory_check():
+            return
         if self.disaggregation_mode == DisaggregationMode.DECODE:
             req_total_size = (
                 self.req_to_token_pool.size + self.req_to_token_pool.pre_alloc_size
@@ -271,6 +273,17 @@ class SchedulerRuntimeCheckerMixin:
             )
 
     def check_memory(self: Scheduler):
+        if self._should_skip_memory_check():
+            return
+        # Follower schedulers mirror rank0 batching without local radix nodes;
+        # KV accounting is owned by rank0 until follower radix sync lands.
+        if (
+            self.server_args.inplace_reshard_max_tp is not None
+            and self.tp_size > 1
+            and self.tp_rank != 0
+            and not getattr(self, "is_inplace_standby_rank", False)
+        ):
+            return
         if self.is_hybrid_swa:
             memory_leak, token_msg = self._check_hybrid_memory()
         elif self.is_hybrid_ssm and self.tree_cache.supports_mamba():
@@ -358,6 +371,8 @@ class SchedulerRuntimeCheckerMixin:
             self.tree_cache.sanity_check()
 
     def self_check_during_idle(self: Scheduler):
+        if self._should_skip_memory_check():
+            return
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if len(self.disagg_prefill_inflight_queue) > 0:
                 return

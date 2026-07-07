@@ -13,6 +13,7 @@
 
 #include "afd_ipc.h"
 #include "afd_pipeline_driver.h"
+#include "afd_fused_pipeline.h"
 
 namespace py = pybind11;
 
@@ -106,8 +107,13 @@ public:
             cached_send_meta_ = meta;
             cached_send_bytes_ = data_bytes;
             meta_cached_send_ = true;
-            // Also reset recv cache since shape changed
-            meta_cached_recv_ = false;
+            // NOTE: do NOT reset the recv cache here. The send/recv metadata
+            // caches are independent (different directions/tensors); the recv
+            // cache is maintained solely by recv_tensor() and consumed by
+            // recv_tensor_gpu(). Resetting it on send breaks the M=1 gpu-only
+            // path where the per-layer order is recv -> send (FFN side), which
+            // would leave recv_tensor_gpu() without cached shape metadata.
+            // Shape changes (e.g. prefill->decode) are handled via reset_cache().
         } else {
             // Hot path: same shape, skip metadata encoding
             comm_->send_cached(x_cont.data_ptr(), data_bytes, stream);
@@ -133,7 +139,14 @@ public:
 
         TensorMeta meta;
         size_t data_bytes;
-        void* data_ptr = comm_->recv(&meta, &data_bytes, stream);
+        void* data_ptr;
+        {
+            // Release GIL during blocking busy-poll to allow other threads
+            // (e.g. send_tensor from main thread) to proceed concurrently.
+            py::gil_scoped_release release;
+            data_ptr = comm_->recv(&meta, &data_bytes, stream);
+        }
+        // GIL re-acquired here for tensor creation
 
         // Decode metadata (from SHM, already on CPU — no GPU sync needed)
         int ndim = static_cast<int>(meta.data[0]);
@@ -259,6 +272,7 @@ PYBIND11_MODULE(afd_ipc_cpp, m) {
              py::arg("mb_id") = -1,
              py::arg("sync_mode") = "ipc_event")
         .def("handshake", &PyAfdIpcComm::handshake,
+             py::call_guard<py::gil_scoped_release>(),
              "Exchange IPC handles with peer process")
         .def("is_ready", &PyAfdIpcComm::is_ready,
              "Check if handshake is complete")
@@ -288,8 +302,6 @@ PYBIND11_MODULE(afd_ipc_cpp, m) {
     // Pipeline Driver: batch send/recv for M micro-batches
     py::class_<PipelineDriver>(m, "PipelineDriver")
         .def(py::init([](PyAfdIpcComm& comm_wrapper, int num_mb, bool use_gpu_signal) {
-            // Access the raw AfdIpcComm* from the wrapper
-            // We need to expose it — add a getter
             return std::make_unique<PipelineDriver>(
                 comm_wrapper.raw_comm(), num_mb, use_gpu_signal);
         }), py::arg("comm"), py::arg("num_mb"), py::arg("use_gpu_signal") = true)
@@ -306,6 +318,25 @@ PYBIND11_MODULE(afd_ipc_cpp, m) {
             return result;
         }, py::arg("send_ptrs"), py::arg("send_sizes"), py::arg("stream"),
            "Batch send M tensors + recv M tensors in one C++ call");
+
+    // FusedPipeline: single-call send+recv with minimal Python overhead
+    py::class_<FusedPipeline>(m, "FusedPipeline")
+        .def(py::init([](PyAfdIpcComm& comm_wrapper, bool use_comm_stream) {
+            return std::make_unique<FusedPipeline>(
+                comm_wrapper.raw_comm(), use_comm_stream);
+        }), py::arg("comm"), py::arg("use_comm_stream") = true)
+        .def("send_recv", &FusedPipeline::send_recv,
+             py::arg("send_tensor"),
+             "Fused send + recv in one C++ call (one Python→C++ transition)")
+        .def("send_only", &FusedPipeline::send_only,
+             py::arg("send_tensor"),
+             "Send tensor to peer")
+        .def("recv_only", &FusedPipeline::recv_only,
+             "Receive tensor from peer")
+        .def("reset_cache", &FusedPipeline::reset_cache,
+             "Reset metadata cache (call on shape change)")
+        .def("sync_streams", &FusedPipeline::sync_streams,
+             "Synchronize comm stream with compute stream");
 }
 
 }  // namespace afd_ipc

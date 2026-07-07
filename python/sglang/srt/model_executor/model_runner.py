@@ -26,7 +26,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -157,6 +157,7 @@ from sglang.srt.server_args import (
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import (
     MultiprocessingSerializer,
+    broadcast_pyobj,
     cpu_has_amx_support,
     dynamic_import,
     empty_context,
@@ -273,6 +274,77 @@ class RankZeroFilter(logging.Filter):
         if record.levelno == logging.INFO:
             return self.is_rank_zero
         return True
+
+
+# ─── Receiver worker for live TP reshard (module-level for multiprocessing) ───
+
+def _receiver_worker(rank, world_size, old_tp, nccl_port, plan,
+                     evt_go, result_queue):
+    """Receiver process: runs on a new GPU, receives weight shards via NCCL.
+
+    Spawned by live_reshard_tp() on target GPUs.
+    Uses FileStore-based NCCL ProcessGroup to receive weights.
+    Holds weights in GPU memory so nvidia-smi shows real usage.
+    """
+    import time as _time
+    import torch
+    import torch.distributed as dist
+
+    gpu_id = rank
+    torch.cuda.set_device(gpu_id)
+
+    # Use same FileStore as sender
+    store_path = f"/tmp/sglang_reshard_store_{nccl_port}"
+    store = dist.FileStore(store_path, world_size)
+    pg = dist.ProcessGroupNCCL(store, rank, world_size)
+
+    factor = world_size // old_tp
+    source_rank = rank // factor  # always 0 for simple expansion from TP1
+
+    # Wait for GO
+    evt_go.wait()
+
+    # Receive all weight tensors
+    t0 = _time.time()
+    total_bytes = 0
+    received_weights = {}
+
+    for name, shape, dtype, split_dim in plan:
+        if split_dim >= 0:
+            recv_shape = list(shape)
+            recv_shape[split_dim] = recv_shape[split_dim] // factor
+        else:
+            recv_shape = list(shape)
+
+        buf = torch.empty(recv_shape, dtype=dtype, device=f"cuda:{gpu_id}")
+        work = pg.recv([buf], source_rank, 0)
+        work.wait()
+        received_weights[name] = buf
+        total_bytes += buf.numel() * buf.element_size()
+
+    torch.cuda.synchronize()
+    elapsed_ms = (_time.time() - t0) * 1000
+
+    result_queue.put({
+        "rank": rank, "gpu": gpu_id,
+        "elapsed_ms": elapsed_ms,
+        "bytes": total_bytes,
+        "num_tensors": len(received_weights),
+    })
+
+    del pg
+
+    # Hold weights in memory (so nvidia-smi shows real GPU usage)
+    import signal, sys
+    def _exit(signum, frame):
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, _exit)
+
+    try:
+        while True:
+            _time.sleep(60)
+    except (KeyboardInterrupt, SystemExit):
+        pass
 
 
 @dataclass
@@ -400,6 +472,27 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # Get available memory before model loading
         pre_model_load_memory = self.init_torch_distributed()
 
+        # Shadow mode: pause after distributed init, wait for signal to proceed.
+        # This allows the reshard orchestrator to pre-warm NCCL/Mooncake while
+        # the old process is still running, then signal us to continue after
+        # the old process is killed and GPU memory is freed.
+        shadow_signal = os.environ.get("SGLANG_RESHARD_SHADOW_SIGNAL")
+        if shadow_signal:
+            logger.info(
+                "Shadow mode: distributed init complete, waiting for signal at %s",
+                shadow_signal,
+            )
+            while not os.path.exists(shadow_signal):
+                time.sleep(0.05)
+            logger.info("Shadow mode: signal received, continuing startup...")
+            # Re-check available memory after old process released GPU
+            pre_model_load_memory = get_available_gpu_memory(
+                self.device,
+                self.gpu_id,
+                distributed=self.tp_group.world_size > 1,
+                cpu_group=self.tp_group.cpu_group,
+            )
+
         # Init forward stream for overlap schedule
         self.forward_stream = torch.get_device_module(self.device).Stream()
 
@@ -418,9 +511,34 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:
             deep_gemm_wrapper.update_deep_gemm_config(gpu_id, server_args)
 
-        # Initialize the model runner
-        self.initialize(pre_model_load_memory)
-        self.check_quantized_moe_compatibility()
+        self.is_inplace_standby_rank = (
+            self.server_args.inplace_reshard_max_tp is not None
+            and self.tp_rank >= self.server_args.tp_size
+            and not self.is_draft_worker
+        )
+        if self.is_inplace_standby_rank:
+            logger.info(
+                "In-place reshard standby rank initialized: rank=%d active_tp=%d max_tp=%d",
+                self.tp_rank,
+                self.server_args.tp_size,
+                self.server_args.inplace_reshard_max_tp,
+            )
+            # Match cold-start TP: record pre-weight baseline for KV re-profile after
+            # activation (standby skips initialize() where active ranks set this).
+            self._pre_model_load_memory_gb = pre_model_load_memory
+            self.model = None
+            self.max_total_num_tokens = 1
+            self.max_running_requests = 1
+            self.is_hybrid_swa = False
+            self.forward_stream = torch.get_device_module(self.device).Stream()
+            self.support_pp = False
+            self._model_update_group = {}
+            self._weights_send_group = {}
+            return
+        else:
+            # Initialize the model runner
+            self.initialize(pre_model_load_memory)
+            self.check_quantized_moe_compatibility()
 
         if self.is_multimodal:
             sanity_check_mm_pad_shift_value(self.model_config.vocab_size)
@@ -455,6 +573,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
     def initialize(self, pre_model_load_memory: float):
         server_args = self.server_args
+        self._pre_model_load_memory_gb = pre_model_load_memory
 
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=self.server_args.enable_memory_saver
@@ -872,15 +991,19 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     )
 
             # Only initialize the distributed environment on the target model worker.
+            launch_tp_size = self.server_args.inplace_reshard_max_tp or self.tp_size
             init_distributed_environment(
                 backend=backend,
-                world_size=self.tp_size * self.pp_size,
-                rank=self.tp_size * self.pp_rank + self.tp_rank,
+                world_size=launch_tp_size * self.pp_size,
+                rank=launch_tp_size * self.pp_rank + self.tp_rank,
                 local_rank=self.gpu_id,
                 distributed_init_method=dist_init_method,
                 timeout=self.server_args.dist_timeout,
                 moe_a2a_backend=self.server_args.moe_a2a_backend,
             )
+            if self.server_args.inplace_reshard_max_tp is not None:
+                os.environ["SGLANG_INPLACE_RESHARD_ACTIVE_TP"] = str(self.tp_size)
+                os.environ["SGLANG_INPLACE_RESHARD_MAX_TP"] = str(self.server_args.inplace_reshard_max_tp)
             initialize_model_parallel(
                 tensor_model_parallel_size=self.tp_size,
                 attention_data_parallel_size=self.dp_size,
@@ -919,8 +1042,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         pre_model_load_memory = get_available_gpu_memory(
             self.device,
             self.gpu_id,
-            distributed=get_world_group().world_size > 1,
-            cpu_group=get_world_group().cpu_group,
+            distributed=get_tp_group().world_size > 1,
+            cpu_group=get_tp_group().cpu_group,
         )
         self.tp_group = get_tp_group()
         self.pp_group = get_pp_group()
@@ -949,7 +1072,18 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         1) PD disaggregation uses mooncake for KV transfer (prefill/decode)
         2) HiCache uses mooncake storage backend
         3) Encoder disaggregation uses mooncake
+
+        AFD FFN modules do not participate in KV transfer, so they can skip
+        Mooncake initialization entirely (saves ~6.5s during reshard startup).
         """
+        from sglang.srt.layers.afd_type import AFDPerspective
+
+        if (
+            self.server_args.afd_perspective
+            == AFDPerspective.AFD_PERSPECTIVE_FFN
+        ):
+            return
+
         use_mooncake_te = (
             (
                 self.server_args.disaggregation_mode != "null"
@@ -1072,6 +1206,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             GPU_MEMORY_TYPE_WEIGHTS,
             enable_cpu_backup=enable_cpu_backup,
         ):
+            # IPC fast path: skip disk IO when reshard handles are available
+            use_ipc_fast_path = self._should_use_ipc_fast_path()
+            if use_ipc_fast_path:
+                original_load_format = self.load_config.load_format
+                self.load_config.load_format = LoadFormat.DUMMY
+                logger.info("Reshard IPC fast path: using DUMMY loader (skip disk IO)")
+
             self.loader = get_model_loader(
                 load_config=self.load_config,
                 model_config=self.model_config,
@@ -1080,6 +1221,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 model_config=self.model_config,
                 device_config=DeviceConfig(self.device, self.gpu_id),
             )
+
+            if use_ipc_fast_path:
+                self.load_config.load_format = original_load_format
+
+            # Reshard IPC weight override
+            self._try_reshard_ipc_load()
             if hasattr(self.loader, "remote_instance_transfer_engine_weight_info"):
                 self.remote_instance_transfer_engine_weight_info = (
                     self.loader.remote_instance_transfer_engine_weight_info
@@ -1189,7 +1336,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger,
         )
 
-        if self.server_args.elastic_ep_backend == "mooncake":
+        if getattr(self, "_skip_load_model_barrier_once", False):
+            self._skip_load_model_barrier_once = False
+        elif self.server_args.elastic_ep_backend == "mooncake":
             # Mooncake does not support `monitored_barrier`
             dist.barrier(group=get_tp_group().cpu_group)
         else:
@@ -1592,6 +1741,2027 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         else:
             raise NotImplementedError(f"Unknown load_format={load_format}")
         return True, "Success"
+
+    # ─── In-place TP Reshard ───
+
+    @torch.no_grad()
+    def reshard_tp_inplace(
+        self,
+        new_tp: int,
+        new_rank: int,
+        process_group=None,
+    ) -> Tuple[bool, str, float]:
+        """Reshard model weights in-place for TP expansion.
+
+        Instead of reloading from disk (~25s), slices existing GPU tensors
+        and scatters to new ranks via NCCL (~0.2s for 32GB over NVLink).
+
+        Called on OLD ranks that already have weights loaded.
+        New ranks call reshard_tp_receive() instead.
+
+        Normal serving is unaffected — this method is only invoked by an
+        explicit reshard command. Zero overhead when not resharding.
+
+        Returns: (success, message, elapsed_seconds)
+        """
+        import time as _time
+        from sglang.srt.layers.reshard_weights import (
+            get_tp_split_rules,
+            reshard_shard_for_rank,
+        )
+
+        old_tp = self.tp_size
+        if new_tp <= old_tp:
+            return False, f"new_tp={new_tp} must be > old_tp={old_tp}", 0.0
+        if new_tp % old_tp != 0:
+            return False, f"new_tp must be divisible by old_tp", 0.0
+
+        factor = new_tp // old_tp
+        local_idx = new_rank % factor
+
+        logger.info(
+            "reshard_tp_inplace: TP%d→TP%d, rank %d→%d, factor=%d",
+            old_tp, new_tp, self.tp_rank, new_rank, factor,
+        )
+
+        rules = get_tp_split_rules(self.model)
+        t0 = _time.time()
+        total_sent = 0
+        total_kept = 0
+
+        for name, param in self.model.named_parameters():
+            if name in rules:
+                split_type, split_dim = rules[name]
+                shard_size = param.data.shape[split_dim]
+                new_shard_size = shard_size // factor
+
+                # Send sub-shards to peer new ranks
+                for i in range(factor):
+                    target_new_rank = self.tp_rank * factor + i
+                    if target_new_rank == new_rank:
+                        continue
+                    start = i * new_shard_size
+                    shard = param.data.narrow(
+                        split_dim, start, new_shard_size
+                    ).contiguous()
+                    if process_group is not None:
+                        import torch.distributed as dist
+                        dist.send(shard, dst=target_new_rank, group=process_group)
+                    total_sent += shard.numel() * shard.element_size()
+
+                # Keep own sub-shard
+                keep_start = local_idx * new_shard_size
+                param.data = param.data.narrow(
+                    split_dim, keep_start, new_shard_size
+                ).contiguous()
+                total_kept += param.data.numel() * param.data.element_size()
+
+        torch.cuda.synchronize()
+        elapsed = _time.time() - t0
+
+        self.tp_size = new_tp
+        self.tp_rank = new_rank
+
+        bw = total_sent / elapsed / 1e9 if elapsed > 0 else 0
+        msg = (
+            f"reshard done in {elapsed*1000:.1f}ms: "
+            f"kept {total_kept/1e9:.2f}GB, sent {total_sent/1e9:.2f}GB "
+            f"({bw:.1f} GB/s)"
+        )
+        logger.info(msg)
+        return True, msg, elapsed
+
+    @torch.no_grad()
+    def reshard_tp_receive(
+        self,
+        new_tp: int,
+        new_rank: int,
+        source_old_rank: int,
+        process_group=None,
+    ) -> Tuple[bool, str, float]:
+        """Receive weight shards from an old rank during TP expansion.
+
+        Called on NEW ranks that don't have weights yet.
+        The old rank calls reshard_tp_inplace() simultaneously.
+
+        Returns: (success, message, elapsed_seconds)
+        """
+        import time as _time
+        from sglang.srt.layers.reshard_weights import (
+            get_tp_split_rules,
+            reshard_shard_for_rank,
+        )
+
+        old_tp = self.tp_size
+        factor = new_tp // old_tp
+
+        logger.info(
+            "reshard_tp_receive: TP%d→TP%d, new_rank=%d from old_rank=%d",
+            old_tp, new_tp, new_rank, source_old_rank,
+        )
+
+        rules = get_tp_split_rules(self.model)
+        t0 = _time.time()
+        total_recv = 0
+
+        for name, param in self.model.named_parameters():
+            if name in rules:
+                split_type, split_dim = rules[name]
+                shard_size = param.data.shape[split_dim]
+                new_shard_size = shard_size // factor
+
+                new_shape = list(param.data.shape)
+                new_shape[split_dim] = new_shard_size
+                recv_buf = torch.empty(
+                    new_shape, dtype=param.dtype, device=param.device
+                )
+
+                if process_group is not None:
+                    import torch.distributed as dist
+                    dist.recv(recv_buf, src=source_old_rank, group=process_group)
+
+                param.data = recv_buf
+                total_recv += recv_buf.numel() * recv_buf.element_size()
+
+        torch.cuda.synchronize()
+        elapsed = _time.time() - t0
+
+        self.tp_size = new_tp
+        self.tp_rank = new_rank
+
+        bw = total_recv / elapsed / 1e9 if elapsed > 0 else 0
+        msg = (
+            f"reshard_tp_receive done in {elapsed*1000:.1f}ms: "
+            f"recv {total_recv/1e9:.2f}GB ({bw:.1f} GB/s)"
+        )
+        logger.info(msg)
+        return True, msg, elapsed
+
+
+    def _inplace_reshard_current_active_tp(self) -> int:
+        active = int(os.environ.get("SGLANG_INPLACE_RESHARD_ACTIVE_TP", "0") or "0")
+        if active > 0:
+            return active
+        return int(self.server_args.tp_size)
+
+    def _inplace_reshard_world_barrier(self) -> None:
+        dist.barrier(group=get_world_group().cpu_group)
+
+    def _gather_inplace_reshard_ipc_handles(self, old_tp: int) -> dict:
+        """Collect per-parameter CUDA IPC handles from each old active TP rank."""
+        tp_cpu = get_tp_group().cpu_group
+        handles_by_src = {}
+        skip_xfer = os.environ.get("SGLANG_RESHARD_SKIP_XFER", "0") == "1"
+        for src in range(old_tp):
+            if self.tp_rank == src and not skip_xfer:
+                local = {
+                    name: MultiprocessingSerializer.serialize(param.data.detach())
+                    for name, param in self.model.named_parameters()
+                }
+                payload = [local]
+            else:
+                payload = None
+            received = broadcast_pyobj(
+                payload, get_tp_group().rank, tp_cpu, src=src
+            )
+            if received is not None:
+                handles_by_src[src] = received[0]
+        return handles_by_src
+
+    def _release_inplace_reshard_attention_state(self) -> None:
+        """Drop attention workspaces sized for the pre-reshard TP degree."""
+        ab = getattr(self, "attn_backend", None)
+        if ab is not None:
+            del self.attn_backend
+            self.attn_backend = None
+        gr = getattr(self, "graph_runner", None)
+        if gr is not None:
+            del self.graph_runner
+            self.graph_runner = None
+        pgr = getattr(self, "piecewise_cuda_graph_runner", None)
+        if pgr is not None:
+            del self.piecewise_cuda_graph_runner
+            self.piecewise_cuda_graph_runner = None
+
+    def _free_inplace_reshard_kv_pools(self) -> None:
+        """Drop KV / req pools before in-place weight transfer to lower peak memory."""
+        self._release_inplace_reshard_attention_state()
+        import gc as _gc
+
+        stale = (
+            self.token_to_kv_pool,
+            self.token_to_kv_pool_allocator,
+            self.req_to_token_pool,
+        )
+        self.token_to_kv_pool = None
+        self.token_to_kv_pool_allocator = None
+        self.req_to_token_pool = None
+        self.max_total_num_tokens = 0
+        self.memory_pool_config = None
+        del stale
+        for _ in range(3):
+            _gc.collect()
+            if self.device == "cuda":
+                torch.cuda.synchronize()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+                torch.cuda.empty_cache()
+
+    def _log_inplace_reshard_weight_footprint(self, old_tp: int, new_tp: int) -> None:
+        total_bytes = sum(
+            p.numel() * p.element_size() for p in self.model.parameters()
+        )
+        from sglang.srt.utils import get_available_gpu_memory
+
+        avail = get_available_gpu_memory(
+            self.device, self.gpu_id, distributed=False, empty_cache=False
+        )
+        logger.info(
+            "In-place reshard rank %d post-xfer: weights=%.2fGB avail=%.2fGB TP%d->TP%d",
+            self.tp_rank,
+            total_bytes / (1024**3),
+            avail,
+            old_tp,
+            new_tp,
+        )
+
+    @torch.no_grad()
+    def _inplace_reshard_transfer_weights_multihop(
+        self, old_tp: int, new_tp: int, *, skip_joining_receivers: bool = False
+    ) -> None:
+        """NCCL P2P weight transfer for old_tp>1 (avoids CUDA IPC exporter pinning)."""
+        from sglang.srt.layers.reshard_weights import (
+            get_tp_split_rules,
+            reshard_shard_for_rank,
+            reshard_subshard,
+        )
+
+        factor = new_tp // old_tp
+        rules = get_tp_split_rules(self.model)
+        tp_group = get_tp_group()
+        rank = self.tp_rank
+
+        keeps_own_narrow = rank < old_tp and (
+            old_tp == 1 or ((rank // factor) == rank and (rank % factor) == 0)
+        )
+        is_joining_receiver = rank >= old_tp and rank < new_tp
+        is_old_receiver = (
+            rank < old_tp and not keeps_own_narrow and rank < new_tp
+        )
+        old_receiver_ranks = [
+            r
+            for r in range(old_tp)
+            if r < new_tp
+            and not (
+                r < old_tp
+                and (old_tp == 1 or ((r // factor) == r and (r % factor) == 0))
+            )
+        ]
+
+        logger.info(
+            "In-place reshard multihop rank %d phase1 TP%d->TP%d "
+            "(joining=%s old_recv=%s keep=%s)",
+            rank,
+            old_tp,
+            new_tp,
+            is_joining_receiver,
+            is_old_receiver,
+            keeps_own_narrow,
+        )
+
+        if is_joining_receiver and not skip_joining_receivers:
+            src = rank // factor
+            for _, param in self.model.named_parameters():
+                buf = tp_group.recv(param.data.shape, param.dtype, src=src)
+                param.data = buf.contiguous()
+        elif rank < old_tp:
+            for j in range(rank * factor, min((rank + 1) * factor, new_tp)):
+                if j < old_tp:
+                    continue
+                sub_idx_send = j % factor
+                for name, param in self.model.named_parameters():
+                    if name in rules:
+                        out = reshard_subshard(
+                            param.data, rules[name], sub_idx_send, factor
+                        )
+                    else:
+                        out = param.data
+                    tp_group.send(out, dst=j)
+                    if name in rules:
+                        del out
+
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+        dist.barrier(group=tp_group.cpu_group)
+        logger.info(
+            "In-place reshard multihop rank %d phase2 TP%d->TP%d",
+            rank,
+            old_tp,
+            new_tp,
+        )
+
+        # Phase 2: old_receiver reshuffle — send and recv must run in the same
+        # step (no barrier between them) so NCCL P2P pairs are not deadlocked.
+        if rank < old_tp:
+            for recv_rank in old_receiver_ranks:
+                if recv_rank // factor != rank:
+                    continue
+                sub_idx_send = recv_rank % factor
+                for name, param in self.model.named_parameters():
+                    if name in rules:
+                        out = reshard_subshard(
+                            param.data, rules[name], sub_idx_send, factor
+                        )
+                    else:
+                        out = param.data
+                    tp_group.send(out, dst=recv_rank)
+                    if name in rules:
+                        del out
+
+        if is_old_receiver:
+            source_old = rank // factor
+            sub_idx_recv = rank % factor
+            recv_specs = []
+            for name, param in self.model.named_parameters():
+                if name in rules:
+                    shape = reshard_subshard(
+                        param.data, rules[name], sub_idx_recv, factor
+                    ).shape
+                else:
+                    shape = param.data.shape
+                recv_specs.append((shape, param.dtype))
+            self._drop_inplace_reshard_weight_storage()
+            for (_, param), (shape, dtype) in zip(
+                self.model.named_parameters(), recv_specs
+            ):
+                buf = tp_group.recv(shape, dtype, src=source_old)
+                param.data = buf.contiguous()
+
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+        dist.barrier(group=tp_group.cpu_group)
+
+        if keeps_own_narrow and not (
+            rank == 0 and self._inplace_reshard_should_cold_reload_rank0(new_tp)
+        ):
+            for name, param in self.model.named_parameters():
+                if name not in rules:
+                    continue
+                old_data = param.data
+                if old_tp == 1:
+                    param.data = reshard_shard_for_rank(
+                        old_data, rules[name], rank, new_tp
+                    )
+                else:
+                    param.data = reshard_subshard(
+                        old_data, rules[name], 0, factor
+                    ).contiguous()
+                del old_data
+
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+        dist.barrier(group=tp_group.cpu_group)
+
+    def _finalize_inplace_reshard_weight_storage(self) -> None:
+        """Replace weight tensors with compact contiguous storage after narrow/recv.
+
+        Rank0's in-place narrow can leave peak TP1 backing buffers in the CUDA
+        caching allocator; recloning matches the clean allocation path of
+        joining ranks and improves post-reshard memory symmetry vs cold --tp N.
+        """
+        for param in self.model.parameters():
+            if param.data.is_cuda and param.data.numel() > 0:
+                param.data = param.data.detach().contiguous()
+        self._compact_inplace_reshard_cuda_memory()
+
+    def _inplace_reshard_rank0_cold_reload_enabled(self) -> bool:
+        return os.environ.get("SGLANG_INPLACE_RESHARD_RANK0_COLD_RELOAD", "1") == "1"
+
+    def _inplace_reshard_cold_reload_policy(self) -> str:
+        """When rank0 reloads from disk: always | final_hop | deficit | never."""
+        return os.environ.get(
+            "SGLANG_INPLACE_RESHARD_RANK0_COLD_RELOAD_POLICY", "final_hop"
+        )
+
+    def _inplace_reshard_should_cold_reload_rank0(self, new_tp: int) -> bool:
+        if not self._inplace_reshard_rank0_cold_reload_enabled():
+            return False
+        policy = self._inplace_reshard_cold_reload_policy()
+        if policy == "never":
+            return False
+        if policy == "always":
+            return True
+        if policy == "deficit":
+            return False
+        max_tp = int(self.server_args.inplace_reshard_max_tp or new_tp)
+        return new_tp >= max_tp
+
+    def _inplace_reshard_rank0_subprocess_reload_enabled(self) -> bool:
+        return (
+            os.environ.get("SGLANG_INPLACE_RESHARD_RANK0_SUBPROCESS_RELOAD", "1")
+            == "1"
+        )
+
+    def _maybe_defragment_inplace_reshard_before_transfer(
+        self, old_tp: int, new_tp: int
+    ) -> None:
+        """Compact GPU memory before weight transfer; avoid full CPU staging when safe."""
+        if self.device != "cuda" or self.tp_rank != 0:
+            return
+        if self._inplace_reshard_should_cold_reload_rank0(new_tp):
+            logger.info(
+                "Skip CPU staging pre-xfer TP%d->TP%d (rank0 cold reload scheduled)",
+                old_tp,
+                new_tp,
+            )
+            self._compact_inplace_reshard_cuda_memory()
+            return
+        # Intermediate hops already dropped KV pools. Weights still resident on GPU;
+        # comparing free bytes against full checkpoint size falsely triggers a
+        # ~60GB CPU round-trip that can take minutes or OOM the host (TP1->2).
+        logger.info(
+            "Skip CPU staging pre-xfer TP%d->TP%d (intermediate hop; compact only)",
+            old_tp,
+            new_tp,
+        )
+        self._compact_inplace_reshard_cuda_memory()
+
+    def _cold_reload_inplace_reshard_rank0_weights(self, new_tp: int) -> None:
+        """Drop rank0 model graph and reload weights from disk like cold ``--tp N``.
+
+        In-place narrow leaves multi-TP peak buffers in the CUDA caching allocator;
+        a full reload after P2P export gives rank0 the same memory layout as a fresh
+        ``sglang serve --tp N`` process.
+        """
+        if self.tp_rank != 0 or self.device != "cuda":
+            return
+        if not self._inplace_reshard_rank0_cold_reload_enabled():
+            return
+
+        from sglang.srt.model_loader.loader import LoadFormat
+
+        import gc as _gc
+
+        before = self._inplace_reshard_effective_avail_gb()
+        logger.info(
+            "In-place reshard rank0 cold reload begin: avail=%.2fGB TP%d "
+            "(policy=%s subprocess=%s)",
+            before,
+            new_tp,
+            self._inplace_reshard_cold_reload_policy(),
+            self._inplace_reshard_rank0_subprocess_reload_enabled(),
+        )
+        if self._inplace_reshard_rank0_subprocess_reload_enabled():
+            try:
+                from sglang.srt.reshard.rank0_subprocess_reload import (
+                    build_subprocess_reload_config,
+                    import_subprocess_weights,
+                    load_rank0_weights_via_subprocess,
+                )
+
+                cfg = build_subprocess_reload_config(self, new_tp)
+                exported = load_rank0_weights_via_subprocess(cfg)
+                import_subprocess_weights(self, exported, new_tp)
+                if not self.eagle_use_aux_hidden_state:
+                    if hasattr(self.model, "capture_aux_hidden_states"):
+                        self.model.capture_aux_hidden_states = False
+                    if hasattr(self.model, "model") and hasattr(
+                        self.model.model, "layers_to_capture"
+                    ):
+                        self.model.model.layers_to_capture = []
+                self._rank0_inplace_reshard_cold_reloaded = True
+                after = self._inplace_reshard_effective_avail_gb()
+                logger.info(
+                    "In-place reshard rank0 subprocess reload done: "
+                    "avail=%.2fGB -> %.2fGB (TP%d)",
+                    before,
+                    after,
+                    new_tp,
+                )
+                return
+            except Exception:
+                logger.exception(
+                    "In-place reshard rank0 subprocess reload failed; "
+                    "falling back to in-process disk reload"
+                )
+        self._release_inplace_reshard_attention_state()
+        hooks = getattr(self, "pyt_hooks", None)
+        if hooks is not None:
+            self.pyt_hooks = None
+            del hooks
+        stale_model = self.model
+        self.model = None
+        if hasattr(self, "loader"):
+            self.loader = None
+        if stale_model is not None:
+            for param in stale_model.parameters():
+                if param.data.is_cuda and param.data.numel() > 0:
+                    param.data = torch.empty(
+                        0, device=param.device, dtype=param.dtype
+                    )
+        del stale_model
+        for _ in range(10):
+            _gc.collect()
+            torch.cuda.synchronize()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+            torch.cuda.empty_cache()
+
+        self.tp_size = new_tp
+        self.server_args.tp_size = new_tp
+        original = self.server_args.load_format
+        load_fmt = (
+            original if original != LoadFormat.DUMMY else LoadFormat.AUTO
+        )
+        self.server_args.load_format = load_fmt
+        self._skip_load_model_barrier_once = True
+        self._force_disk_load_inplace_reshard = True
+        saved_pre_reshard_tp = getattr(self, "_pre_reshard_tp", new_tp)
+        try:
+            self.load_model()
+        finally:
+            self._force_disk_load_inplace_reshard = False
+            self.server_args.load_format = original
+            if self.tp_size != new_tp:
+                self.tp_size = new_tp
+                self.server_args.tp_size = new_tp
+        # load_model already shards for new_tp; only refresh TP collectives flags.
+        self._pre_reshard_tp = new_tp
+        self._update_model_tp_metadata(new_tp)
+        self._pre_reshard_tp = saved_pre_reshard_tp
+        self._finalize_inplace_reshard_weight_storage()
+        if not self.eagle_use_aux_hidden_state:
+            if hasattr(self.model, "capture_aux_hidden_states"):
+                self.model.capture_aux_hidden_states = False
+            if hasattr(self.model, "model") and hasattr(
+                self.model.model, "layers_to_capture"
+            ):
+                self.model.model.layers_to_capture = []
+        self._rank0_inplace_reshard_cold_reloaded = True
+        after = self._inplace_reshard_effective_avail_gb()
+        logger.info(
+            "In-place reshard rank0 cold reload done: avail=%.2fGB -> %.2fGB (TP%d)",
+            before,
+            after,
+            new_tp,
+        )
+
+    def _maybe_reload_inplace_reshard_rank0_weights_for_memory(
+        self, new_tp: int, *, min_ratio: float = 0.75
+    ) -> bool:
+        """Reclaim rank0 CUDA peaks by reloading weights like a cold ``--tp N`` start.
+
+        In-place narrow/IPC can leave the caching allocator holding multi-TP
+        peak buffers that ``empty_cache`` cannot return; rank0 then cannot fit
+        the analytic KV budget while other ranks look healthy.
+        """
+        if self.tp_rank != 0 or self.device != "cuda":
+            return False
+
+        from sglang.srt.model_loader.loader import LoadFormat
+        from sglang.srt.utils import get_available_gpu_memory
+
+        analytic = self._inplace_reshard_analytic_avail_gb()
+        local = self._inplace_reshard_effective_avail_gb()
+        if analytic <= 0 or local >= min_ratio * analytic:
+            return False
+
+        logger.warning(
+            "In-place reshard rank0 reclaim: avail=%.2fGB < %.0f%% of analytic=%.2fGB; "
+            "reloading weights from disk for TP%d",
+            local,
+            min_ratio * 100,
+            analytic,
+            new_tp,
+        )
+        self._defragment_inplace_reshard_gpu_via_cpu_staging()
+        local = self._inplace_reshard_effective_avail_gb()
+        if local >= min_ratio * analytic:
+            logger.info(
+                "In-place reshard rank0 CPU staging reclaim: avail=%.2fGB "
+                "(analytic=%.2fGB)",
+                local,
+                analytic,
+            )
+            self._finalize_inplace_reshard_weight_storage()
+            return True
+
+        self._drop_inplace_reshard_weight_storage()
+        for _ in range(5):
+            self._compact_inplace_reshard_cuda_memory()
+
+        original = self.server_args.load_format
+        load_fmt = (
+            original if original != LoadFormat.DUMMY else LoadFormat.AUTO
+        )
+        self.server_args.load_format = load_fmt
+        self._skip_load_model_barrier_once = True
+        self._pre_reshard_tp = new_tp
+        self.load_model()
+        self.server_args.load_format = original
+        self._update_model_tp_metadata(new_tp)
+        self._finalize_inplace_reshard_weight_storage()
+        after = self._inplace_reshard_effective_avail_gb()
+        logger.info(
+            "In-place reshard rank0 reclaim done: avail=%.2fGB (analytic=%.2fGB)",
+            after,
+            analytic,
+        )
+        return True
+
+    def _defragment_inplace_reshard_gpu_via_cpu_staging(self) -> None:
+        """Move weights to CPU and back to drop cached peak GPU backing buffers."""
+        if self.device != "cuda":
+            return
+        import gc as _gc
+
+        cpu_params = []
+        for param in self.model.parameters():
+            if param.data.is_cuda and param.data.numel() > 0:
+                cpu_params.append((param, param.data.detach().cpu()))
+            else:
+                cpu_params.append((param, None))
+        for param, _ in cpu_params:
+            param.data = torch.empty(0, device=param.device, dtype=param.dtype)
+        _gc.collect()
+        for _ in range(5):
+            self._compact_inplace_reshard_cuda_memory()
+        for param, cpu_tensor in cpu_params:
+            if cpu_tensor is not None:
+                param.data = cpu_tensor.to(self.gpu_id, non_blocking=False).contiguous()
+        torch.cuda.synchronize()
+        self._compact_inplace_reshard_cuda_memory()
+
+    def _schedule_inplace_reshard_background_memory_trim(self) -> None:
+        """Best-effort async CUDA compact after reshard resume (rank0 only)."""
+        if self.tp_rank != 0 or self.device != "cuda":
+            return
+        import threading
+
+        def _worker() -> None:
+            import time
+
+            for _ in range(8):
+                time.sleep(1.5)
+                self._compact_inplace_reshard_cuda_memory()
+
+        threading.Thread(
+            target=_worker, name="inplace-reshard-mem-trim", daemon=True
+        ).start()
+
+    def _drop_inplace_reshard_weight_storage(self) -> None:
+        """Release local weight storage before receiving replacement shards.
+
+        Joining ranks have already copied from this rank's exported IPC handles,
+        so the old tensors can be freed to avoid peak-memory OOM during receive.
+        """
+        import gc as _gc
+
+        for param in self.model.parameters():
+            param.data = torch.empty(0, device=param.device, dtype=param.dtype)
+        _gc.collect()
+        torch.cuda.empty_cache()
+
+    def _release_inplace_reshard_ipc_imports(self) -> None:
+        """Drop imported CUDA IPC views so exporter GPUs can reclaim memory."""
+        import gc as _gc
+
+        _gc.collect()
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+            torch.cuda.empty_cache()
+
+    def _inplace_reshard_rendezvous_before_transfer(
+        self, old_tp: int, new_tp: int
+    ) -> None:
+        """Active TP ranks enter weight transfer together (standby ranks skip)."""
+        if self.tp_rank >= new_tp:
+            return
+        logger.info(
+            "In-place reshard rank %d rendezvous pre-transfer TP%d->TP%d",
+            self.tp_rank,
+            old_tp,
+            new_tp,
+        )
+        dist.barrier(group=get_tp_group().cpu_group)
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+
+    @torch.no_grad()
+    def _inplace_reshard_transfer_weights(
+        self, old_tp: int, new_tp: int, *, prepared_joiners: bool = False
+    ) -> None:
+        """Gather IPC shards from old ranks, assign joining ranks, narrow old ranks."""
+        if prepared_joiners:
+            self._inplace_reshard_rendezvous_before_transfer(old_tp, new_tp)
+            skip_xfer = os.environ.get("SGLANG_RESHARD_SKIP_XFER", "0") == "1"
+            if skip_xfer:
+                return
+            from sglang.srt.layers.reshard_weights import (
+                get_tp_split_rules,
+                reshard_shard_for_rank,
+                reshard_subshard,
+            )
+
+            factor = new_tp // old_tp
+            rules = get_tp_split_rules(self.model)
+            keeps_own_narrow = self.tp_rank < old_tp and (
+                old_tp == 1
+                or ((self.tp_rank // factor) == self.tp_rank and (self.tp_rank % factor) == 0)
+            )
+            is_old_receiver = (
+                self.tp_rank < old_tp
+                and not keeps_own_narrow
+                and self.tp_rank < new_tp
+            )
+            if old_tp > 1:
+                self._inplace_reshard_transfer_weights_multihop(
+                    old_tp, new_tp, skip_joining_receivers=True
+                )
+                if self.tp_rank < new_tp and not (
+                    self.tp_rank == 0
+                    and self._inplace_reshard_should_cold_reload_rank0(new_tp)
+                ):
+                    self._finalize_inplace_reshard_weight_storage()
+                self._log_inplace_reshard_weight_footprint(old_tp, new_tp)
+                return
+            if keeps_own_narrow and not (
+                self.tp_rank == 0
+                and self._inplace_reshard_should_cold_reload_rank0(new_tp)
+            ):
+                for name, param in self.model.named_parameters():
+                    if name not in rules:
+                        continue
+                    old_data = param.data
+                    if old_tp == 1:
+                        param.data = reshard_shard_for_rank(
+                            old_data, rules[name], self.tp_rank, new_tp
+                        ).contiguous()
+                    else:
+                        param.data = reshard_subshard(
+                            old_data, rules[name], 0, factor
+                        ).contiguous()
+                    del old_data
+            elif is_old_receiver:
+                self._inplace_reshard_transfer_weights_multihop(
+                    old_tp, new_tp, skip_joining_receivers=True
+                )
+            if self.tp_rank < new_tp and not (
+                self.tp_rank == 0
+                and self._inplace_reshard_should_cold_reload_rank0(new_tp)
+            ):
+                self._finalize_inplace_reshard_weight_storage()
+            self._log_inplace_reshard_weight_footprint(old_tp, new_tp)
+            return
+        self._inplace_reshard_rendezvous_before_transfer(old_tp, new_tp)
+        skip_xfer = os.environ.get("SGLANG_RESHARD_SKIP_XFER", "0") == "1"
+        if old_tp > 1 and not skip_xfer:
+            self._inplace_reshard_transfer_weights_multihop(old_tp, new_tp)
+            if self.tp_rank < new_tp and not (
+                self.tp_rank == 0 and self._inplace_reshard_should_cold_reload_rank0(new_tp)
+            ):
+                self._finalize_inplace_reshard_weight_storage()
+            self._log_inplace_reshard_weight_footprint(old_tp, new_tp)
+            return
+
+        from sglang.srt.layers.reshard_weights import (
+            get_tp_split_rules,
+            reshard_shard_for_rank,
+            reshard_subshard,
+        )
+
+        factor = new_tp // old_tp
+        skip_xfer = os.environ.get("SGLANG_RESHARD_SKIP_XFER", "0") == "1"
+        rules = get_tp_split_rules(self.model)
+        handles_by_src = (
+            self._gather_inplace_reshard_ipc_handles(old_tp) if not skip_xfer else {}
+        )
+        local_device = torch.device(self.device, self.gpu_id)
+
+        source_old = self.tp_rank // factor
+        sub_idx = self.tp_rank % factor
+        keeps_own_narrow = self.tp_rank < old_tp and (
+            old_tp == 1 or (source_old == self.tp_rank and sub_idx == 0)
+        )
+        is_joining_receiver = self.tp_rank >= old_tp and self.tp_rank < new_tp
+        is_old_receiver = (
+            self.tp_rank < old_tp and not keeps_own_narrow and self.tp_rank < new_tp
+        )
+        old_receiver_ranks = [
+            r
+            for r in range(old_tp)
+            if r < new_tp
+            and not (
+                r < old_tp
+                and (old_tp == 1 or ((r // factor) == r and (r % factor) == 0))
+            )
+        ]
+        tp_group = get_tp_group()
+
+        def _receive_weights() -> None:
+            for name, param in self.model.named_parameters():
+                if name not in rules:
+                    if skip_xfer:
+                        continue
+                    full = MultiprocessingSerializer.deserialize(
+                        handles_by_src[source_old][name]
+                    )
+                    param.data = full.to(local_device, copy=True).contiguous()
+                    del full
+                    continue
+                if skip_xfer:
+                    continue
+                old_shard = MultiprocessingSerializer.deserialize(
+                    handles_by_src[source_old][name]
+                )
+                if old_tp == 1:
+                    shard = (
+                        reshard_shard_for_rank(
+                            old_shard, rules[name], self.tp_rank, new_tp
+                        )
+                        .to(local_device, copy=True)
+                        .contiguous()
+                    )
+                else:
+                    shard = (
+                        reshard_subshard(old_shard, rules[name], sub_idx, factor)
+                        .to(local_device, copy=True)
+                        .contiguous()
+                    )
+                param.data = shard
+                del old_shard
+
+        if is_joining_receiver:
+            _receive_weights()
+            if not skip_xfer:
+                handles_by_src.clear()
+                self._release_inplace_reshard_ipc_imports()
+
+        if not skip_xfer:
+            torch.cuda.synchronize()
+        # Joining ranks must finish reading exported IPC memory before any old
+        # active rank overwrites the weights other ranks still depend on.
+        dist.barrier(group=get_tp_group().cpu_group)
+
+        # Exporter GPUs can reclaim IPC bookkeeping once importers released handles.
+        if not skip_xfer and self.tp_rank < old_tp:
+            self._release_inplace_reshard_ipc_imports()
+
+        if not skip_xfer:
+            torch.cuda.synchronize()
+        dist.barrier(group=get_tp_group().cpu_group)
+
+        if is_old_receiver:
+            sub_idx_recv = self.tp_rank % factor
+            recv_specs = []
+            for name, param in self.model.named_parameters():
+                if name in rules:
+                    shape = reshard_subshard(
+                        param.data, rules[name], sub_idx_recv, factor
+                    ).shape
+                else:
+                    shape = param.data.shape
+                recv_specs.append((shape, param.dtype))
+            self._drop_inplace_reshard_weight_storage()
+            if not skip_xfer:
+                handles_by_src.clear()
+                self._release_inplace_reshard_ipc_imports()
+            if old_tp > 1:
+                for (_, param), (shape, dtype) in zip(
+                    self.model.named_parameters(), recv_specs
+                ):
+                    buf = tp_group.recv(shape, dtype, src=source_old)
+                    param.data = buf.contiguous()
+            else:
+                _receive_weights()
+                if not skip_xfer:
+                    handles_by_src.clear()
+                    self._release_inplace_reshard_ipc_imports()
+        elif self.tp_rank < old_tp and old_tp > 1:
+            for recv_rank in old_receiver_ranks:
+                if recv_rank // factor != self.tp_rank:
+                    continue
+                sub_idx_send = recv_rank % factor
+                for name, param in self.model.named_parameters():
+                    if name in rules:
+                        out = reshard_subshard(
+                            param.data, rules[name], sub_idx_send, factor
+                        )
+                    else:
+                        out = param.data
+                    tp_group.send(out, dst=recv_rank)
+                    if name in rules:
+                        del out
+
+        if not skip_xfer:
+            torch.cuda.synchronize()
+        dist.barrier(group=get_tp_group().cpu_group)
+
+        if keeps_own_narrow and not (
+            self.tp_rank == 0 and self._inplace_reshard_should_cold_reload_rank0(new_tp)
+        ):
+            for name, param in self.model.named_parameters():
+                if name not in rules:
+                    continue
+                old_data = param.data
+                if old_tp == 1:
+                    param.data = reshard_shard_for_rank(
+                        old_data, rules[name], self.tp_rank, new_tp
+                    ).contiguous()
+                else:
+                    param.data = reshard_subshard(
+                        old_data, rules[name], 0, factor
+                    ).contiguous()
+                del old_data
+
+        if not skip_xfer:
+            torch.cuda.synchronize()
+        dist.barrier(group=get_tp_group().cpu_group)
+
+        if not skip_xfer:
+            self._release_inplace_reshard_ipc_imports()
+
+        if self.tp_rank < new_tp:
+            if not (
+                self.tp_rank == 0
+                and self._inplace_reshard_should_cold_reload_rank0(new_tp)
+            ):
+                self._finalize_inplace_reshard_weight_storage()
+            local_avail = get_available_gpu_memory(
+                self.device, self.gpu_id, distributed=False, empty_cache=True
+            )
+            avail_t = torch.tensor([local_avail], dtype=torch.float64)
+            max_t = avail_t.clone()
+            dist.all_reduce(max_t, op=dist.ReduceOp.MAX, group=get_tp_group().cpu_group)
+            self._maybe_reclaim_inplace_reshard_memory_imbalance(float(max_t.item()))
+
+        self._log_inplace_reshard_weight_footprint(old_tp, new_tp)
+
+    def _sync_inplace_reshard_parallel_groups(self, new_tp: int) -> None:
+        """Rebuild TP process groups after active_tp changes.
+
+        Every world rank must call this together so torch.distributed.new_group
+        collectives stay aligned across standby and active workers.
+        """
+        from sglang.srt.distributed.parallel_state import (
+            rebuild_inplace_reshard_parallel_state,
+        )
+        from sglang.srt.server_args import set_global_server_args_for_scheduler
+
+        rebuild_inplace_reshard_parallel_state(
+            new_active_tp=new_tp,
+            attention_data_parallel_size=self.dp_size,
+            pipeline_model_parallel_size=self.pp_size,
+            expert_model_parallel_size=self.moe_ep_size,
+            attention_context_model_parallel_size=self.attn_cp_size,
+            moe_data_model_parallel_size=self.moe_dp_size,
+            duplicate_tp_group=self.server_args.enable_pdmux,
+        )
+        self.server_args.tp_size = new_tp
+        self.tp_size = new_tp
+        set_global_server_args_for_scheduler(self.server_args)
+        self.tp_group = get_tp_group()
+        self.pp_group = get_pp_group()
+        self.attention_tp_group = get_attention_tp_group()
+
+    def _rebuild_inplace_reshard_model_parallel(self, new_tp: int) -> None:
+        self._sync_inplace_reshard_parallel_groups(new_tp)
+
+    def _inplace_reshard_prep_state_obj(self):
+        from sglang.srt.reshard.inplace_reshard_background import InplaceReshardPrepState
+
+        st = getattr(self, "_inplace_reshard_prep_state", None)
+        if st is None:
+            st = InplaceReshardPrepState()
+            self._inplace_reshard_prep_state = st
+        return st
+
+    def _inplace_reshard_background_prep_enabled(self) -> bool:
+        from sglang.srt.reshard.inplace_reshard_background import background_prep_enabled
+
+        return background_prep_enabled()
+
+    def inplace_reshard_prep_is_ready(self, new_tp: int) -> bool:
+        if not self._inplace_reshard_background_prep_enabled():
+            return False
+        st = self._inplace_reshard_prep_state_obj()
+        if int(st.new_tp) != int(new_tp):
+            return False
+        old_tp = int(st.old_tp)
+        is_joining = self.tp_rank >= old_tp and self.tp_rank < int(new_tp)
+        if is_joining:
+            return bool(st.weights_ready)
+        if self.tp_rank == 0 and self.tp_rank < old_tp:
+            if old_tp == 1:
+                return bool(st.joiners_prepared and st.rank0_exported_ipc)
+            return bool(st.joiners_prepared and st.weights_ready)
+        if self.tp_rank < old_tp:
+            return bool(st.weights_ready)
+        return bool(st.weights_ready and st.runtime_ready)
+
+    def reset_inplace_reshard_prep(self) -> None:
+        self._inplace_reshard_prep_state_obj().reset()
+
+    def _ensure_inplace_reshard_dummy_model_loaded(self) -> None:
+        from sglang.srt.model_loader.loader import LoadFormat
+
+        if self.model is not None:
+            return
+        self.memory_saver_adapter = TorchMemorySaverAdapter.create(
+            enable=self.server_args.enable_memory_saver
+        )
+        original_load_format = self.server_args.load_format
+        self.server_args.load_format = LoadFormat.DUMMY
+        self._skip_load_model_barrier_once = True
+        self.load_model()
+        self.server_args.load_format = original_load_format
+        model_num_layers = max(
+            self.model_config.num_hidden_layers,
+            self.model_config.num_attention_layers,
+        )
+        self.start_layer = getattr(self.model, "start_layer", 0)
+        self.end_layer = getattr(self.model, "end_layer", model_num_layers)
+        self.num_effective_layers = self.end_layer - self.start_layer
+
+    def _apply_inplace_reshard_ipc_handles(
+        self, handles_by_src: dict, old_tp: int, new_tp: int
+    ) -> None:
+        from sglang.srt.layers.reshard_weights import (
+            get_tp_split_rules,
+            reshard_shard_for_rank,
+            reshard_subshard,
+        )
+
+        rules = get_tp_split_rules(self.model)
+        factor = new_tp // old_tp
+        local_device = torch.device(self.device, self.gpu_id)
+        source_old = self.tp_rank // factor
+        sub_idx = self.tp_rank % factor
+
+        for name, param in self.model.named_parameters():
+            if name not in rules:
+                full = MultiprocessingSerializer.deserialize(
+                    handles_by_src[source_old][name]
+                )
+                param.data = full.to(local_device, copy=True).contiguous()
+                del full
+                continue
+            old_shard = MultiprocessingSerializer.deserialize(
+                handles_by_src[source_old][name]
+            )
+            if old_tp == 1:
+                shard = (
+                    reshard_shard_for_rank(
+                        old_shard, rules[name], self.tp_rank, new_tp
+                    )
+                    .to(local_device, copy=True)
+                    .contiguous()
+                )
+            else:
+                shard = (
+                    reshard_subshard(old_shard, rules[name], sub_idx, factor)
+                    .to(local_device, copy=True)
+                    .contiguous()
+                )
+            param.data = shard
+            del old_shard
+
+        self._finalize_inplace_reshard_weight_storage()
+        self._release_inplace_reshard_ipc_imports()
+
+    def _finalize_inplace_reshard_runtime_stack(self, new_tp: int) -> None:
+        """Allocate KV and warm attention backends for the target TP degree."""
+        self.rebuild_memory_pool_after_inplace_reshard()
+        dist.barrier(group=get_tp_group().cpu_group)
+        self.maybe_init_ngram_embedding()
+        self.init_routed_experts_capturer()
+        if self.device == "cuda" or self.device == "musa":
+            self.init_cublas()
+            self.init_attention_backend()
+            self.kernel_warmup()
+            self.init_device_graphs()
+        elif self.device in ["npu", "cpu"]:
+            self.init_attention_backend()
+            self.init_device_graphs()
+        else:
+            self.graph_runner = None
+            self.graph_mem_usage = 0
+            self.init_attention_backend()
+        self.init_piecewise_cuda_graphs()
+        if not self.eagle_use_aux_hidden_state:
+            if hasattr(self.model, "capture_aux_hidden_states"):
+                self.model.capture_aux_hidden_states = False
+            if hasattr(self.model, "model") and hasattr(
+                self.model.model, "layers_to_capture"
+            ):
+                self.model.model.layers_to_capture = []
+        if not hasattr(self, "sampler"):
+            self.sampler = create_sampler()
+        if not hasattr(self, "eplb_manager"):
+            self.eplb_manager = None
+        if not hasattr(self, "expert_location_updater"):
+            self.expert_location_updater = None
+
+    @torch.no_grad()
+    def prepare_inplace_reshard_tp(
+        self,
+        new_tp: int,
+        old_tp: int,
+        handles_by_src: Optional[dict] = None,
+    ) -> Tuple[bool, str, float]:
+        """Background preparation while still serving at ``old_tp``."""
+        import time as _time
+
+        from sglang.srt.reshard.inplace_reshard_background import prep_state_key
+
+        if not self._inplace_reshard_background_prep_enabled():
+            return False, "background prep disabled", 0.0
+
+        t0 = _time.time()
+        old_tp = int(old_tp)
+        new_tp = int(new_tp)
+        st = self._inplace_reshard_prep_state_obj()
+        if st.ready and prep_state_key(st.old_tp, st.new_tp) == prep_state_key(
+            old_tp, new_tp
+        ):
+            return True, "already prepared", _time.time() - t0
+
+        st.old_tp = old_tp
+        st.new_tp = new_tp
+        is_joining = self.tp_rank >= old_tp and self.tp_rank < new_tp
+        is_active = self.tp_rank < old_tp
+
+        if is_joining:
+            self._ensure_inplace_reshard_dummy_model_loaded()
+            if handles_by_src is not None and old_tp == 1:
+                self._apply_inplace_reshard_ipc_handles(handles_by_src, old_tp, new_tp)
+                st.weights_ready = True
+            elif old_tp > 1:
+                # Multihop: background prep only loads dummy shell; shards at commit.
+                st.weights_ready = True
+                st.runtime_ready = False
+            else:
+                st.weights_ready = handles_by_src is not None
+            if st.weights_ready:
+                self._pre_reshard_tp = old_tp
+                # KV / attention init needs the new TP process group; defer to commit.
+                st.runtime_ready = False
+            logger.info(
+                "In-place reshard prep joining rank %d TP%d->TP%d weights=%s runtime=%s",
+                self.tp_rank,
+                old_tp,
+                new_tp,
+                st.weights_ready,
+                st.runtime_ready,
+            )
+        elif self.tp_rank == 0 and is_active:
+            if old_tp == 1:
+                st.rank0_exported_ipc = True
+                st.joiners_prepared = True
+            st.weights_ready = True
+            st.runtime_ready = False
+            logger.info(
+                "In-place reshard prep rank0 TP%d->TP%d (joiners_prepared=%s)",
+                old_tp,
+                new_tp,
+                st.joiners_prepared,
+            )
+        elif is_active:
+            st.weights_ready = True
+            st.runtime_ready = True
+            logger.info(
+                "In-place reshard prep active follower rank %d TP%d->TP%d",
+                self.tp_rank,
+                old_tp,
+                new_tp,
+            )
+        else:
+            st.weights_ready = True
+            st.runtime_ready = True
+
+        st.timings_s["prepare_s"] = _time.time() - t0
+        return True, f"prepared rank {self.tp_rank} for TP{new_tp}", st.timings_s["prepare_s"]
+
+    @torch.no_grad()
+    def commit_inplace_reshard_tp(
+        self, new_tp: int, old_tp: int
+    ) -> Tuple[bool, str, float]:
+        """Fast commit: rebuild comm groups and flip prepared state."""
+        import time as _time
+
+        from sglang.srt.layers.reshard_weights import get_tp_split_rules
+
+        t0 = _time.time()
+        old_tp = int(old_tp)
+        new_tp = int(new_tp)
+        st = self._inplace_reshard_prep_state_obj()
+        prep_ready = self.inplace_reshard_prep_is_ready(new_tp)
+        timings: Dict[str, float] = {}
+
+        t_comm = _time.time()
+        self._inplace_reshard_world_barrier()
+        self._sync_inplace_reshard_parallel_groups(new_tp)
+        timings["comm_s"] = _time.time() - t_comm
+
+        is_joining = self.tp_rank >= old_tp and self.tp_rank < new_tp
+        is_active = self.tp_rank < old_tp
+
+        if is_joining and prep_ready and st.weights_ready:
+            self._pre_reshard_tp = old_tp
+            self.tp_size = new_tp
+            self._update_model_tp_metadata(new_tp)
+            self.is_inplace_standby_rank = False
+            # Participate in rank0's pre/post-xfer barriers (do not block early:
+            # rank0 also waits at the pre-xfer barrier before narrow/xfer).
+            self._inplace_reshard_world_barrier()
+            dist.barrier(group=get_tp_group().cpu_group)
+            self._inplace_reshard_rendezvous_before_transfer(old_tp, new_tp)
+            dist.barrier(group=get_tp_group().cpu_group)
+            if not st.runtime_ready:
+                self._finalize_inplace_reshard_runtime_stack(new_tp)
+            dist.barrier(group=get_tp_group().cpu_group)
+            timings["commit_s"] = _time.time() - t0
+            self.reset_inplace_reshard_prep()
+            return (
+                True,
+                f"commit joining rank {self.tp_rank} TP{old_tp}->TP{new_tp} "
+                f"prep=1 comm={timings['comm_s']:.3f}s",
+                timings["commit_s"],
+            )
+
+        if self.tp_rank == 0 and is_active:
+            rules = get_tp_split_rules(self.model)
+            self._free_inplace_reshard_kv_pools()
+            if self.device == "cuda":
+                self._maybe_defragment_inplace_reshard_before_transfer(old_tp, new_tp)
+            self._inplace_reshard_world_barrier()
+            dist.barrier(group=get_tp_group().cpu_group)
+            t_xfer = _time.time()
+            self._inplace_reshard_transfer_weights(
+                old_tp, new_tp, prepared_joiners=prep_ready and st.joiners_prepared
+            )
+            timings["xfer_s"] = _time.time() - t_xfer
+            self._pre_reshard_tp = old_tp
+            self.tp_size = new_tp
+            self.tp_rank = 0
+            if self._inplace_reshard_should_cold_reload_rank0(new_tp):
+                self._needs_inplace_reshard_rank0_cold_reload = True
+            else:
+                self._update_model_tp_metadata(new_tp)
+            dist.barrier(group=get_tp_group().cpu_group)
+            t_rebuild = _time.time()
+            self.rebuild_memory_pool_after_inplace_reshard()
+            timings["rebuild_s"] = _time.time() - t_rebuild
+            dist.barrier(group=get_tp_group().cpu_group)
+            self.maybe_init_ngram_embedding()
+            self.init_routed_experts_capturer()
+            if self.device == "cuda" or self.device == "musa":
+                self.init_cublas()
+                self.init_attention_backend()
+                self.kernel_warmup()
+                self.init_device_graphs()
+            elif self.device in ["npu", "cpu"]:
+                self.init_attention_backend()
+                self.init_device_graphs()
+            else:
+                self.graph_runner = None
+                self.graph_mem_usage = 0
+                self.init_attention_backend()
+            self.init_piecewise_cuda_graphs()
+            dist.barrier(group=get_tp_group().cpu_group)
+            total_sent = sum(
+                p.numel() * p.element_size() for p in self.model.parameters()
+            )
+            timings["commit_s"] = _time.time() - t0
+            self.reset_inplace_reshard_prep()
+            return (
+                True,
+                f"commit rank0 TP{old_tp}->TP{new_tp}: sent {total_sent/1e9:.2f}GB "
+                f"comm={timings['comm_s']:.3f}s xfer={timings.get('xfer_s', 0):.3f}s "
+                f"rebuild={timings.get('rebuild_s', 0):.3f}s "
+                f"prep={'1' if prep_ready else '0'}",
+                timings["commit_s"],
+            )
+
+        if is_active and self.tp_rank > 0:
+            self.memory_saver_adapter = TorchMemorySaverAdapter.create(
+                enable=self.server_args.enable_memory_saver
+            )
+            self._free_inplace_reshard_kv_pools()
+            self._inplace_reshard_transfer_weights(
+                old_tp, new_tp, prepared_joiners=prep_ready and st.joiners_prepared
+            )
+            self._pre_reshard_tp = old_tp
+            self._update_model_tp_metadata(new_tp)
+            dist.barrier(group=get_tp_group().cpu_group)
+            self._finalize_inplace_reshard_runtime_stack(new_tp)
+            dist.barrier(group=get_tp_group().cpu_group)
+            timings["commit_s"] = _time.time() - t0
+            self.reset_inplace_reshard_prep()
+            return (
+                True,
+                f"commit active follower rank {self.tp_rank} TP{old_tp}->TP{new_tp}",
+                timings["commit_s"],
+            )
+
+        dist.barrier(group=get_tp_group().cpu_group)
+        timings["commit_s"] = _time.time() - t0
+        self.reset_inplace_reshard_prep()
+        return True, f"commit rank {self.tp_rank} noop", timings["commit_s"]
+
+    @torch.no_grad()
+    def activate_inplace_reshard_rank(
+        self, new_tp: int, old_tp: Optional[int] = None
+    ) -> Tuple[bool, str, float]:
+        """Activate a standby rank for experimental true in-place TP reshard."""
+        import time as _time
+        from sglang.srt.model_loader.loader import LoadFormat
+
+        t0 = _time.time()
+        if not getattr(self, "is_inplace_standby_rank", False):
+            return False, "rank is not standby", 0.0
+        if old_tp is None:
+            old_tp = self._inplace_reshard_current_active_tp()
+        else:
+            old_tp = int(old_tp)
+        new_rank = self.tp_rank
+        if new_rank >= new_tp:
+            return False, f"rank {new_rank} not in new_tp {new_tp}", 0.0
+        if new_rank < old_tp:
+            return False, f"rank {new_rank} is already active", 0.0
+
+        if (
+            self._inplace_reshard_background_prep_enabled()
+            and self.inplace_reshard_prep_is_ready(new_tp)
+        ):
+            return self.commit_inplace_reshard_tp(new_tp, old_tp)
+
+        logger.info(
+            "In-place reshard activating standby rank %d: TP%d -> TP%d",
+            new_rank,
+            old_tp,
+            new_tp,
+        )
+        self._inplace_reshard_world_barrier()
+        self._sync_inplace_reshard_parallel_groups(new_tp)
+        self.memory_saver_adapter = TorchMemorySaverAdapter.create(
+            enable=self.server_args.enable_memory_saver
+        )
+
+        # Build model structure quickly with dummy weights; real shards are received below.
+        original_load_format = self.server_args.load_format
+        self.server_args.load_format = LoadFormat.DUMMY
+        self._skip_load_model_barrier_once = True
+        self.load_model()
+        self.server_args.load_format = original_load_format
+        model_num_layers = max(
+            self.model_config.num_hidden_layers,
+            self.model_config.num_attention_layers,
+        )
+        self.start_layer = getattr(self.model, "start_layer", 0)
+        self.end_layer = getattr(self.model, "end_layer", model_num_layers)
+        self.num_effective_layers = self.end_layer - self.start_layer
+
+        self._inplace_reshard_world_barrier()
+        dist.barrier(group=get_tp_group().cpu_group)
+        self._inplace_reshard_transfer_weights(old_tp, new_tp)
+        logger.info(
+            "In-place reshard activated rank %d received weights for TP%d",
+            new_rank,
+            new_tp,
+        )
+
+        self._pre_reshard_tp = new_tp
+        self._update_model_tp_metadata(new_tp)
+
+        dist.barrier(group=get_tp_group().cpu_group)
+
+        # (C) Re-profile and allocate KV / req pools now that weights are sharded
+        # for the new TP degree. Each rank has more free memory than the TP-old
+        # layout, so reusing the old token budget under-allocates KV by ~10x.
+        cfg = self.rebuild_memory_pool_after_inplace_reshard()
+        logger.info(
+            "In-place reshard activated rank %d applied KV pool config: tokens=%d reqs=%d",
+            new_rank,
+            self.max_total_num_tokens,
+            self.max_running_requests,
+        )
+        # Rank0 may still be finishing KV alloc; do not run attention init
+        # (TP collectives) until every active rank leaves rebuild.
+        dist.barrier(group=get_tp_group().cpu_group)
+        self.maybe_init_ngram_embedding()
+        self.init_routed_experts_capturer()
+        if self.device == "cuda" or self.device == "musa":
+            self.init_cublas()
+            self.init_attention_backend()
+            self.kernel_warmup()
+            self.init_device_graphs()
+        elif self.device in ["npu", "cpu"]:
+            self.init_attention_backend()
+            self.init_device_graphs()
+        else:
+            self.graph_runner = None
+            self.graph_mem_usage = 0
+            self.init_attention_backend()
+        self.init_piecewise_cuda_graphs()
+        # A standby rank activated via dummy load may miss attributes normally set
+        # on the full init path. Backfill the ones the forward/sample path reads.
+        if not hasattr(self, "sampler"):
+            self.sampler = create_sampler()
+        if not hasattr(self, "eplb_manager"):
+            self.eplb_manager = None
+        if not hasattr(self, "expert_location_updater"):
+            self.expert_location_updater = None
+        # Align aux-hidden-state capture with the active ranks. A standby rank's
+        # dummy-built model may default to capturing aux hidden states (non-empty
+        # layers_to_capture), diverging from rank0's forward path and deadlocking
+        # the collective. Disable it unless this is a real eagle setup.
+        if not self.eagle_use_aux_hidden_state:
+            if hasattr(self.model, "capture_aux_hidden_states"):
+                self.model.capture_aux_hidden_states = False
+            if hasattr(self.model, "model") and hasattr(self.model.model, "layers_to_capture"):
+                self.model.model.layers_to_capture = []
+        # Align with rank0 before entering the serving loop (see rank0 barrier).
+        dist.barrier(group=get_tp_group().cpu_group)
+        self.is_inplace_standby_rank = False
+        return True, f"activated rank {new_rank} for TP{new_tp}", _time.time() - t0
+
+    @torch.no_grad()
+    def expand_inplace_reshard_active_rank(
+        self, new_tp: int, activate_cmd: Optional[dict] = None
+    ) -> Tuple[bool, str, float]:
+        """Expand an already-active follower rank (e.g. TP2 rank1 -> TP4 rank1)."""
+        import time as _time
+
+        t0 = _time.time()
+        if getattr(self, "is_inplace_standby_rank", False):
+            return False, "standby uses activate path", 0.0
+        if self.tp_rank == 0:
+            return False, "rank0 uses joinable path", 0.0
+        if activate_cmd is None or not isinstance(activate_cmd, dict):
+            return False, "activate_cmd required for active follower expand", 0.0
+        cmd = activate_cmd
+        old_tp = int(cmd["old_tp_size"])
+        if int(cmd["new_tp_size"]) != new_tp:
+            return False, "mismatched new_tp in inplace reshard cmd", 0.0
+        if cmd.get("action") != "activate_inplace_reshard":
+            return False, f"unexpected inplace reshard cmd: {cmd}", 0.0
+        if new_tp <= old_tp:
+            return False, f"new_tp {new_tp} must exceed old_tp {old_tp}", 0.0
+        if self.tp_rank >= old_tp:
+            return False, f"rank {self.tp_rank} is not an old active rank", 0.0
+
+        # Block on the same world broadcast as standby ranks and rank0's
+        # _live_reshard_tp_joinable.  Do NOT rebuild parallel groups until rank0
+        # has broadcast the activation command — otherwise destroy_model_parallel
+        # / new_group() runs ahead of the other world ranks and deadlocks.
+        logger.info(
+            "In-place reshard follower rank %d waiting for world activation "
+            "broadcast TP%d->TP%d",
+            self.tp_rank,
+            old_tp,
+            new_tp,
+        )
+        received = broadcast_pyobj(
+            None,
+            get_world_group().rank,
+            get_world_group().cpu_group,
+            src=get_world_group().ranks[0],
+        )
+        if not received or not isinstance(received, dict):
+            return False, f"missing world inplace reshard cmd: {received}", 0.0
+        if received.get("action") != "activate_inplace_reshard":
+            return False, f"unexpected world inplace reshard cmd: {received}", 0.0
+        if int(received.get("old_tp_size", -1)) != old_tp:
+            return (
+                False,
+                f"world old_tp mismatch: {received.get('old_tp_size')} vs {old_tp}",
+                0.0,
+            )
+        if int(received.get("new_tp_size", -1)) != new_tp:
+            return (
+                False,
+                f"world new_tp mismatch: {received.get('new_tp_size')} vs {new_tp}",
+                0.0,
+            )
+        logger.info(
+            "In-place reshard follower rank %d received world activation TP%d->TP%d",
+            self.tp_rank,
+            old_tp,
+            new_tp,
+        )
+
+        if (
+            self._inplace_reshard_background_prep_enabled()
+            and self.inplace_reshard_prep_is_ready(new_tp)
+        ):
+            return self.commit_inplace_reshard_tp(new_tp, old_tp)
+
+        self.memory_saver_adapter = TorchMemorySaverAdapter.create(
+            enable=self.server_args.enable_memory_saver
+        )
+        self._inplace_reshard_world_barrier()
+        self._sync_inplace_reshard_parallel_groups(new_tp)
+        self._free_inplace_reshard_kv_pools()
+
+        if self.tp_rank == 0 and self.device == "cuda":
+            self._maybe_defragment_inplace_reshard_before_transfer(old_tp, new_tp)
+
+        self._inplace_reshard_world_barrier()
+        dist.barrier(group=get_tp_group().cpu_group)
+        self._inplace_reshard_transfer_weights(old_tp, new_tp)
+        self._release_inplace_reshard_ipc_imports()
+        self._pre_reshard_tp = old_tp
+        self._update_model_tp_metadata(new_tp)
+
+        dist.barrier(group=get_tp_group().cpu_group)
+
+        cfg = self.rebuild_memory_pool_after_inplace_reshard()
+        logger.info(
+            "In-place reshard expanded active rank %d: tokens=%d reqs=%d",
+            self.tp_rank,
+            self.max_total_num_tokens,
+            self.max_running_requests,
+        )
+        dist.barrier(group=get_tp_group().cpu_group)
+        self.maybe_init_ngram_embedding()
+        self.init_routed_experts_capturer()
+        if self.device == "cuda" or self.device == "musa":
+            self.init_cublas()
+            self.init_attention_backend()
+            self.kernel_warmup()
+            self.init_device_graphs()
+        elif self.device in ["npu", "cpu"]:
+            self.init_attention_backend()
+            self.init_device_graphs()
+        else:
+            self.graph_runner = None
+            self.graph_mem_usage = 0
+            self.init_attention_backend()
+        self.init_piecewise_cuda_graphs()
+        if not self.eagle_use_aux_hidden_state:
+            if hasattr(self.model, "capture_aux_hidden_states"):
+                self.model.capture_aux_hidden_states = False
+            if hasattr(self.model, "model") and hasattr(
+                self.model.model, "layers_to_capture"
+            ):
+                self.model.model.layers_to_capture = []
+        dist.barrier(group=get_tp_group().cpu_group)
+        return (
+            True,
+            f"expanded active rank {self.tp_rank} for TP{new_tp}",
+            _time.time() - t0,
+        )
+
+
+    @torch.no_grad()
+    def _live_reshard_tp_joinable(self, new_tp: int) -> Tuple[bool, str, float]:
+        """True in-place TP expansion using pre-launched joinable workers."""
+        import time as _time
+
+        t0 = _time.time()
+        old_tp = self.tp_size
+        if self.tp_rank != 0:
+            return False, "joinable reshard must be orchestrated by rank0", 0.0
+        if new_tp > int(self.server_args.inplace_reshard_max_tp):
+            return (
+                False,
+                f"new_tp {new_tp} exceeds max_tp {self.server_args.inplace_reshard_max_tp}",
+                0.0,
+            )
+        if new_tp % old_tp != 0:
+            return False, "new_tp must be divisible by old_tp", 0.0
+
+        cmd = {
+            "action": "activate_inplace_reshard",
+            "old_tp_size": old_tp,
+            "new_tp_size": new_tp,
+        }
+        broadcast_pyobj(
+            cmd,
+            get_world_group().rank,
+            get_world_group().cpu_group,
+            src=get_world_group().ranks[0],
+        )
+        ok, msg, elapsed = self.commit_inplace_reshard_tp(new_tp, old_tp)
+        if not ok:
+            return ok, msg, elapsed
+        return (
+            True,
+            f"joinable in-place TP{old_tp}->TP{new_tp}: {msg}",
+            _time.time() - t0,
+        )
+
+    @torch.no_grad()
+    def _live_reshard_tp_joinable_legacy(self, new_tp: int) -> Tuple[bool, str, float]:
+        """Legacy synchronous in-place path (prep disabled or fallback)."""
+        import time as _time
+        from sglang.srt.layers.reshard_weights import get_tp_split_rules
+
+        t0 = _time.time()
+        old_tp = self.tp_size
+        if self.tp_rank != 0:
+            return False, "joinable reshard must be orchestrated by rank0", 0.0
+        if new_tp > int(self.server_args.inplace_reshard_max_tp):
+            return False, f"new_tp {new_tp} exceeds max_tp {self.server_args.inplace_reshard_max_tp}", 0.0
+        if new_tp % old_tp != 0:
+            return False, "new_tp must be divisible by old_tp", 0.0
+
+        factor = new_tp // old_tp
+        cmd = {
+            "action": "activate_inplace_reshard",
+            "old_tp_size": old_tp,
+            "new_tp_size": new_tp,
+        }
+        broadcast_pyobj(
+            cmd,
+            get_world_group().rank,
+            get_world_group().cpu_group,
+            src=get_world_group().ranks[0],
+        )
+        self._inplace_reshard_world_barrier()
+        self._sync_inplace_reshard_parallel_groups(new_tp)
+
+        rules = get_tp_split_rules(self.model)
+
+        self._free_inplace_reshard_kv_pools()
+
+        if self.tp_rank == 0 and self.device == "cuda":
+            self._maybe_defragment_inplace_reshard_before_transfer(old_tp, new_tp)
+
+        self._inplace_reshard_world_barrier()
+        dist.barrier(group=get_tp_group().cpu_group)
+        t_xfer = _time.time()
+        from sglang.srt.utils import get_available_gpu_memory
+
+        avail_pre = get_available_gpu_memory(
+            self.device, self.gpu_id, distributed=False, empty_cache=True
+        )
+        logger.info(
+            "In-place reshard rank0 pre-xfer: avail=%.2fGB TP%d->TP%d",
+            avail_pre,
+            old_tp,
+            new_tp,
+        )
+        self._inplace_reshard_transfer_weights(old_tp, new_tp)
+        total_sent = 0
+        for name, param in self.model.named_parameters():
+            if name in rules:
+                total_sent += param.numel() * param.element_size()
+        xfer_s = _time.time() - t_xfer
+        logger.info("In-place reshard rank0 transferred+sliced weights for TP%d", new_tp)
+
+        self._pre_reshard_tp = old_tp
+        self.tp_size = new_tp
+        self.tp_rank = 0
+        if self._inplace_reshard_should_cold_reload_rank0(new_tp):
+            self._needs_inplace_reshard_rank0_cold_reload = True
+        else:
+            self._update_model_tp_metadata(new_tp)
+
+        dist.barrier(group=get_tp_group().cpu_group)
+
+        t_rebuild = _time.time()
+        self.rebuild_memory_pool_after_inplace_reshard()
+        rebuild_s = _time.time() - t_rebuild
+        dist.barrier(group=get_tp_group().cpu_group)
+        self.maybe_init_ngram_embedding()
+        self.init_routed_experts_capturer()
+        if self.device == "cuda" or self.device == "musa":
+            self.init_cublas()
+            self.init_attention_backend()
+            self.kernel_warmup()
+            self.init_device_graphs()
+        elif self.device in ["npu", "cpu"]:
+            self.init_attention_backend()
+            self.init_device_graphs()
+        else:
+            self.graph_runner = None
+            self.graph_mem_usage = 0
+            self.init_attention_backend()
+        self.init_piecewise_cuda_graphs()
+
+        dist.barrier(group=get_tp_group().cpu_group)
+        return (
+            True,
+            f"joinable in-place TP{old_tp}->TP{new_tp}: sent {total_sent/1e9:.2f}GB "
+            f"xfer={xfer_s:.3f}s rebuild={rebuild_s:.3f}s",
+            _time.time() - t0,
+        )
+
+    @torch.no_grad()
+    def live_reshard_tp(
+        self,
+        new_tp: int,
+        receiver_addresses: Optional[List[str]] = None,
+        nccl_port: int = 29500,
+    ) -> Tuple[bool, str, float]:
+        """Live TP reshard: expand TP by spawning workers on other GPUs.
+
+        Full multi-GPU flow:
+          1. Export weight shard plan (shapes + split info)
+          2. Spawn receiver workers on target GPUs
+          3. Use NCCL to transfer weight shards from rank0 to new ranks
+          4. Narrow own weights, update metadata
+
+        Result: GPU0 keeps 1/N, GPU1..N-1 each receive 1/N of weights.
+
+        Args:
+            new_tp: target TP size
+            nccl_port: port for temporary NCCL rendezvous
+        Returns: (success, message, elapsed_seconds)
+        """
+        import time as _time
+        from multiprocessing import Process, Event, Queue
+        from sglang.srt.layers.reshard_weights import (
+            get_tp_split_rules,
+            reshard_shard_for_rank,
+        )
+
+        old_tp = self.tp_size
+        if new_tp <= old_tp:
+            return False, f"new_tp={new_tp} must be > old_tp={old_tp}", 0.0
+        if new_tp % old_tp != 0:
+            return False, "new_tp must be divisible by old_tp", 0.0
+        if self.server_args.inplace_reshard_max_tp is not None:
+            return self._live_reshard_tp_joinable(new_tp)
+        if os.environ.get("SGLANG_RESHARD_ENABLE_UNSAFE_LIVE_TP", "0") != "1":
+            return (
+                False,
+                "live_reshard_tp currently requires joinable scheduler/model workers; "
+                "the legacy receiver-only path is disabled because it can leave rank0 "
+                "with TP-sharded weights but no participating forward workers. Use "
+                "--inplace-reshard-max-tp for the joinable worker path or set "
+                "SGLANG_RESHARD_ENABLE_UNSAFE_LIVE_TP=1 for debugging only.",
+                0.0,
+            )
+
+        factor = new_tp // old_tp
+        t_total = _time.time()
+        timings = {}
+
+        logger.info("live_reshard_tp: TP%d → TP%d (factor=%d, %d new GPUs)",
+                    old_tp, new_tp, factor, new_tp - old_tp)
+
+        self._pre_reshard_tp = old_tp
+
+        # Build plan: list of (name, shape, dtype, split_dim)
+        rules = get_tp_split_rules(self.model)
+        plan = []
+        for name, param in self.model.named_parameters():
+            if name in rules:
+                _, split_dim = rules[name]
+                plan.append((name, list(param.data.shape), param.dtype, split_dim))
+            else:
+                plan.append((name, list(param.data.shape), param.dtype, -1))
+
+        # Phase 1: Spawn receiver workers
+        t1 = _time.time()
+        evt_go = Event()
+        result_queue = Queue()
+        receiver_procs = []
+
+        for new_rank in range(old_tp, new_tp):
+            p = Process(
+                target=_receiver_worker,
+                args=(new_rank, new_tp, old_tp, nccl_port, plan,
+                      evt_go, result_queue),
+                daemon=True,
+            )
+            p.start()
+            receiver_procs.append(p)
+
+        timings["spawn_ms"] = (_time.time() - t1) * 1000
+
+        # Phase 2: Sender NCCL init (use FileStore to avoid conflict with existing PG)
+        t2 = _time.time()
+        store_path = f"/tmp/sglang_reshard_store_{nccl_port}"
+        store = dist.FileStore(store_path, new_tp)
+        reshard_pg = dist.ProcessGroupNCCL(store, 0, new_tp)
+        timings["nccl_init_ms"] = (_time.time() - t2) * 1000
+
+        # Signal receivers
+        evt_go.set()
+
+        # Phase 3: Transfer weights via NCCL
+        t3 = _time.time()
+        total_sent = 0
+
+        for name, param in self.model.named_parameters():
+            if name in rules:
+                _, split_dim = rules[name]
+                shard_size = param.data.shape[split_dim] // factor
+                for i in range(1, factor):
+                    dst_rank = i
+                    sub = param.data.narrow(
+                        split_dim, i * shard_size, shard_size
+                    ).contiguous()
+                    work = reshard_pg.send([sub], dst_rank, 0)
+                    work.wait()
+                    total_sent += sub.numel() * sub.element_size()
+                    del sub
+                # Keep own sub-shard
+                param.data = param.data.narrow(
+                    split_dim, 0, shard_size
+                ).contiguous()
+            else:
+                # Non-split: send full copy to each new rank
+                for i in range(1, factor):
+                    dst_rank = i
+                    t_cont = param.data.contiguous()
+                    work = reshard_pg.send([t_cont], dst_rank, 0)
+                    work.wait()
+                    total_sent += t_cont.numel() * t_cont.element_size()
+
+        torch.cuda.synchronize()
+        timings["transfer_ms"] = (_time.time() - t3) * 1000
+
+        # Cleanup
+        del reshard_pg
+        try:
+            os.remove(store_path)
+        except OSError:
+            pass
+
+        # Wait for receivers
+        for p in receiver_procs:
+            p.join(timeout=30)
+
+        # Collect results
+        recv_results = []
+        while not result_queue.empty():
+            recv_results.append(result_queue.get_nowait())
+
+        # Update state
+        self.tp_size = new_tp
+        self.tp_rank = 0
+        self._update_model_tp_metadata(new_tp)
+
+        timings["total_ms"] = (_time.time() - t_total) * 1000
+        bw = total_sent / (timings["transfer_ms"]/1000) / 1e9 if timings["transfer_ms"] > 0 else 0
+        full_msg = (
+            f"live_reshard_tp TP{old_tp}→TP{new_tp} in {timings['total_ms']:.0f}ms: "
+            f"spawn={timings['spawn_ms']:.0f}ms "
+            f"nccl={timings['nccl_init_ms']:.0f}ms "
+            f"transfer={timings['transfer_ms']:.0f}ms "
+            f"({total_sent/1e9:.1f}GB @ {bw:.0f}GB/s to {new_tp-old_tp} GPUs)"
+        )
+        logger.info(full_msg)
+        return True, full_msg, timings["total_ms"] / 1000
+
+    def _update_model_tp_metadata(self, new_tp: int):
+        """Update attention/MLP layer metadata after TP reshard.
+
+        After weights are sliced, the model's cached shape constants
+        (num_heads, q_size, kv_size, tp_head_num, etc.) must match the new TP.
+        """
+        old_tp = getattr(self, '_pre_reshard_tp', 1)
+        factor = new_tp // old_tp
+
+        n_tp_size = 0
+        n_reduce = 0
+        for module in self.model.modules():
+            # Update Qwen3Attention-style layers
+            if hasattr(module, 'total_num_heads') and hasattr(module, 'q_size'):
+                total_heads = module.total_num_heads
+                total_kv = getattr(module, 'total_num_kv_heads', total_heads)
+                head_dim = module.head_dim
+
+                module.num_heads = total_heads // new_tp
+                module.num_kv_heads = max(1, total_kv // new_tp)
+                module.q_size = module.num_heads * head_dim
+                module.kv_size = module.num_kv_heads * head_dim
+
+            # Update RadixAttention (tp_q_head_num etc. are per-rank counts)
+            if hasattr(module, 'tp_q_head_num') and hasattr(module, 'tp_k_head_num'):
+                module.tp_q_head_num = module.tp_q_head_num // factor
+                module.tp_k_head_num = max(1, module.tp_k_head_num // factor)
+                module.tp_v_head_num = max(1, module.tp_v_head_num // factor)
+
+            # Update ANY parallel-linear-style module carrying a tp_size (Column/
+            # Row/QKV/MergedColumn ParallelLinear). Their forward() gates the TP
+            # all_reduce on self.tp_size; rank0 built them at TP1 so without this
+            # update rank0 would skip the all_reduce while joining ranks perform
+            # it, deadlocking the collective. Also refresh per-partition sizes.
+            if hasattr(module, 'tp_size') and not hasattr(module, 'total_num_heads') \
+                    and not hasattr(module, 'tp_q_head_num'):
+                module.tp_size = new_tp
+                if hasattr(module, 'tp_rank'):
+                    module.tp_rank = self.tp_rank
+                n_tp_size += 1
+                if hasattr(module, 'reduce_results'):
+                    n_reduce += 1
+                # Refresh cached per-partition input width used by RowParallel.
+                if hasattr(module, 'input_size_per_partition') and hasattr(module, 'input_size'):
+                    module.input_size_per_partition = module.input_size // new_tp
+                if hasattr(module, 'output_size_per_partition') and hasattr(module, 'output_size'):
+                    module.output_size_per_partition = module.output_size // new_tp
+
+        # Refresh LogitsProcessor's cached TP-all-gather decision. It is computed
+        # once at build time from the world size; rank0 built at TP1 cached
+        # do_tensor_parallel_all_gather=False, so after reshard rank0 would skip
+        # the vocab-parallel logits all_gather while joining ranks perform it,
+        # deadlocking the collective in the logits stage.
+        n_lp = 0
+        try:
+            from sglang.srt.distributed import (
+                get_tensor_model_parallel_world_size as _get_tp_ws,
+            )
+            from sglang.srt.layers.dp_attention import get_attention_dp_size as _get_dp
+            from sglang.srt.layers.dp_attention import get_attention_tp_size as _get_atp
+            for module in self.model.modules():
+                if module.__class__.__name__ == "LogitsProcessor" and hasattr(
+                    module, "do_tensor_parallel_all_gather"
+                ):
+                    if getattr(module, "use_attn_tp_group", False):
+                        module.attn_tp_size = _get_atp()
+                        module.do_tensor_parallel_all_gather = module.attn_tp_size > 1
+                        module.do_tensor_parallel_all_gather_dp_attn = False
+                    else:
+                        module.do_tensor_parallel_all_gather = _get_tp_ws() > 1
+                        module.do_tensor_parallel_all_gather_dp_attn = (
+                            module.do_tensor_parallel_all_gather and _get_dp() != 1
+                        )
+                    n_lp += 1
+        except Exception as e:
+            logger.warning("Failed to refresh LogitsProcessor tp state: %s", e)
+        logger.info("In-place reshard: refreshed %d LogitsProcessor(s)", n_lp)
+
+        # Recompute vocab-parallel shard indices (embed_tokens / lm_head). These
+        # are cached from build time; after the vocab dim is re-sharded, the
+        # embedding must mask the correct per-rank token id range or decode hits a
+        # device-side index assert.
+        n_vpe = 0
+        try:
+            for module in self.model.modules():
+                if hasattr(module, "reshard_recompute_indices") and hasattr(
+                    module, "shard_indices"
+                ):
+                    module.reshard_recompute_indices(self.tp_rank, new_tp)
+                    n_vpe += 1
+        except Exception as e:
+            logger.warning("Failed to recompute vocab-parallel shard indices: %s", e)
+        logger.info("In-place reshard: recomputed %d vocab-parallel shard indices", n_vpe)
+
+        # Refresh every LayerCommunicator's cached CommunicateContext. It caches
+        # tp_size / attn_tp_size captured at build time (TP1 on rank0), which
+        # gates the per-layer scatter/gather/all-reduce. Stale context makes
+        # rank0 skip TP communication that joining ranks still perform, hanging
+        # the collective. Re-init picks up the now-updated global TP sizes.
+        n_ctx = 0
+        try:
+            from sglang.srt.layers.communicator import (
+                CommunicateContext,
+                LayerCommunicator,
+            )
+
+            fresh_ctx = CommunicateContext.init_new()
+            seen = set()
+            # LayerCommunicator objects are plain attributes on decoder layers
+            # (not nn.Modules), so scan every module's __dict__ for them.
+            for module in self.model.modules():
+                for attr_val in list(vars(module).values()):
+                    if isinstance(attr_val, LayerCommunicator) and id(attr_val) not in seen:
+                        attr_val._context = CommunicateContext.init_new()
+                        # Re-bind the communication functions: they are chosen at
+                        # build time from the (then TP1) context and cache whether
+                        # to all_reduce/reduce_scatter. Without this rank0 keeps
+                        # the TP1 no-op comm fns and skips half the all_reduces.
+                        attr_val._post_init_communicate()
+                        seen.add(id(attr_val))
+                        n_ctx += 1
+        except Exception as e:
+            logger.warning("Failed to refresh LayerCommunicator contexts: %s", e)
+
+        logger.info(
+            "In-place reshard metadata: updated tp_size on %d parallel modules "
+            "(%d row-parallel reduce), refreshed %d layer-communicator contexts",
+            n_tp_size, n_reduce, n_ctx,
+        )
+        # Update KV cache pool metadata (row_dim, head_num)
+        self._update_kv_pool_metadata(new_tp, factor)
+
+    def _update_kv_pool_metadata(self, new_tp: int, factor: int):
+        """Update KV cache pool's head_num and row_dim after TP reshard.
+
+        The KV buffer physical size stays the same (we flush cache anyway),
+        but metadata must match the new per-rank head count.
+        """
+        try:
+            pool = getattr(self, "token_to_kv_pool", None)
+            if pool is None:
+                return
+            if hasattr(pool, 'head_num') and hasattr(pool, 'row_dim'):
+                pool.head_num = pool.head_num // factor
+                pool.row_dim = pool.head_num * pool.head_dim
+                logger.info(
+                    "KV pool metadata updated: head_num=%d, row_dim=%d",
+                    pool.head_num, pool.row_dim,
+                )
+        except Exception as e:
+            logger.warning("Failed to update KV pool metadata: %s", e)
 
     def _update_weights_from_flattened_bucket(
         self,
@@ -2507,8 +4677,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             forward_batch,
             **kwargs,
         )
-        t_ms = (time.perf_counter() - t0) * 1000
-        logger.debug(f"[MODEL_FWD] DECODE: t={t_ms:.1f}ms, bs={forward_batch.batch_size}, seq_lens={forward_batch.seq_lens}")
+        if logger.isEnabledFor(logging.DEBUG):
+            t_ms = (time.perf_counter() - t0) * 1000
+            logger.debug(f"[MODEL_FWD] DECODE: t={t_ms:.1f}ms, bs={forward_batch.batch_size}, seq_lens={forward_batch.seq_lens}")
         return ret
 
     def forward_extend(
@@ -2551,8 +4722,9 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             forward_batch,
             **kwargs,
         )
-        t_ms = (time.perf_counter() - t0) * 1000
-        logger.debug(f"[MODEL_FWD] EXTEND: t={t_ms:.1f}ms, bs={forward_batch.batch_size}, seq_lens={forward_batch.seq_lens[:5] if forward_batch.seq_lens is not None else None}")
+        if logger.isEnabledFor(logging.DEBUG):
+            t_ms = (time.perf_counter() - t0) * 1000
+            logger.debug(f"[MODEL_FWD] EXTEND: t={t_ms:.1f}ms, bs={forward_batch.batch_size}, seq_lens={forward_batch.seq_lens[:5] if forward_batch.seq_lens is not None else None}")
         return (
             ret,
             can_run_graph,
@@ -2851,6 +5023,72 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
     def check_weights(self, action: str):
         self._weight_checker.handle(action=action)
+
+    def _should_use_ipc_fast_path(self) -> bool:
+        """Check if IPC fast path should be used (skip disk IO entirely)."""
+        if getattr(self, "_force_disk_load_inplace_reshard", False):
+            return False
+        ipc_dir = os.environ.get("SGLANG_RESHARD_IPC_DIR")
+        if not ipc_dir:
+            return False
+        from pathlib import Path
+        ipc_path = Path(ipc_dir)
+        if not ipc_path.exists():
+            return False
+        handle_files = list(ipc_path.glob("*.json"))
+        if not handle_files:
+            return False
+        module_type = os.environ.get("SGLANG_RESHARD_MODULE_TYPE", "prefill")
+        perspective = os.environ.get("SGLANG_RESHARD_PERSPECTIVE", "full")
+        for f in handle_files:
+            if module_type in f.name and perspective in f.name:
+                return True
+        return False
+
+    def _try_reshard_ipc_load(self):
+        """Load weights from IPC handles if available (graceful reshard)."""
+        if getattr(self, "_force_disk_load_inplace_reshard", False):
+            return
+        ipc_dir = os.environ.get("SGLANG_RESHARD_IPC_DIR")
+        if not ipc_dir:
+            return
+        from pathlib import Path
+        ipc_path = Path(ipc_dir)
+        if not ipc_path.exists():
+            return
+        handle_files = list(ipc_path.glob("*.json"))
+        if not handle_files:
+            return
+        logger.info("Reshard IPC: found %d handle files in %s", len(handle_files), ipc_dir)
+        try:
+            from sglang.srt.reshard.weight_loader import FastTPLoader
+            old_tp_size = int(os.environ.get("SGLANG_RESHARD_OLD_TP", "1"))
+            module_type = os.environ.get("SGLANG_RESHARD_MODULE_TYPE", "prefill")
+            perspective = os.environ.get("SGLANG_RESHARD_PERSPECTIVE", "full")
+            loader = FastTPLoader(
+                new_tp_size=self.tp_size,
+                new_tp_rank=self.tp_rank,
+                old_tp_size=old_tp_size,
+                module_type=module_type,
+                perspective=perspective,
+                ipc_dir=ipc_path,
+            )
+            if loader.has_ipc_weights():
+                success = loader.load_into_model(self.model, self.device)
+                if success:
+                    logger.info(
+                        "Reshard IPC: weights loaded successfully "
+                        "(old_tp=%d → new_tp=%d rank=%d)",
+                        old_tp_size, self.tp_size, self.tp_rank,
+                    )
+                    if os.environ.get("SGLANG_RESHARD_IPC_AUTO_CLEANUP", "0") == "1":
+                        loader.signal_done()
+                else:
+                    logger.warning("Reshard IPC: load returned False")
+            else:
+                logger.info("Reshard IPC: handles not complete for this config")
+        except Exception as e:
+            logger.warning("Reshard IPC: failed (%s), using disk weights", e)
 
     def update_weights_from_ipc(self, recv_req):
         """Update weights from IPC for checkpoint-engine integration."""

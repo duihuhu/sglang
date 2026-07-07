@@ -139,6 +139,7 @@ from sglang.srt.managers.io_struct import (
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
     UpdateWeightsFromTensorReqInput,
+    ReshardReqInput,
 )
 from sglang.srt.managers.mm_utils import init_mm_embedding_cache, unwrap_shm_features
 from sglang.srt.managers.overlap_utils import FutureMap
@@ -385,6 +386,30 @@ class Scheduler(
         # Launch a model worker and draft model worker if using speculative decoding
         self.init_model_worker()
 
+        self.is_inplace_standby_rank = bool(
+            getattr(self.tp_worker.model_runner, "is_inplace_standby_rank", False)
+        )
+        if self.is_inplace_standby_rank:
+            # Standby ranks are real scheduler/model-worker processes in the
+            # distributed world, but they are not part of the active TP serving
+            # group yet. They must not allocate KV cache or enter the normal
+            # request/forward loop until a reshard activates them.
+            self.max_total_num_tokens = 1
+            self.max_req_input_len = 1
+            self.max_running_requests = 1
+            self.max_queued_requests = self.server_args.max_queued_requests
+            self.device = self.tp_worker.device
+            self.device_module = torch.get_device_module(self.device)
+            self.forward_stream = self.tp_worker.model_runner.forward_stream
+            self.is_initializing = False
+            logger.info(
+                "In-place reshard standby scheduler ready: rank=%d active_tp=%d max_tp=%d",
+                self.tp_rank,
+                self.server_args.tp_size,
+                self.server_args.inplace_reshard_max_tp,
+            )
+            return
+
         if (t := envs.SGLANG_TEST_STUCK_SCHEDULER_INIT.get()) > 0:
             time.sleep(t)
 
@@ -460,7 +485,22 @@ class Scheduler(
         context = zmq.Context(2)
         self.idle_sleeper = None
 
-        if self.pp_rank == 0 and self.attn_tp_rank == 0 and self.attn_cp_rank == 0:
+        # In experimental in-place reshard mode, standby ranks (tp_rank outside the
+        # currently active TP group) must NOT bind the tokenizer/rpc PULL sockets.
+        # Otherwise ZMQ PUSH from the tokenizer load-balances requests across rank0
+        # and the standby ranks, and half the requests are silently swallowed by a
+        # rank that never runs the serving loop.
+        _inplace_standby_ipc = (
+            self.server_args.inplace_reshard_max_tp is not None
+            and self.tp_rank >= self.server_args.tp_size
+        )
+
+        if (
+            self.pp_rank == 0
+            and self.attn_tp_rank == 0
+            and self.attn_cp_rank == 0
+            and not _inplace_standby_ipc
+        ):
             self.recv_from_tokenizer = get_zmq_socket(
                 context, zmq.PULL, port_args.scheduler_input_ipc_name, False
             )
@@ -847,8 +887,152 @@ class Scheduler(
         else:
             self.decode_offload_manager = None
 
+        self._maybe_grow_hicache_host_extent_for_test()
+
         embedding_cache_size = envs.SGLANG_VLM_CACHE_SIZE_MB.get()
         init_mm_embedding_cache(embedding_cache_size * 1024 * 1024)
+
+    def _get_hicache_host_pool_for_debug(self):
+        tree_cache = getattr(self, "tree_cache", None)
+        if tree_cache is None:
+            return None
+        return getattr(tree_cache, "token_to_kv_pool_host", None) or getattr(
+            tree_cache, "full_kv_pool_host", None
+        )
+
+    def _get_hicache_extent_debug_state(self):
+        host_pool = self._get_hicache_host_pool_for_debug()
+        if host_pool is None:
+            return None
+
+        ret = {
+            "size": int(host_pool.size),
+            "available_size": int(host_pool.available_size()),
+            "page_size": int(host_pool.page_size),
+            "size_per_token": int(host_pool.size_per_token),
+        }
+        extent_table = getattr(host_pool, "extent_table", None)
+        if extent_table is None:
+            ret["extent_count"] = 1
+            ret["extents"] = [
+                {
+                    "extent_id": 0,
+                    "base": 0,
+                    "size": int(host_pool.size),
+                    "free_slots": int(len(host_pool.free_slots)),
+                    "state": "static",
+                    "pinned": bool(
+                        getattr(host_pool, "kv_buffer", torch.empty(0)).is_pinned()
+                    ),
+                }
+            ]
+        else:
+            ret["extent_count"] = len(extent_table.extents)
+            ret["extents"] = [
+                {
+                    "extent_id": int(extent.extent_id),
+                    "base": int(extent.base),
+                    "size": int(extent.size),
+                    "free_slots": int(len(extent.free_slots)),
+                    "state": extent.state,
+                    "pinned": bool(
+                        extent.kv_buffer.is_pinned()
+                        if extent.kv_buffer is not None
+                        else False
+                    ),
+                }
+                for extent in extent_table.extents
+            ]
+        reserved = getattr(self, "_test_hicache_reserved_old_extent_indices", None)
+        if reserved is not None:
+            ret["test_reserved_old_extent_tokens"] = int(len(reserved))
+        if getattr(self, "_test_hicache_old_extent_marked_draining", False):
+            ret["test_old_extent_marked_draining"] = True
+        transfer_records = getattr(host_pool, "_test_extent_transfer_records", None)
+        if transfer_records is not None:
+            ret["test_extent_transfer_records"] = transfer_records
+            if hasattr(host_pool, "_summarize_extent_transfer_records"):
+                ret["test_extent_transfer_summary"] = (
+                    host_pool._summarize_extent_transfer_records()
+                )
+        tree_cache = getattr(self, "tree_cache", None)
+        if tree_cache is not None:
+            ret["ongoing_write_through"] = len(tree_cache.ongoing_write_through)
+            ret["ongoing_load_back"] = len(tree_cache.ongoing_load_back)
+            if getattr(tree_cache, "enable_storage", False):
+                ret["ongoing_prefetch"] = len(tree_cache.ongoing_prefetch)
+                ret["ongoing_backup"] = len(tree_cache.ongoing_backup)
+        return ret
+
+    def _maybe_grow_hicache_host_extent_for_test(self):
+        grow_tokens = int(os.environ.get("SGLANG_TEST_HICACHE_GROW_EXTENT_TOKENS", "0"))
+        if grow_tokens <= 0:
+            return
+
+        host_pool = self._get_hicache_host_pool_for_debug()
+        if host_pool is None:
+            logger.warning(
+                "SGLANG_TEST_HICACHE_GROW_EXTENT_TOKENS was set, but no HiCache host pool exists."
+            )
+            return
+        if not hasattr(host_pool, "grow_extent_online"):
+            logger.warning("HiCache host pool does not support online extent growth.")
+            return
+
+        old_size = int(host_pool.size)
+        old_available = int(host_pool.available_size())
+        extent_id = host_pool.grow_extent_online(grow_tokens)
+        logger.info(
+            "Test hook grew HiCache host extent: old_size=%s old_available=%s "
+            "requested_tokens=%s new_extent_id=%s new_size=%s new_available=%s",
+            old_size,
+            old_available,
+            grow_tokens,
+            extent_id,
+            int(host_pool.size),
+            int(host_pool.available_size()),
+        )
+
+        extent_table = getattr(host_pool, "extent_table", None)
+        reserve_leave_tokens = int(
+            os.environ.get(
+                "SGLANG_TEST_HICACHE_RESERVE_OLD_EXTENT_LEAVE_TOKENS", "0"
+            )
+        )
+        if reserve_leave_tokens > 0:
+            if extent_table is None or len(extent_table.extents) < 2:
+                logger.warning("Cannot reserve old extent without a multi-extent table.")
+            else:
+                old_extent_free = len(extent_table.extents[0].free_slots)
+                reserve_tokens = max(old_extent_free - reserve_leave_tokens, 0)
+                reserve_tokens = (
+                    reserve_tokens // host_pool.page_size
+                ) * host_pool.page_size
+                if reserve_tokens > 0:
+                    self._test_hicache_reserved_old_extent_indices = (
+                        extent_table.reserve_from_extent(0, reserve_tokens)
+                    )
+                logger.info(
+                    "Test hook reserved old HiCache extent slots: "
+                    "extent_id=0 reserved_tokens=%s leave_tokens=%s old_free_before=%s old_free_after=%s",
+                    reserve_tokens,
+                    reserve_leave_tokens,
+                    old_extent_free,
+                    len(extent_table.extents[0].free_slots),
+                )
+
+        if os.environ.get("SGLANG_TEST_HICACHE_RESERVE_OLD_EXTENT", "0") != "1":
+            return
+
+        if extent_table is None or len(extent_table.extents) < 2:
+            logger.warning("Cannot reserve old extent without a multi-extent table.")
+            return
+        extent_table.mark_draining(0)
+        self._test_hicache_old_extent_marked_draining = True
+        logger.info(
+            "Test hook marked old HiCache extent as draining: extent_id=0 size=%s",
+            extent_table.extents[0].size,
+        )
 
     def init_running_status(self):
         self.waiting_queue: List[Req] = []
@@ -862,9 +1046,980 @@ class Scheduler(
         self.return_health_check_ipcs: Deque[Optional[str]] = deque()
         self.num_retracted_reqs: int = 0
         self.num_paused_reqs: int = 0
+        self._pending_inplace_reshard = None
         self.session_controller = SessionController(self.tree_cache)
         self.forward_sleep_time = None
         self._engine_paused = False
+        if (
+            self.server_args.inplace_reshard_max_tp is not None
+            and self.tp_rank == 0
+            and not getattr(self, "is_inplace_standby_rank", False)
+        ):
+            cur = getattr(self, "_inplace_reshard_status", {}).get("phase")
+            if cur not in ("draining", "executing"):
+                self._publish_inplace_reshard_status(
+                    phase="idle",
+                    active_tp=self.tp_size,
+                    target_tp=None,
+                    message="ready",
+                )
+
+    def _publish_inplace_reshard_status(
+        self,
+        *,
+        phase: str,
+        active_tp: int,
+        target_tp: Optional[int] = None,
+        old_tp: Optional[int] = None,
+        message: str = "",
+        elapsed_s: Optional[float] = None,
+        timings: Optional[dict] = None,
+    ):
+        """Publish in-place reshard phase for external probes (rank0 only)."""
+        if self.tp_rank != 0 or getattr(self, "is_inplace_standby_rank", False):
+            return
+        import json as _json
+        from pathlib import Path
+
+        now = time.time()
+        prev = getattr(self, "_inplace_reshard_status", None) or {}
+        started_at = prev.get("started_at")
+        generation = prev.get("generation", 0)
+        if phase in ("draining", "executing") and prev.get("phase") in (
+            "idle",
+            "done",
+            "failed",
+            None,
+        ):
+            generation = generation + 1
+            started_at = now
+        elif phase in ("draining", "executing", "preparing") and started_at is None:
+            started_at = now
+
+        status = {
+            "phase": phase,
+            "generation": generation,
+            "old_tp": old_tp if old_tp is not None else prev.get("old_tp"),
+            "target_tp": target_tp if target_tp is not None else prev.get("target_tp"),
+            "active_tp": active_tp,
+            "message": message,
+            "started_at": started_at,
+            "updated_at": now,
+            "done_at": now if phase == "done" else None,
+            "elapsed_s": elapsed_s,
+            "timings": timings,
+        }
+        self._inplace_reshard_status = status
+        try:
+            Path("/tmp/sglang_inplace_reshard_status.json").write_text(
+                _json.dumps(status)
+            )
+        except Exception as e:
+            logger.warning("failed to publish inplace reshard status: %s", e)
+
+    def _inplace_reshard_is_drained(self) -> bool:
+        if self.chunked_req is not None:
+            return False
+        if not self.running_batch.is_empty():
+            return False
+        if self.enable_overlap:
+            if len(getattr(self, "result_queue", [])) > 0:
+                return False
+            if self.last_batch is not None:
+                return False
+        return True
+
+    def _inplace_reshard_draining(self) -> bool:
+        return getattr(self, "_pending_inplace_reshard", None) is not None
+
+    def _inplace_reshard_blocks_new_requests(self) -> bool:
+        if getattr(self, "_engine_paused", False):
+            return True
+        if getattr(self, "_inplace_reshard_execute_pending", None) is not None:
+            return True
+        if self._inplace_reshard_draining():
+            return True
+        phase = (getattr(self, "_inplace_reshard_status", None) or {}).get("phase")
+        return phase in ("pre_draining", "preparing", "draining", "executing")
+
+    def _should_skip_memory_check(self) -> bool:
+        """Skip strict pool accounting during in-place reshard transitions.
+
+        RadixCache holds req_to_token_pool / KV allocator references from
+        construction; until _reshard_rebuild_tree_cache() rebinds them after a
+        pool rebuild, idle self_check can false-positive as req_to_token_pool
+        memory leak (C-round symptom under SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE).
+        """
+        if getattr(self, "_engine_paused", False):
+            return True
+        if self.server_args.inplace_reshard_max_tp is not None:
+            return self._inplace_reshard_blocks_new_requests()
+        return False
+
+    def maybe_continue_inplace_reshard(self):
+        """Resume a deferred in-place reshard once in-flight work has drained."""
+        pending = getattr(self, "_pending_inplace_reshard", None)
+        if pending is None or self.tp_rank != 0:
+            return
+        recv_req, t0 = pending
+        pre_until = getattr(self, "_inplace_reshard_pre_drain_until", 0.0)
+        if pre_until and time.time() < pre_until and not self._inplace_reshard_is_drained():
+            return
+        if not self._inplace_reshard_is_drained():
+            return
+        self._pending_inplace_reshard = None
+        self._inplace_reshard_pre_drain_until = 0.0
+        recv_req, t0 = pending
+        new_tp = int(recv_req.new_tp_size)
+        old_tp = self.tp_worker.model_runner.tp_size
+        from sglang.srt.reshard.inplace_reshard_background import background_prep_enabled
+
+        if (
+            background_prep_enabled()
+            and not self.tp_worker.model_runner.inplace_reshard_prep_is_ready(new_tp)
+        ):
+            self._pending_inplace_reshard = (recv_req, t0)
+            self._schedule_inplace_reshard_background_prep(old_tp, new_tp)
+            if self.tp_rank == 0 and not self._inplace_reshard_centralized_scheduling():
+                self._run_inplace_reshard_prep_collective(old_tp, new_tp)
+            if not self.tp_worker.model_runner.inplace_reshard_prep_is_ready(new_tp):
+                return
+        if (
+            self.server_args.inplace_reshard_max_tp is not None
+            and self.tp_worker.model_runner.tp_size > 1
+        ):
+            self._inplace_reshard_execute_pending = (recv_req, t0)
+            logger.info("Deferred in-place reshard queued for synchronized execute")
+            return
+        result = self._live_reshard_tp_execute(recv_req, t0)
+        logger.info("Deferred in-place reshard finished: %s", result.message)
+
+    def _schedule_inplace_reshard_background_prep(self, old_tp: int, new_tp: int) -> None:
+        """Queue a background prep round for the next scheduling iteration."""
+        from sglang.srt.reshard.inplace_reshard_background import (
+            background_prep_enabled,
+            prep_state_key,
+        )
+
+        if not background_prep_enabled():
+            return
+        key = prep_state_key(old_tp, new_tp)
+        prev_key = getattr(self, "_inplace_reshard_prep_key", None)
+        if prev_key != key:
+            self.tp_worker.model_runner.reset_inplace_reshard_prep()
+            self._inplace_reshard_prep_key = None
+        if prev_key == key and self.tp_worker.model_runner.inplace_reshard_prep_is_ready(
+            new_tp
+        ):
+            return
+        if self.tp_worker.model_runner.inplace_reshard_prep_is_ready(new_tp):
+            self._inplace_reshard_prep_key = key
+            return
+        self._inplace_reshard_prep_pending = (int(old_tp), int(new_tp))
+        if self.tp_rank == 0:
+            self._publish_inplace_reshard_status(
+                phase="preparing",
+                active_tp=old_tp,
+                target_tp=new_tp,
+                old_tp=old_tp,
+                message=f"background prep TP{old_tp}→TP{new_tp}",
+            )
+
+    def _run_inplace_reshard_prep_collective(self, old_tp: int, new_tp: int) -> bool:
+        """Synchronized world prep round (rank0 initiates broadcast)."""
+        from sglang.srt.reshard.inplace_reshard_background import (
+            background_prep_enabled,
+            prep_state_key,
+        )
+
+        if not background_prep_enabled():
+            return True
+        mr = self.tp_worker.model_runner
+        if mr.inplace_reshard_prep_is_ready(new_tp):
+            self._inplace_reshard_prep_key = prep_state_key(old_tp, new_tp)
+            self._inplace_reshard_prep_pending = None
+            return True
+        if self.tp_rank != 0:
+            return mr.inplace_reshard_prep_is_ready(new_tp)
+        logger.info(
+            "In-place reshard rank0 starting world prep collective TP%d->TP%d",
+            old_tp,
+            new_tp,
+        )
+        prep_cmd = {
+            "action": "prepare_inplace_reshard",
+            "old_tp_size": int(old_tp),
+            "new_tp_size": int(new_tp),
+        }
+        broadcast_pyobj(
+            prep_cmd,
+            self.world_group.rank,
+            self.world_group.cpu_group,
+            src=self.world_group.ranks[0],
+        )
+        logger.info("In-place reshard rank0 prep broadcast done, running body")
+        self._inplace_reshard_world_prep_body(old_tp, new_tp)
+        ready = mr.inplace_reshard_prep_is_ready(new_tp)
+        if ready:
+            self._inplace_reshard_prep_pending = None
+            self._inplace_reshard_prep_key = prep_state_key(old_tp, new_tp)
+            self._publish_inplace_reshard_status(
+                phase="prepared",
+                active_tp=old_tp,
+                target_tp=new_tp,
+                old_tp=old_tp,
+                message=f"background prep ready TP{old_tp}→TP{new_tp}",
+            )
+        return ready
+
+    def _inplace_reshard_world_prep_body(self, old_tp: int, new_tp: int) -> None:
+        """Collective prep: IPC weight staging + joining-rank dummy load."""
+        import torch.distributed as dist
+
+        from sglang.srt.distributed import get_world_group
+
+        wg = get_world_group()
+        dist.barrier(group=wg.cpu_group)
+        handles_by_src = None
+        if int(old_tp) == 1:
+            if self.tp_rank == 0:
+                ipc_msg = [
+                    self.tp_worker.model_runner._gather_inplace_reshard_ipc_handles(
+                        old_tp
+                    )
+                ]
+            else:
+                ipc_msg = [None]
+            ipc_recv = broadcast_pyobj(
+                ipc_msg if self.tp_rank == 0 else None,
+                wg.rank,
+                wg.cpu_group,
+                src=wg.ranks[0],
+            )
+            if self.tp_rank >= old_tp and self.tp_rank < new_tp:
+                handles_by_src = ipc_recv[0]
+        ok, msg, elapsed = self.tp_worker.model_runner.prepare_inplace_reshard_tp(
+            new_tp, old_tp, handles_by_src=handles_by_src
+        )
+        logger.info(
+            "In-place reshard world prep rank %d TP%d->TP%d ok=%s %.3fs: %s",
+            self.tp_rank,
+            old_tp,
+            new_tp,
+            ok,
+            elapsed,
+            msg,
+        )
+
+    def _maybe_run_inplace_reshard_background_prep(self) -> bool:
+        """Run one synchronized background-prep round if queued."""
+        from sglang.srt.reshard.inplace_reshard_background import prep_state_key
+
+        pending = getattr(self, "_inplace_reshard_prep_pending", None)
+        if pending is None:
+            return False
+        old_tp, new_tp = pending
+        if self.tp_worker.model_runner.inplace_reshard_prep_is_ready(new_tp):
+            self._inplace_reshard_prep_pending = None
+            self._inplace_reshard_prep_key = prep_state_key(old_tp, new_tp)
+            if self.tp_rank == 0:
+                self._publish_inplace_reshard_status(
+                    phase="prepared",
+                    active_tp=old_tp,
+                    target_tp=new_tp,
+                    old_tp=old_tp,
+                    message=f"background prep ready TP{old_tp}→TP{new_tp}",
+                )
+            return False
+
+        if self._inplace_reshard_centralized_scheduling():
+            if self.tp_rank == 0:
+                logger.info(
+                    "In-place reshard rank0 centralized prep round TP%d->TP%d",
+                    old_tp,
+                    new_tp,
+                )
+                broadcast_pyobj(
+                    [
+                        {
+                            "__inplace_reshard_prep__": True,
+                            "old_tp": old_tp,
+                            "new_tp": new_tp,
+                        }
+                    ],
+                    self.tp_group.rank,
+                    self.tp_cpu_group,
+                    src=self.tp_group.ranks[0],
+                )
+                self._inplace_reshard_world_prep_body(old_tp, new_tp)
+                prep_cmd = {
+                    "action": "prepare_inplace_reshard",
+                    "old_tp_size": int(old_tp),
+                    "new_tp_size": int(new_tp),
+                }
+                broadcast_pyobj(
+                    prep_cmd,
+                    self.world_group.rank,
+                    self.world_group.cpu_group,
+                    src=self.world_group.ranks[0],
+                )
+                st = self.tp_worker.model_runner._inplace_reshard_prep_state_obj()
+                st.joiners_prepared = True
+            return True
+
+        if self.tp_rank == 0:
+            self._run_inplace_reshard_prep_collective(old_tp, new_tp)
+        return True
+
+    def _follower_participate_inplace_reshard_world(self, plan: dict):
+        """Active follower (tp_rank in [1, old_tp)) expands using the TP sentinel cmd."""
+        from sglang.srt.distributed import (
+            get_pp_group,
+            get_tp_group,
+            get_world_group,
+        )
+        from sglang.srt.layers.dp_attention import (
+            get_attention_cp_group,
+            get_attention_tp_group,
+            compute_dp_attention_world_info,
+        )
+
+        new_tp = int(plan["new_tp"])
+        old_tp = int(plan["old_tp"])
+        if self.tp_rank <= 0 or self.tp_rank >= old_tp:
+            return
+
+        activate_cmd = plan.get("activate_cmd")
+        if not activate_cmd or not isinstance(activate_cmd, dict):
+            logger.error(
+                "Follower rank %d missing inplace reshard activate_cmd in plan: %s",
+                self.tp_rank,
+                plan,
+            )
+            return
+
+        logger.info(
+            "Follower rank %d expanding for in-place reshard TP%d->TP%d",
+            self.tp_rank,
+            old_tp,
+            new_tp,
+        )
+        cmd = activate_cmd
+        if cmd.get("action") != "activate_inplace_reshard":
+            logger.error(
+                "Follower rank %d unexpected inplace reshard cmd: %s",
+                self.tp_rank,
+                cmd,
+            )
+            return
+        self._engine_paused = True
+        self.last_batch = None
+        self.cur_batch = None
+        self.chunked_req = None
+        self.running_batch = ScheduleBatch(reqs=[], batch_is_full=False)
+        if self.enable_overlap and hasattr(self, "result_queue"):
+            self.result_queue.clear()
+        from sglang.srt.managers.io_struct import PauseGenerationReqInput
+
+        self.pause_generation(PauseGenerationReqInput(mode="in_place"))
+        self._detach_inplace_reshard_kv_refs()
+        mr = self.tp_worker.model_runner
+        if mr.inplace_reshard_prep_is_ready(new_tp):
+            ok, msg, _ = mr.commit_inplace_reshard_tp(new_tp, old_tp)
+        else:
+            ok, msg, _ = mr.expand_inplace_reshard_active_rank(
+                new_tp, activate_cmd=activate_cmd
+            )
+        logger.info("Follower rank %d inplace reshard expand: ok=%s %s", self.tp_rank, ok, msg)
+        if not ok:
+            return
+
+        self.tp_size = new_tp
+        self.server_args.tp_size = new_tp
+        self.tp_worker.tp_size = new_tp
+        self.attn_tp_rank, self.attn_tp_size, self.attn_dp_rank = (
+            compute_dp_attention_world_info(
+                self.server_args.enable_dp_attention,
+                self.tp_rank,
+                self.tp_size,
+                self.dp_size,
+                self.attn_cp_size,
+            )
+        )
+        self.tp_group = get_tp_group()
+        self.tp_cpu_group = self.tp_group.cpu_group
+        self.attn_tp_group = get_attention_tp_group()
+        self.attn_tp_cpu_group = self.attn_tp_group.cpu_group
+        self.attn_cp_group = get_attention_cp_group()
+        self.attn_cp_cpu_group = self.attn_cp_group.cpu_group
+        self.pp_group = get_pp_group()
+        self.world_group = get_world_group()
+        self.dp_tp_group = (
+            self.attn_tp_group
+            if self.server_args.enable_dp_attention
+            else self.tp_group
+        )
+        self.dp_tp_cpu_group = self.dp_tp_group.cpu_group
+        self.req_to_token_pool, self.token_to_kv_pool_allocator = (
+            self.tp_worker.get_memory_pool()
+        )
+        self._reshard_rebuild_tree_cache()
+        self.tp_worker.finalize_inplace_reshard_activation()
+        (
+            self.max_total_num_tokens,
+            self.max_prefill_tokens,
+            self.max_running_requests,
+            self.max_queued_requests,
+            self.max_req_len,
+            self.max_req_input_len,
+            self.random_seed,
+            self.device,
+            self.forward_stream,
+            _,
+            _,
+            _,
+        ) = self.tp_worker.get_worker_info()
+        self._reshard_finalize_scheduler_for_resume()
+        self._engine_paused = False
+        if self.server_args.inplace_reshard_max_tp is not None and new_tp > 1:
+            self.enable_overlap = False
+        import torch.distributed as dist
+
+        dist.barrier(group=self.tp_cpu_group)
+        join_cmd = broadcast_pyobj(
+            None,
+            self.world_group.rank,
+            self.world_group.cpu_group,
+            src=self.world_group.ranks[0],
+        )
+        if not join_cmd or join_cmd.get("action") != "join_active_loop":
+            logger.error(
+                "Unexpected post-expand inplace reshard cmd on rank %d: %s",
+                self.tp_rank,
+                join_cmd,
+            )
+            return
+        logger.info(
+            "Follower rank %d rejoined active loop after in-place reshard expand",
+            self.tp_rank,
+        )
+
+    def _maybe_run_follower_inplace_reshard_world(self) -> bool:
+        plan = getattr(self, "_follower_reshard_world_pending", None)
+        if plan is None or self.tp_rank == 0:
+            return False
+        self._follower_reshard_world_pending = None
+        self._follower_participate_inplace_reshard_world(plan)
+        return True
+
+    def _inplace_reshard_centralized_scheduling(self) -> bool:
+        """Rank0 owns batching decisions; followers mirror via broadcast plan."""
+        return (
+            self.server_args.inplace_reshard_max_tp is not None
+            and self.tp_size > 1
+            and not getattr(self, "is_inplace_standby_rank", False)
+        )
+
+    def _must_stay_in_centralized_reshard_loop(self) -> bool:
+        """Active follower must keep calling get_next_batch during reshard sync."""
+        if not self._inplace_reshard_centralized_scheduling():
+            return False
+        if getattr(self, "_inplace_reshard_prep_pending", None) is not None:
+            return True
+        if getattr(self, "_inplace_reshard_execute_pending", None) is not None:
+            return True
+        if getattr(self, "_follower_reshard_world_pending", None) is not None:
+            return True
+        return False
+
+    def _inplace_reshard_collect_req_map(
+        self, extra_reqs: Optional[List[Req]] = None
+    ) -> Dict[str, Req]:
+        req_map: Dict[str, Req] = {}
+        for req in self.waiting_queue:
+            req_map[req.rid] = req
+        for req in self.running_batch.reqs:
+            req_map[req.rid] = req
+        if self.chunked_req is not None:
+            req_map[self.chunked_req.rid] = self.chunked_req
+        if self.last_batch is not None:
+            for req in self.last_batch.reqs:
+                req_map[req.rid] = req
+        if extra_reqs:
+            for req in extra_reqs:
+                req_map[req.rid] = req
+        return req_map
+
+    def _pack_inplace_reshard_schedule_state(self) -> dict:
+        return {
+            "waiting_rids": [r.rid for r in self.waiting_queue],
+            "running_rids": [r.rid for r in self.running_batch.reqs],
+            "chunked_rid": self.chunked_req.rid if self.chunked_req else None,
+            "running_batch_is_full": self.running_batch.batch_is_full,
+            "new_token_ratio": float(self.new_token_ratio),
+            "last_batch_rids": (
+                [r.rid for r in self.last_batch.reqs] if self.last_batch else None
+            ),
+            "last_batch_forward_mode": (
+                int(self.last_batch.forward_mode) if self.last_batch else None
+            ),
+        }
+
+    def _pack_inplace_reshard_pre_schedule_state(self) -> dict:
+        return self._pack_inplace_reshard_schedule_state()
+
+    def _pack_inplace_reshard_req_forward_snap(self, req: Req) -> dict:
+        snap = {
+            "output_ids": list(req.output_ids),
+            "extend_input_len": req.extend_input_len,
+            "cache_protected_len": req.cache_protected_len,
+            "already_computed": req.already_computed,
+            "is_chunked": req.is_chunked,
+            "kv_committed_len": req.kv_committed_len,
+            "kv_allocated_len": req.kv_allocated_len,
+            "fill_ids": list(req.fill_ids),
+        }
+        if req.prefix_indices is not None and len(req.prefix_indices) > 0:
+            snap["prefix_indices"] = req.prefix_indices.cpu().tolist()
+        else:
+            snap["prefix_indices"] = []
+        return snap
+
+    def _apply_inplace_reshard_req_forward_snap(self, req: Req, snap: dict):
+        req.output_ids = list(snap["output_ids"])
+        req.extend_input_len = snap["extend_input_len"]
+        req.cache_protected_len = snap["cache_protected_len"]
+        req.already_computed = snap["already_computed"]
+        req.is_chunked = snap["is_chunked"]
+        req.kv_committed_len = snap["kv_committed_len"]
+        req.kv_allocated_len = snap["kv_allocated_len"]
+        req.fill_ids = list(snap["fill_ids"])
+        prefix_indices = snap.get("prefix_indices", [])
+        if prefix_indices:
+            req.prefix_indices = torch.tensor(
+                prefix_indices, dtype=torch.int64, device=self.device
+            )
+        else:
+            req.prefix_indices = torch.empty((0,), dtype=torch.int64, device=self.device)
+
+    def _pack_inplace_reshard_req_create_snap(self, req: Req) -> dict:
+        snap = self._pack_inplace_reshard_req_forward_snap(req)
+        snap.update(
+            {
+                "rid": req.rid,
+                "origin_input_text": req.origin_input_text,
+                "origin_input_ids": list(req.origin_input_ids),
+                "return_logprob": req.return_logprob,
+                "top_logprobs_num": req.top_logprobs_num,
+                "token_ids_logprob": req.token_ids_logprob,
+                "stream": req.stream,
+                "lora_id": req.lora_id,
+                "input_embeds": req.input_embeds,
+                "custom_logit_processor": req.custom_logit_processor,
+                "require_reasoning": req.require_reasoning,
+                "return_hidden_states": req.return_hidden_states,
+                "return_routed_experts": req.return_routed_experts,
+                "priority": req.priority,
+                "routing_key": req.routing_key,
+                "http_worker_ipc": req.http_worker_ipc,
+                "bootstrap_host": req.bootstrap_host,
+                "bootstrap_port": req.bootstrap_port,
+                "bootstrap_room": req.bootstrap_room,
+                "disagg_prefill_dp_rank": req.disagg_prefill_dp_rank,
+                "routed_dp_rank": req.routed_dp_rank,
+                "req_pool_idx": req.req_pool_idx,
+                "sampling_params": req.sampling_params,
+            }
+        )
+        return snap
+
+    def _create_inplace_reshard_req_from_snap(self, snap: dict) -> Req:
+        req = Req(
+            snap["rid"],
+            snap["origin_input_text"],
+            list(snap["origin_input_ids"]),
+            snap["sampling_params"],
+            return_logprob=snap.get("return_logprob", False),
+            top_logprobs_num=snap.get("top_logprobs_num", 0),
+            token_ids_logprob=snap.get("token_ids_logprob"),
+            stream=snap.get("stream", False),
+            lora_id=snap.get("lora_id"),
+            input_embeds=snap.get("input_embeds"),
+            custom_logit_processor=snap.get("custom_logit_processor"),
+            require_reasoning=snap.get("require_reasoning", False),
+            return_hidden_states=snap.get("return_hidden_states", False),
+            return_routed_experts=snap.get("return_routed_experts", False),
+            eos_token_ids=self.model_config.hf_eos_token_id,
+            bootstrap_host=snap.get("bootstrap_host"),
+            bootstrap_port=snap.get("bootstrap_port"),
+            bootstrap_room=snap.get("bootstrap_room"),
+            disagg_mode=self.disaggregation_mode,
+            routed_dp_rank=snap.get("routed_dp_rank"),
+            disagg_prefill_dp_rank=snap.get("disagg_prefill_dp_rank"),
+            vocab_size=self.model_config.vocab_size,
+            priority=snap.get("priority"),
+            metrics_collector=(
+                self.metrics_collector if self.enable_metrics else None
+            ),
+            routing_key=snap.get("routing_key"),
+            http_worker_ipc=snap.get("http_worker_ipc"),
+            dllm_config=self.dllm_config,
+        )
+        req.tokenizer = self.tokenizer
+        self._apply_inplace_reshard_req_forward_snap(req, snap)
+        req.req_pool_idx = snap.get("req_pool_idx")
+        self.init_req_max_new_tokens(req)
+        return req
+
+    def _collect_inplace_reshard_plan_rids(self, plan: dict) -> set:
+        rids = set(plan.get("waiting_rids") or [])
+        rids.update(plan.get("running_rids") or [])
+        chunked_rid = plan.get("chunked_rid")
+        if chunked_rid:
+            rids.add(chunked_rid)
+        last_rids = plan.get("last_batch_rids")
+        if last_rids:
+            rids.update(last_rids)
+        batch_rids = plan.get("batch_rids")
+        if batch_rids:
+            rids.update(batch_rids)
+        mixed = plan.get("mixed_decode_rids")
+        if mixed:
+            rids.update(mixed)
+        return rids
+
+    def _ensure_inplace_reshard_reqs_from_snaps(self, snaps: dict):
+        if not snaps:
+            return
+        req_map = self._inplace_reshard_collect_req_map()
+        for rid, snap in snaps.items():
+            if rid in req_map:
+                continue
+            self.waiting_queue.append(self._create_inplace_reshard_req_from_snap(snap))
+
+    def _pack_inplace_reshard_prepared_batch_state(self, batch: ScheduleBatch) -> dict:
+        def _tensor_list(t):
+            return t.cpu().tolist() if t is not None else None
+
+        return {
+            "forward_mode": int(batch.forward_mode),
+            "seq_lens_sum": batch.seq_lens_sum,
+            "extend_num_tokens": batch.extend_num_tokens,
+            "prefix_lens": list(batch.prefix_lens) if batch.prefix_lens else None,
+            "extend_lens": list(batch.extend_lens) if batch.extend_lens else None,
+            "seq_lens": _tensor_list(batch.seq_lens),
+            "seq_lens_cpu": _tensor_list(batch.seq_lens_cpu),
+            "orig_seq_lens": _tensor_list(batch.orig_seq_lens),
+            "input_ids": _tensor_list(batch.input_ids),
+            "output_ids": _tensor_list(batch.output_ids),
+            "req_pool_indices": _tensor_list(batch.req_pool_indices),
+            "out_cache_loc": _tensor_list(batch.out_cache_loc),
+            "return_logprob": batch.return_logprob,
+            "has_stream": batch.has_stream,
+            "has_grammar": batch.has_grammar,
+            "is_prefill_only": batch.is_prefill_only,
+        }
+
+    def _apply_inplace_reshard_prepared_batch_state(
+        self, batch: ScheduleBatch, state: Optional[dict]
+    ):
+        if not state:
+            return
+        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+        from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
+
+        batch.forward_mode = ForwardMode(state["forward_mode"])
+        batch.seq_lens_sum = state.get("seq_lens_sum")
+        batch.extend_num_tokens = state.get("extend_num_tokens")
+        batch.prefix_lens = state.get("prefix_lens")
+        batch.extend_lens = state.get("extend_lens")
+        batch.return_logprob = state.get("return_logprob", batch.return_logprob)
+        batch.has_stream = state.get("has_stream", batch.has_stream)
+        batch.has_grammar = state.get("has_grammar", batch.has_grammar)
+        batch.is_prefill_only = state.get("is_prefill_only", batch.is_prefill_only)
+
+        def _tensor_from_list(vals, dtype):
+            if vals is None:
+                return None
+            return torch.tensor(vals, dtype=dtype, device=self.device)
+
+        batch.seq_lens = _tensor_from_list(state.get("seq_lens"), torch.int64)
+        batch.seq_lens_cpu = _tensor_from_list(state.get("seq_lens_cpu"), torch.int64)
+        batch.orig_seq_lens = _tensor_from_list(state.get("orig_seq_lens"), torch.int32)
+        batch.input_ids = _tensor_from_list(state.get("input_ids"), torch.int64)
+        batch.output_ids = _tensor_from_list(state.get("output_ids"), torch.int64)
+        batch.req_pool_indices = _tensor_from_list(
+            state.get("req_pool_indices"), torch.int64
+        )
+        batch.out_cache_loc = _tensor_from_list(state.get("out_cache_loc"), torch.int64)
+        if batch.sampling_info is None:
+            batch.sampling_info = SamplingBatchInfo.from_schedule_batch(
+                batch, self.model_config.vocab_size
+            )
+
+    def _pack_inplace_reshard_batch_plan(
+        self, batch: Optional[ScheduleBatch]
+    ) -> dict:
+        plan = self._pack_inplace_reshard_schedule_state()
+        if batch is None:
+            plan["batch_rids"] = None
+            plan["forward_mode"] = None
+            plan["mixed_decode_rids"] = None
+            plan["req_forward_snaps"] = None
+            plan["req_create_snaps"] = {}
+            plan["prepared_batch_state"] = None
+        else:
+            plan["batch_rids"] = [r.rid for r in batch.reqs]
+            plan["forward_mode"] = int(batch.forward_mode)
+            plan["mixed_decode_rids"] = (
+                [r.rid for r in batch.decoding_reqs] if batch.decoding_reqs else None
+            )
+            plan["req_forward_snaps"] = {
+                r.rid: self._pack_inplace_reshard_req_forward_snap(r)
+                for r in batch.reqs
+            }
+            plan["prepared_batch_state"] = (
+                self._pack_inplace_reshard_prepared_batch_state(batch)
+            )
+        req_map = self._inplace_reshard_collect_req_map(
+            extra_reqs=batch.reqs if batch is not None else None
+        )
+        plan_rids = self._collect_inplace_reshard_plan_rids(plan)
+        plan["req_create_snaps"] = {
+            rid: self._pack_inplace_reshard_req_create_snap(req_map[rid])
+            for rid in plan_rids
+            if rid in req_map
+        }
+        return plan
+
+    def _pack_inplace_reshard_post_result_state(self) -> dict:
+        plan = self._pack_inplace_reshard_schedule_state()
+        snapshots = {}
+        for rid, req in self._inplace_reshard_collect_req_map().items():
+            snapshots[rid] = {
+                "output_ids": list(req.output_ids),
+                "finished": req.finished(),
+                "req_pool_idx": req.req_pool_idx,
+                "follower_free_kv_to_len": (
+                    len(req.fill_ids) if req.finished() else None
+                ),
+                **{
+                    k: v
+                    for k, v in self._pack_inplace_reshard_req_forward_snap(req).items()
+                    if k != "output_ids"
+                },
+            }
+        plan["req_snapshots"] = snapshots
+        plan_rids = set(snapshots.keys())
+        plan["req_create_snaps"] = {
+            rid: self._pack_inplace_reshard_req_create_snap(
+                self._inplace_reshard_collect_req_map()[rid]
+            )
+            for rid in plan_rids
+            if rid in self._inplace_reshard_collect_req_map()
+        }
+        return plan
+
+    def _apply_inplace_reshard_schedule_state(self, plan: dict):
+        self._ensure_inplace_reshard_reqs_from_snaps(plan.get("req_create_snaps"))
+        req_map = self._inplace_reshard_collect_req_map()
+
+        def _lookup(rid: str) -> Req:
+            req = req_map.get(rid)
+            if req is None:
+                raise RuntimeError(
+                    f"inplace reshard pre-schedule: missing req {rid} on tp_rank {self.tp_rank}"
+                )
+            return req
+
+        self.waiting_queue = [_lookup(r) for r in plan["waiting_rids"]]
+        self.running_batch.reqs = [_lookup(r) for r in plan["running_rids"]]
+        self.running_batch.batch_is_full = plan["running_batch_is_full"]
+        self.new_token_ratio = plan["new_token_ratio"]
+        chunked_rid = plan.get("chunked_rid")
+        self.chunked_req = _lookup(chunked_rid) if chunked_rid else None
+
+        last_rids = plan.get("last_batch_rids")
+        if last_rids:
+            fm = plan.get("last_batch_forward_mode")
+            self.last_batch = ScheduleBatch(
+                reqs=[_lookup(r) for r in last_rids],
+                batch_is_full=False,
+            )
+            if fm is not None:
+                from sglang.srt.model_executor.forward_batch_info import ForwardMode
+
+                self.last_batch.forward_mode = ForwardMode(fm)
+        else:
+            self.last_batch = None
+
+    def _apply_inplace_reshard_pre_schedule_state(self, plan: dict):
+        self._apply_inplace_reshard_schedule_state(plan)
+
+    def _rebuild_inplace_reshard_batch(
+        self, plan: dict
+    ) -> Optional[ScheduleBatch]:
+        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+        from sglang.srt.observability.req_time_stats import set_schedule_time_batch
+
+        self._apply_inplace_reshard_schedule_state(plan)
+        # Prefill batches may reference reqs no longer listed in waiting/running.
+        self._ensure_inplace_reshard_reqs_from_snaps(plan.get("req_create_snaps"))
+        batch_rids = plan.get("batch_rids")
+        if not batch_rids:
+            return None
+
+        req_map = self._inplace_reshard_collect_req_map()
+        extra_batch_reqs = [req_map[rid] for rid in batch_rids if rid in req_map]
+        req_map = self._inplace_reshard_collect_req_map(
+            extra_reqs=extra_batch_reqs or None
+        )
+
+        def _lookup(rid: str) -> Req:
+            req = req_map.get(rid)
+            if req is None:
+                raise RuntimeError(
+                    f"inplace reshard batch rebuild: missing req {rid} on tp_rank {self.tp_rank}"
+                )
+            return req
+
+        reqs = [_lookup(r) for r in batch_rids]
+        forward_mode = ForwardMode(plan["forward_mode"])
+        forward_snaps = plan.get("req_forward_snaps") or {}
+
+        if forward_mode == ForwardMode.DECODE:
+            from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
+
+            for req in reqs:
+                snap = forward_snaps.get(req.rid)
+                if snap is not None:
+                    self._apply_inplace_reshard_req_forward_snap(req, snap)
+            batch = ScheduleBatch.init_new(
+                reqs,
+                self.req_to_token_pool,
+                self.token_to_kv_pool_allocator,
+                self.tree_cache,
+                self.model_config,
+                self.enable_overlap,
+                self.spec_algorithm,
+                chunked_req=self.chunked_req,
+                dllm_config=self.dllm_config,
+            )
+            batch.batch_is_full = self.running_batch.batch_is_full
+            prepared = plan.get("prepared_batch_state")
+            if prepared is not None:
+                self._apply_inplace_reshard_prepared_batch_state(batch, prepared)
+            else:
+                batch.sampling_info = SamplingBatchInfo.from_schedule_batch(
+                    batch, self.model_config.vocab_size
+                )
+                batch = self.update_running_batch(batch)
+                if batch.is_empty():
+                    return None
+            set_schedule_time_batch(batch)
+            return batch
+
+        for req in reqs:
+            snap = forward_snaps.get(req.rid)
+            if snap is not None:
+                self._apply_inplace_reshard_req_forward_snap(req, snap)
+            else:
+                req.init_next_round_input(self.tree_cache)
+
+        new_batch = ScheduleBatch.init_new(
+            reqs,
+            self.req_to_token_pool,
+            self.token_to_kv_pool_allocator,
+            self.tree_cache,
+            self.model_config,
+            self.enable_overlap,
+            self.spec_algorithm,
+            chunked_req=self.chunked_req,
+            dllm_config=self.dllm_config,
+        )
+        new_batch.prepare_for_extend()
+
+        mixed_rids = plan.get("mixed_decode_rids")
+        if mixed_rids:
+            decode_reqs = [_lookup(r) for r in mixed_rids]
+            if decode_reqs:
+                tmp = ScheduleBatch(
+                    reqs=decode_reqs, batch_is_full=self.running_batch.batch_is_full
+                )
+                tmp.prepare_for_decode()
+                new_batch.mix_with_running(tmp)
+                new_batch.decoding_reqs = decode_reqs
+            self.running_batch = ScheduleBatch(
+                reqs=[], batch_is_full=self.running_batch.batch_is_full
+            )
+        else:
+            new_batch.decoding_reqs = None
+
+        prepared = plan.get("prepared_batch_state")
+        if prepared is not None:
+            self._apply_inplace_reshard_prepared_batch_state(new_batch, prepared)
+
+        set_schedule_time_batch(new_batch)
+        return new_batch
+
+    def _apply_inplace_reshard_post_result_state(self, plan: dict):
+        from sglang.srt.mem_cache.common import release_kv_cache
+
+        self._apply_inplace_reshard_schedule_state(plan)
+        req_map = self._inplace_reshard_collect_req_map()
+        for rid, snap in plan.get("req_snapshots", {}).items():
+            req = req_map.get(rid)
+            if req is None:
+                continue
+            was_finished = req.finished()
+            old_pool_idx = req.req_pool_idx
+            if snap["finished"] and not was_finished and old_pool_idx is not None:
+                if self.tp_rank == 0:
+                    release_kv_cache(req, self.tree_cache)
+            req.output_ids = list(snap["output_ids"])
+            req.req_pool_idx = snap.get("req_pool_idx")
+            self._apply_inplace_reshard_req_forward_snap(
+                req,
+                {
+                    "output_ids": snap["output_ids"],
+                    "extend_input_len": snap["extend_input_len"],
+                    "cache_protected_len": snap["cache_protected_len"],
+                    "already_computed": snap["already_computed"],
+                    "is_chunked": snap["is_chunked"],
+                    "kv_committed_len": snap["kv_committed_len"],
+                    "kv_allocated_len": snap["kv_allocated_len"],
+                    "fill_ids": snap["fill_ids"],
+                    "prefix_indices": snap.get("prefix_indices", []),
+                },
+            )
+
+    def _sync_inplace_reshard_process_batch_result(
+        self,
+        batch: ScheduleBatch,
+        result: Union[GenerationBatchResult, EmbeddingBatchResult],
+    ):
+        if not self._inplace_reshard_centralized_scheduling():
+            self.process_batch_result(batch, result)
+            return
+        if self.tp_rank == 0:
+            self.process_batch_result(batch, result)
+            broadcast_pyobj(
+                [self._pack_inplace_reshard_post_result_state()],
+                self.tp_group.rank,
+                self.tp_cpu_group,
+                src=self.tp_group.ranks[0],
+            )
+        else:
+            plan_list = broadcast_pyobj(
+                None,
+                self.tp_group.rank,
+                self.tp_cpu_group,
+                src=self.tp_group.ranks[0],
+            )
+            if not plan_list:
+                self.process_batch_result(batch, result)
+                return
+            self._apply_inplace_reshard_post_result_state(plan_list[0])
 
     def init_chunked_prefill(self):
         # Init chunked prefill
@@ -1271,6 +2426,7 @@ class Scheduler(
                 (GetWeightsByNameReqInput, self.get_weights_by_name),
                 (ReleaseMemoryOccupationReqInput, self.release_memory_occupation),
                 (ResumeMemoryOccupationReqInput, self.resume_memory_occupation),
+                (ReshardReqInput, self.handle_reshard),
                 (CheckWeightsReqInput, self.check_weights),
                 (SlowDownReqInput, self.slow_down),
                 (ProfileReq, self.profile),
@@ -1342,32 +2498,280 @@ class Scheduler(
         Sets up the schedule stream and dispatches to the appropriate event loop.
         The event loop blocks until shutdown.
         """
+        if getattr(self, "is_inplace_standby_rank", False):
+            self.event_loop_inplace_standby()
+            return
         self.schedule_stream = self.device_module.Stream(priority=0)
         if self.device == "cpu":
             self.schedule_stream.synchronize = lambda: None  # No-op for CPU
         with self.device_module.StreamContext(self.schedule_stream):
             dispatch_event_loop(self)
 
+
+    def event_loop_inplace_standby(self):
+        """Standby loop for experimental in-place TP reshard ranks."""
+        while True:
+            cmd = broadcast_pyobj(
+                None,
+                self.world_group.rank,
+                self.world_group.cpu_group,
+                src=self.world_group.ranks[0],
+            )
+            if not cmd or not isinstance(cmd, dict):
+                if isinstance(cmd, list) and cmd and isinstance(cmd[0], dict):
+                    cmd = cmd[0]
+                else:
+                    continue
+            if cmd.get("action") == "prepare_inplace_reshard":
+                old_tp = int(cmd["old_tp_size"])
+                new_tp = int(cmd["new_tp_size"])
+                logger.info(
+                    "Standby rank %d background prep TP%d->TP%d",
+                    self.tp_rank,
+                    old_tp,
+                    new_tp,
+                )
+                self._inplace_reshard_world_prep_body(old_tp, new_tp)
+                continue
+            if cmd.get("action") != "activate_inplace_reshard":
+                continue
+            new_tp = int(cmd["new_tp_size"])
+            old_tp = int(cmd["old_tp_size"])
+            if self.tp_rank >= new_tp or self.tp_rank < old_tp:
+                logger.info(
+                    "Standby rank %d skipping in-place reshard TP%d->TP%d",
+                    self.tp_rank,
+                    old_tp,
+                    new_tp,
+                )
+                self.tp_worker.model_runner._inplace_reshard_world_barrier()
+                self.tp_worker.model_runner._sync_inplace_reshard_parallel_groups(
+                    new_tp
+                )
+                self.tp_worker.model_runner._inplace_reshard_world_barrier()
+                continue
+            ok, msg, _ = self.tp_worker.model_runner.activate_inplace_reshard_rank(
+                new_tp, old_tp=old_tp
+            )
+            logger.info("Standby rank activation result: %s %s", ok, msg)
+            if not ok:
+                self.tp_worker.model_runner._inplace_reshard_world_barrier()
+                self.tp_worker.model_runner._sync_inplace_reshard_parallel_groups(
+                    new_tp
+                )
+                self.tp_worker.model_runner._inplace_reshard_world_barrier()
+                continue
+            self.is_inplace_standby_rank = False
+            self.tp_size = new_tp
+            self.server_args.tp_size = new_tp
+            self.tp_worker.tp_size = new_tp
+            self.attn_tp_rank, self.attn_tp_size, self.attn_dp_rank = (
+                compute_dp_attention_world_info(
+                    self.server_args.enable_dp_attention,
+                    self.tp_rank,
+                    self.tp_size,
+                    self.dp_size,
+                    self.attn_cp_size,
+                )
+            )
+            self.tp_worker.finalize_inplace_reshard_activation()
+            (
+                self.max_total_num_tokens,
+                self.max_prefill_tokens,
+                self.max_running_requests,
+                self.max_queued_requests,
+                self.max_req_len,
+                self.max_req_input_len,
+                self.random_seed,
+                self.device,
+                self.forward_stream,
+                _,
+                _,
+                _,
+            ) = self.tp_worker.get_worker_info()
+            self.tp_group = get_tp_group()
+            self.tp_cpu_group = self.tp_group.cpu_group
+            self.attn_tp_group = get_attention_tp_group()
+            self.attn_tp_cpu_group = self.attn_tp_group.cpu_group
+            self.attn_cp_group = get_attention_cp_group()
+            self.attn_cp_cpu_group = self.attn_cp_group.cpu_group
+            self.pp_group = get_pp_group()
+            self.world_group = get_world_group()
+            self.dp_tp_group = (
+                self.attn_tp_group
+                if self.server_args.enable_dp_attention
+                else self.tp_group
+            )
+            self.dp_tp_cpu_group = self.dp_tp_group.cpu_group
+            if self.server_args.inplace_reshard_max_tp is not None and new_tp > 1:
+                self.enable_overlap = False
+            self.init_cache_with_memory_pool()
+            self.init_running_status()
+            self.init_chunked_prefill()
+            self.init_diffusion_llm()
+            self.init_schedule_policy()
+            self.init_watch_dog_memory_saver_input_blocker()
+            self.init_profiler()
+            self.init_disaggregation()
+            self.init_overlap()
+            self.maybe_init_ngram_embedding()
+            self.init_deterministic_inference_config()
+            self.init_request_dispatcher()
+            if self.enable_lora_overlap_loading:
+                self.lora_overlap_loader = LoRAOverlapLoader(
+                    self.tp_worker.model_runner.lora_manager
+                )
+            self.grammar_manager = GrammarManager(self)
+            self.schedule_stream = self.device_module.Stream(priority=0)
+            if self.device == "cpu":
+                self.schedule_stream.synchronize = lambda: None
+            with self.device_module.StreamContext(self.schedule_stream):
+                self._reshard_state_dump("post_reshard")
+                import torch.distributed as dist
+                dist.barrier(group=self.tp_cpu_group)
+                join_cmd = broadcast_pyobj(
+                    None,
+                    self.world_group.rank,
+                    self.world_group.cpu_group,
+                    src=self.world_group.ranks[0],
+                )
+                if not join_cmd or join_cmd.get("action") != "join_active_loop":
+                    logger.error(
+                        "Unexpected post-activation inplace reshard cmd: %s", join_cmd
+                    )
+                    continue
+                logger.info("Joining active scheduler loop after in-place reshard")
+                dispatch_event_loop(self)
+            return
+
+    def _reshard_state_dump(self, tag: str):
+        """Golden-diff helper: dump batch-decision-relevant scheduler state to a
+        per-rank JSON so a normally-launched TP2 can be diffed against an
+        in-place-reshard TP2. Gated by SGLANG_RESHARD_STATE_DUMP env."""
+        import json as _json
+        import os as _os
+
+        outdir = _os.environ.get("SGLANG_RESHARD_STATE_DUMP", "")
+        if not outdir:
+            return
+        try:
+            mr = self.tp_worker.model_runner
+            tc = getattr(self, "tree_cache", None)
+            alloc = getattr(self, "token_to_kv_pool_allocator", None)
+            rtp = getattr(self, "req_to_token_pool", None)
+            st = {
+                "tag": tag,
+                "scenario": _os.environ.get("SGLANG_RESHARD_STATE_SCENARIO", ""),
+                "tp_rank": self.tp_rank,
+                "tp_size": self.tp_size,
+                "attn_tp_rank": getattr(self, "attn_tp_rank", None),
+                "attn_tp_size": getattr(self, "attn_tp_size", None),
+                "max_total_num_tokens": self.max_total_num_tokens,
+                "max_running_requests": self.max_running_requests,
+                "max_queued_requests": getattr(self, "max_queued_requests", None),
+                "max_req_len": getattr(self, "max_req_len", None),
+                "max_req_input_len": self.max_req_input_len,
+                "chunked_prefill_size": getattr(self, "chunked_prefill_size", None),
+                "max_prefill_tokens": getattr(self, "max_prefill_tokens", None),
+                "page_size": getattr(self, "page_size", None),
+                "schedule_policy": str(getattr(self, "schedule_policy", None)),
+                "enable_overlap": getattr(self, "enable_overlap", None),
+                "is_inplace_standby_rank": getattr(
+                    self, "is_inplace_standby_rank", False
+                ),
+                "tree_cache_cls": type(tc).__name__ if tc is not None else None,
+                "waiting_queue_len": len(getattr(self, "waiting_queue", []) or []),
+                "running_batch_size": (
+                    len(self.running_batch.reqs)
+                    if getattr(self, "running_batch", None) is not None
+                    else 0
+                ),
+                "req_to_token_pool_size": getattr(rtp, "size", None),
+                "req_to_token_max_context_len": getattr(rtp, "max_context_len", None),
+                "kv_allocator_available": (
+                    alloc.available_size() if alloc is not None else None
+                ),
+                "kv_allocator_size": getattr(alloc, "size", None),
+                "model_runner": {
+                    "tp_size": getattr(mr, "tp_size", None),
+                    "tp_rank": getattr(mr, "tp_rank", None),
+                    "max_total_num_tokens": getattr(mr, "max_total_num_tokens", None),
+                    "max_running_requests": getattr(mr, "max_running_requests", None),
+                    "max_token_pool_size": getattr(mr, "max_token_pool_size", None),
+                    "is_inplace_standby_rank": getattr(
+                        mr, "is_inplace_standby_rank", False
+                    ),
+                    "req_to_token_pool_size": (
+                        mr.req_to_token_pool.size
+                        if getattr(mr, "req_to_token_pool", None) is not None
+                        else None
+                    ),
+                    "token_to_kv_pool_size": (
+                        mr.token_to_kv_pool.size
+                        if getattr(mr, "token_to_kv_pool", None) is not None
+                        else None
+                    ),
+                },
+                "server_args": {
+                    "tp_size": self.server_args.tp_size,
+                    "inplace_reshard_max_tp": self.server_args.inplace_reshard_max_tp,
+                    "mem_fraction_static": self.server_args.mem_fraction_static,
+                    "disable_cuda_graph": self.server_args.disable_cuda_graph,
+                    "disable_overlap_schedule": self.server_args.disable_overlap_schedule,
+                },
+            }
+            path = _os.path.join(
+                outdir,
+                f"state_{st['scenario']}_{tag}_rank{self.tp_rank}.json"
+                if st["scenario"]
+                else f"state_{tag}_rank{self.tp_rank}.json",
+            )
+            _os.makedirs(outdir, exist_ok=True)
+            with open(path, "w") as f:
+                _json.dump(st, f, indent=2, sort_keys=True)
+            logger.info("[RESHARD-STATE-DUMP] wrote %s", path)
+        except Exception as e:
+            logger.warning("state dump failed: %s", e)
+
+    def _maybe_inplace_reshard_step_barrier(self):
+        """Lock-step active TP schedulers during experimental in-place reshard."""
+        if self._inplace_reshard_centralized_scheduling():
+            return
+        if (
+            self.server_args.inplace_reshard_max_tp is None
+            or self.tp_size <= 1
+            or getattr(self, "is_inplace_standby_rank", False)
+        ):
+            return
+        import torch.distributed as dist
+
+        dist.barrier(group=self.tp_cpu_group)
+
     @DynamicGradMode()
     def event_loop_normal(self):
         """A normal scheduler loop."""
         while True:
+            self._maybe_inplace_reshard_step_barrier()
+            self.maybe_handle_inplace_reshard_control_file()
             # Receive requests
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            if self._engine_paused:
+            if self._engine_paused and not self._must_stay_in_centralized_reshard_loop():
                 self.cancel_bubble_timer()
                 continue
 
             # Get the next batch to run
             batch = self.get_next_batch_to_run()
+            if self._maybe_run_follower_inplace_reshard_world():
+                continue
             self.cur_batch = batch
 
             # Launch the current batch
             if batch:
                 self._unified_dvfs_before_batch(batch)
                 result = self.run_batch(batch)
-                self.process_batch_result(batch, result)
+                self._unified_log_prefill_observed(batch)
+                self._sync_inplace_reshard_process_batch_result(batch, result)
             else:
                 # When the server is idle, do self-check and re-init some states.
                 self.self_check_during_idle()
@@ -1376,6 +2780,11 @@ class Scheduler(
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+            self.maybe_continue_inplace_reshard()
+            if getattr(self, "_inplace_reshard_restart_event_loop", False):
+                self._inplace_reshard_restart_event_loop = False
+                dispatch_event_loop(self)
+                return
 
     @DynamicGradMode()
     def event_loop_afd(self):
@@ -2171,6 +3580,8 @@ class Scheduler(
                 predictor=predictor,
                 num_layers=self.model_config.num_hidden_layers,
                 tp=server_args.tp_size,
+                objective=getattr(server_args, "dvfs_objective", "energy"),
+                policy=getattr(server_args, "dvfs_policy", "unified"),
             )
             logger.info("Unified DVFS controller initialized")
         except Exception as e:
@@ -2180,6 +3591,7 @@ class Scheduler(
 
         if self.tp_rank != 0:
             self._dvfs_hw_list = []
+            self._dvfs_decision_log = None
             return
         try:
             import torch
@@ -2197,6 +3609,26 @@ class Scheduler(
             logger.warning("Unified DVFS HW unavailable (libdvfs_ctrl.so?): %s. "
                            "Decisions logged but not applied.", e)
             self._dvfs_hw_list = []
+
+        self._dvfs_decision_log = None
+        self._unified_prefill_pending = None
+        self._unified_prefill_start_t = None
+        log_tmpl = os.environ.get("AFD_DVFS_DECISION_LOG") or os.environ.get(
+            "DVFS_DECISION_LOG")
+        if log_tmpl:
+            try:
+                from sglang.srt.disaggregation.utils import DisaggregationMode
+                nvml_idx = int(os.environ.get("AFD_NVML_DEVICE_INDEX", -1))
+                disagg = getattr(self, "disaggregation_mode", DisaggregationMode.NULL)
+                disagg = str(disagg).split(".")[-1].lower()
+                log_path = log_tmpl.format(
+                    persp="unified", disagg=disagg, gpu=nvml_idx)
+                os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+                self._dvfs_decision_log = open(log_path, "w", buffering=1)
+                logger.info("Unified DVFS decision log → %s", log_path)
+            except Exception as e:
+                logger.warning("Failed to open unified DVFS decision log: %s", e)
+                self._dvfs_decision_log = None
 
     def _apply_freq_single(self, f: int):
         """Lock every GPU owned by this (non-AF) process to one frequency."""
@@ -2234,27 +3666,57 @@ class Scheduler(
             max_il = max(
                 (getattr(r, "_orig_extend_input_len", r.extend_input_len)
                  for r in batch.reqs), default=1024)
-            # Ultra-conservative: if decode requests are active in continuous
-            # batching (Native mode), force F_MAX for prefill to minimize
-            # decode blocking. Only allow frequency reduction when idle.
-            force_max = False
+            # Decode-aware prefill frequency: instead of forcing F_MAX when
+            # decode is active (which kills all energy savings), compute a
+            # floor frequency that keeps prefill chunk latency within an
+            # acceptable range for interleaved decode TPOT. The controller's
+            # compute_decode_floor_freq() returns the lowest frequency whose
+            # chunk time is within 10% of F_MAX (very conservative, won't
+            # violate TPOT). select_freq_prefill uses this floor to skip
+            # frequencies that would block decode too long.
+            floor_freq = None
             if (disagg == DisaggregationMode.NULL
                     and hasattr(self, "running_batch")
                     and not self.running_batch.is_empty()
                     and not getattr(self.running_batch, "is_prefill_only", False)):
                 decode_bs = self.running_batch.batch_size()
                 if decode_bs > 0:
-                    force_max = True
-            if force_max:
-                from sglang.srt.energy.unified_dvfs_controller import F_MAX as _F_MAX
-                if ctrl.cur_freq != _F_MAX:
-                    self._apply_freq_single(_F_MAX)
-                    ctrl._cur_f = _F_MAX
-            else:
-                decision = ctrl.select_freq_prefill(
-                    bs=batch.batch_size(), il=max_il, slack_us=slack_us)
-                if decision.switched:
-                    self._apply_freq_single(decision.f)
+                    repr_il = max(int(sum(
+                        len(r.origin_input_ids) for r in self.running_batch.reqs)
+                        / max(decode_bs, 1)), 1)
+                    repr_ol = max(int(sum(
+                        (r.seqlen - len(r.origin_input_ids))
+                        for r in self.running_batch.reqs)
+                        / max(decode_bs, 1)), 1)
+                    chunk_size = getattr(sa, "chunked_prefill_size", 8192) or 8192
+                    effective_il = min(max_il, chunk_size)
+                    floor_freq = ctrl.compute_decode_floor_freq(
+                        decode_bs=decode_bs, decode_il=repr_il,
+                        decode_ol=repr_ol,
+                        slo_tpot_us=sa.dvfs_tpot_slo_us,
+                        prefill_bs=batch.batch_size(), prefill_il=effective_il)
+            decision = ctrl.select_freq_prefill(
+                bs=batch.batch_size(), il=max_il, slack_us=slack_us,
+                floor_freq=floor_freq,
+                horizon_batches=self._build_biscale_prefill_horizon(batch),
+                slo_ttft_us=sa.dvfs_ttft_slo_ms * 1000.0)
+            if decision.switched:
+                self._apply_freq_single(decision.f)
+                # Sync decode state so it knows the hardware freq changed
+                ctrl.notify_freq_override(decision.f)
+            self._unified_prefill_pending = {
+                "phase": "prefill",
+                "bs": batch.batch_size(),
+                "il": max_il,
+                "slack_us": round(slack_us, 1),
+                "sel_f": decision.f,
+                "switched": decision.switched,
+                "forced_max": decision.forced_max,
+                "pred_lat_us": round(decision.latency_us, 1),
+                "pred_energy_mj": round(decision.energy_mj, 1),
+                "policy": getattr(ctrl, "_policy", "unified"),
+            }
+            self._unified_prefill_start_t = time.perf_counter()
         else:
             ctrl.tick_decode_iteration()
             t_iter_us = 0.0
@@ -2269,7 +3731,10 @@ class Scheduler(
                 slo_tpot_us=sa.dvfs_tpot_slo_us,
             )
             kv_util = self._unified_kv_util()
-            if reeval or kv_util > 0.85:
+            biscale_decode = (
+                getattr(ctrl, "_policy", "unified") == "biscale"
+            )
+            if reeval or kv_util > 0.85 or biscale_decode:
                 repr_il = int(sum(len(r.origin_input_ids) for r in batch.reqs)
                               / max(len(batch.reqs), 1))
                 repr_ol = max(int(sum(
@@ -2278,9 +3743,45 @@ class Scheduler(
                 decision = ctrl.select_freq_decode(
                     bs=batch.batch_size(), il=repr_il, ol=repr_ol,
                     slo_tpot_us=sa.dvfs_tpot_slo_us,
-                    reeval_reason=reeval, kv_util=kv_util)
+                    reeval_reason=reeval, kv_util=kv_util,
+                    observed_tpot_us=t_iter_us)
                 if decision.switched:
                     self._apply_freq_single(decision.f)
+                self._log_dvfs_decision({
+                    "phase": "decode",
+                    "bs": batch.batch_size(),
+                    "il": repr_il,
+                    "ol": repr_ol,
+                    "kv_util": round(kv_util, 3),
+                    "obs_tpot_us": round(t_iter_us, 1),
+                    "reeval": reeval,
+                    "sel_f": decision.f,
+                    "switched": decision.switched,
+                    "forced_max": decision.forced_max,
+                    "pred_lat_us": round(decision.latency_us, 1),
+                    "pred_energy_mj": round(decision.energy_mj, 1),
+                    "policy": getattr(ctrl, "_policy", "unified"),
+                })
+
+    def _unified_log_prefill_observed(self, batch):
+        """Log observed prefill latency after batch completes."""
+        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+        if batch.forward_mode != ForwardMode.EXTEND:
+            return
+        pending = getattr(self, "_unified_prefill_pending", None)
+        if pending is None:
+            return
+        start_t = getattr(self, "_unified_prefill_start_t", None)
+        if start_t is not None:
+            obs_lat_us = (time.perf_counter() - start_t) * 1e6
+            pending["obs_lat_us"] = round(obs_lat_us, 1)
+            pred = pending.get("pred_lat_us", 0)
+            if pred > 0 and obs_lat_us > 0:
+                pending["pred_err_pct"] = round(
+                    (pred - obs_lat_us) / obs_lat_us * 100, 1)
+        self._log_dvfs_decision(pending)
+        self._unified_prefill_pending = None
+        self._unified_prefill_start_t = None
 
     def _compute_unified_prefill_slack(self, batch) -> float:
         """Tightest TTFT slack (us), using pure processing time (no queue)."""
@@ -2296,6 +3797,61 @@ class Scheduler(
                 elapsed = (now - batch_start) * 1e6
                 min_slack = min(min_slack, slo_us - elapsed)
         return max(min_slack, 0)
+
+    def _build_biscale_prefill_horizon(self, batch):
+        """Project up to MPC_HORIZON_K prefill batches for BiScale MPC."""
+        from sglang.srt.energy.unified_dvfs_controller import (
+            MPC_HORIZON_K,
+            PrefillBatchSpec,
+        )
+        from sglang.srt.disaggregation.utils import DisaggregationMode
+
+        ctrl = getattr(self, "_unified_dvfs_ctrl", None)
+        if ctrl is None or getattr(ctrl, "_policy", "unified") != "biscale":
+            return None
+
+        now = time.perf_counter()
+        max_bs = int(getattr(self.server_args, "max_running_requests", 256) or 256)
+
+        def _req_il(req):
+            return int(getattr(req, "_orig_extend_input_len", req.extend_input_len))
+
+        def _req_wait_us(req):
+            ts = getattr(req, "queue_time_start", None)
+            if ts is None or ts <= 0:
+                return 0.0
+            return max(0.0, (now - ts) * 1e6)
+
+        cur_bs = batch.batch_size()
+        cur_il = max((_req_il(r) for r in batch.reqs), default=1024)
+        specs = [PrefillBatchSpec(
+            bs=cur_bs,
+            max_il=cur_il,
+            wait_us=[_req_wait_us(r) for r in batch.reqs],
+        )]
+
+        waiting = list(getattr(self, "waiting_queue", []) or [])
+        disagg = getattr(self, "disaggregation_mode", DisaggregationMode.NULL)
+        if disagg != DisaggregationMode.PREFILL:
+            waiting = []
+
+        idx = 0
+        while len(specs) < MPC_HORIZON_K and idx < len(waiting):
+            batch_reqs = []
+            batch_ils = []
+            while idx < len(waiting) and len(batch_reqs) < max_bs:
+                req = waiting[idx]
+                batch_reqs.append(req)
+                batch_ils.append(_req_il(req))
+                idx += 1
+            if not batch_reqs:
+                break
+            specs.append(PrefillBatchSpec(
+                bs=len(batch_reqs),
+                max_il=max(batch_ils),
+                wait_us=[_req_wait_us(r) for r in batch_reqs],
+            ))
+        return specs
 
     def _unified_kv_util(self) -> float:
         """KV-cache pool utilization in [0, 1] (1 = full)."""
@@ -2326,13 +3882,17 @@ class Scheduler(
                 num_layers=self.model_config.num_hidden_layers,
                 tp_a=tp_a,
                 tp_f=tp_f,
+                t_comm_us=getattr(server_args, "afd_dvfs_comm_us", 80.0),
                 feedback_enabled=getattr(self.server_args, "afd_dvfs_feedback", False),
                 feedback_threshold=getattr(self.server_args, "afd_dvfs_feedback_threshold", 3),
                 feedback_hold=getattr(self.server_args, "afd_dvfs_feedback_hold", 30),
                 online_calibration=getattr(self.server_args, "afd_dvfs_online_calibration", False),
                 calibration_ema=getattr(self.server_args, "afd_dvfs_calibration_ema", 0.2),
                 moe_freq_floor=0,  # disabled: MoE freq floor needs more research
-                headroom_aggressive_threshold=0.0,
+                headroom_aggressive_threshold=getattr(
+                    server_args, "afd_dvfs_headroom_aggressive", 0.0
+                ),
+                decode_compositional=getattr(server_args, "afd_dvfs_decode_compositional", False),
             )
             logger.info("AFD DVFS controller initialized")
 
@@ -2668,6 +4228,14 @@ class Scheduler(
 
         elif batch.forward_mode.is_decode():
             self._af_dvfs_ctrl.tick_decode_iteration()
+            # Fast path: during hold, skip all heavy computation
+            st = self._af_dvfs_ctrl._decode_state
+            if st.hold_iters_remaining > 0:
+                if not hasattr(self, "_last_decode_batch_time"):
+                    self._last_decode_batch_time = time.perf_counter()
+                else:
+                    self._last_decode_batch_time = time.perf_counter()
+                return
             t_iter_us = 0.0
             if hasattr(self, "_last_decode_batch_time"):
                 t_iter_us = (time.perf_counter() - self._last_decode_batch_time) * 1e6
@@ -3091,17 +4659,21 @@ class Scheduler(
         def pop_and_process():
             # Process the results of the last batch
             tmp_batch, tmp_result = self.result_queue.popleft()
-            self.process_batch_result(tmp_batch, tmp_result)
+            self._sync_inplace_reshard_process_batch_result(tmp_batch, tmp_result)
 
         while True:
+            self._maybe_inplace_reshard_step_barrier()
+            self.maybe_handle_inplace_reshard_control_file()
             # Receive requests
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            if self._engine_paused:
+            if self._engine_paused and not self._must_stay_in_centralized_reshard_loop():
                 continue
 
             # Get the next batch to run
             batch = self.get_next_batch_to_run()
+            if self._maybe_run_follower_inplace_reshard_world():
+                continue
             self.cur_batch = batch
             disable_overlap_for_batch = self.is_disable_overlap_for_batch(batch)
 
@@ -3136,6 +4708,42 @@ class Scheduler(
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+            self.maybe_continue_inplace_reshard()
+            if getattr(self, "_inplace_reshard_restart_event_loop", False):
+                self._inplace_reshard_restart_event_loop = False
+                dispatch_event_loop(self)
+                return
+
+
+    def maybe_handle_inplace_reshard_control_file(self):
+        if self.server_args.inplace_reshard_max_tp is None:
+            return
+        if self.tp_rank != 0 or getattr(self, "is_inplace_standby_rank", False):
+            return
+        from pathlib import Path
+        import json
+        from sglang.srt.managers.io_struct import ReshardReqInput
+
+        ctrl = Path("/tmp/sglang_inplace_reshard_cmd.json")
+        if not ctrl.exists():
+            return
+        if getattr(self, "_pending_inplace_reshard", None) is not None:
+            return
+        try:
+            data = json.loads(ctrl.read_text())
+            ctrl.unlink(missing_ok=True)
+            req = ReshardReqInput(
+                action=data.get("action", "live_reshard_tp"),
+                new_tp_size=int(data["new_tp_size"]),
+                new_tp_rank=int(data.get("new_tp_rank", 0)),
+                nccl_port=int(data.get("nccl_port", 29500)),
+                pre_drain_sec=float(data.get("pre_drain_sec", 0.0) or 0.0),
+            )
+            logger.info("Handling in-place reshard control file: TP%d", req.new_tp_size)
+            self.handle_reshard(req)
+        except Exception:
+            logger.exception("Failed to handle in-place reshard control file")
+            raise
 
     def is_disable_overlap_for_batch(self, batch: ScheduleBatch) -> bool:
         # For two consecutive prefill batches, we disable overlap to improve the TTFT of the first batch.
@@ -3317,6 +4925,9 @@ class Scheduler(
     def process_input_requests(self, recv_reqs: List):
         now = time.monotonic()
         self.session_controller.maybe_reap(now)
+        track_new_reqs = self._inplace_reshard_centralized_scheduling() and self.tp_rank == 0
+        if track_new_reqs:
+            before_rids = set(self._inplace_reshard_collect_req_map().keys())
         for recv_req in recv_reqs:
             # Skip health check when server is busy — ongoing requests already carry health info.
             if is_health_check_generate_req(recv_req) and not self.is_fully_idle(
@@ -3327,6 +4938,25 @@ class Scheduler(
                 )
                 continue
 
+            if isinstance(recv_req, dict) and (
+                "__inplace_reshard__" in recv_req or "req_create_snaps" in recv_req
+            ):
+                continue
+
+            if (
+                self._inplace_reshard_centralized_scheduling()
+                and self.tp_rank != 0
+                and isinstance(
+                    recv_req,
+                    (
+                        TokenizedGenerateReqInput,
+                        BatchTokenizedGenerateReqInput,
+                        TokenizedEmbeddingReqInput,
+                    ),
+                )
+            ):
+                continue
+
             output = self._request_dispatcher(recv_req)
             if output is not None:
                 if not isinstance(output, RpcReqOutput):
@@ -3334,6 +4964,31 @@ class Scheduler(
                 else:
                     if self.recv_from_rpc is not None:
                         self.recv_from_rpc.send_pyobj(output)
+
+        if self._inplace_reshard_centralized_scheduling():
+            if self.tp_rank == 0:
+                after_map = self._inplace_reshard_collect_req_map()
+                new_snaps = {
+                    rid: self._pack_inplace_reshard_req_create_snap(req)
+                    for rid, req in after_map.items()
+                    if track_new_reqs and rid not in before_rids
+                }
+                broadcast_pyobj(
+                    [{"req_create_snaps": new_snaps}],
+                    self.tp_group.rank,
+                    self.tp_cpu_group,
+                    src=self.tp_group.ranks[0],
+                )
+            else:
+                snap_list = broadcast_pyobj(
+                    None,
+                    self.tp_group.rank,
+                    self.tp_cpu_group,
+                    src=self.tp_group.ranks[0],
+                )
+                self._ensure_inplace_reshard_reqs_from_snaps(
+                    snap_list[0].get("req_create_snaps", {})
+                )
 
     def init_req_max_new_tokens(self, req):
         req.sampling_params.max_new_tokens = min(
@@ -3435,6 +5090,31 @@ class Scheduler(
         self,
         recv_req: TokenizedGenerateReqInput,
     ):
+        if (
+            self.server_args.inplace_reshard_max_tp is not None
+            and self._inplace_reshard_blocks_new_requests()
+        ):
+            from http import HTTPStatus
+
+            from sglang.srt.disaggregation.utils import prepare_abort
+
+            req = Req(
+                recv_req.rid,
+                recv_req.input_text,
+                recv_req.input_ids,
+                recv_req.sampling_params,
+                return_logprob=recv_req.return_logprob,
+                stream=recv_req.stream,
+                http_worker_ipc=recv_req.http_worker_ipc,
+            )
+            prepare_abort(
+                req,
+                "Server is draining for TP reconfiguration; please retry.",
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            self.stream_output([req], req.return_logprob)
+            return
+
         # Route: normal request / session request / session-not-found
         session_id = (
             recv_req.session_params.id if recv_req.session_params is not None else None
@@ -3866,6 +5546,81 @@ class Scheduler(
         self.tree_cache.cache_unfinished_req(req, chunked=True)
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
+        if self._inplace_reshard_centralized_scheduling():
+            if self.tp_rank == 0:
+                if self._maybe_run_inplace_reshard_background_prep():
+                    return None
+                pending = getattr(self, "_inplace_reshard_execute_pending", None)
+                if pending is not None:
+                    recv_req, t0 = pending
+                    new_tp = int(recv_req.new_tp_size)
+                    old_tp = self.tp_size
+                    activate_cmd = {
+                        "action": "activate_inplace_reshard",
+                        "old_tp_size": old_tp,
+                        "new_tp_size": new_tp,
+                    }
+                    if not getattr(self, "_inplace_reshard_plan_sent", False):
+                        broadcast_pyobj(
+                            [
+                                {
+                                    "__inplace_reshard__": True,
+                                    "new_tp": new_tp,
+                                    "old_tp": old_tp,
+                                    "activate_cmd": activate_cmd,
+                                }
+                            ],
+                            self.tp_group.rank,
+                            self.tp_cpu_group,
+                            src=self.tp_group.ranks[0],
+                        )
+                        self._inplace_reshard_plan_sent = True
+                    self._inplace_reshard_plan_sent = False
+                    self._inplace_reshard_execute_pending = None
+                    self._live_reshard_tp_execute(recv_req, t0)
+                    return None
+                batch = self._get_next_batch_to_run_body()
+                broadcast_pyobj(
+                    [self._pack_inplace_reshard_batch_plan(batch)],
+                    self.tp_group.rank,
+                    self.tp_cpu_group,
+                    src=self.tp_group.ranks[0],
+                )
+                return batch
+            plan_list = broadcast_pyobj(
+                None,
+                self.tp_group.rank,
+                self.tp_cpu_group,
+                src=self.tp_group.ranks[0],
+            )
+            if not plan_list:
+                return None
+            plan = plan_list[0]
+            if plan.get("__inplace_reshard_prep__"):
+                old_tp = int(plan["old_tp"])
+                new_tp = int(plan["new_tp"])
+                self.tp_worker.model_runner.reset_inplace_reshard_prep()
+                self._inplace_reshard_world_prep_body(old_tp, new_tp)
+                # Active follower must join the world broadcast so standby ranks
+                # can receive prepare_inplace_reshard from rank0.
+                broadcast_pyobj(
+                    None,
+                    self.world_group.rank,
+                    self.world_group.cpu_group,
+                    src=self.world_group.ranks[0],
+                )
+                return None
+            if plan.get("__inplace_reshard__"):
+                old_tp = int(plan["old_tp"])
+                if 0 < self.tp_rank < old_tp:
+                    self._follower_participate_inplace_reshard_world(plan)
+                return None
+            return self._rebuild_inplace_reshard_batch(plan)
+        if self._maybe_run_inplace_reshard_background_prep():
+            return None
+        return self._get_next_batch_to_run_body()
+
+    def _get_next_batch_to_run_body(self) -> Optional[ScheduleBatch]:
         self._abort_on_waiting_timeout()
         self._abort_on_running_timeout()
         if self.dllm_config is not None:
@@ -3919,9 +5674,17 @@ class Scheduler(
             self.running_batch.filter_batch()
 
         if self.dllm_config is not None:
-            new_batch = self.get_new_batch_dllm()
+            new_batch = (
+                None
+                if self._inplace_reshard_blocks_new_requests()
+                else self.get_new_batch_dllm()
+            )
         else:
-            new_batch = self.get_new_batch_prefill()
+            new_batch = (
+                None
+                if self._inplace_reshard_blocks_new_requests()
+                else self.get_new_batch_prefill()
+            )
 
         need_mlp_sync = self.require_mlp_sync
         if need_mlp_sync and not self.spec_algorithm.is_none():
@@ -4723,6 +6486,9 @@ class Scheduler(
             "graph": round(self.tp_worker.model_runner.graph_mem_usage, 2),
         }
         ret["effective_max_running_requests_per_dp"] = self.max_running_requests
+        hicache_extent_state = self._get_hicache_extent_debug_state()
+        if hicache_extent_state is not None:
+            ret["hicache_extent_debug"] = hicache_extent_state
 
         if not self.spec_algorithm.is_none() and self.spec_total_num_forward_ct > 0:
             ret["avg_spec_accept_length"] = (
@@ -4734,6 +6500,10 @@ class Scheduler(
 
         # This field is not serializable.
         ret.pop("model_config", None)
+        if self.server_args.inplace_reshard_max_tp is not None:
+            ret["inplace_reshard_status"] = getattr(
+                self, "_inplace_reshard_status", None
+            )
 
         return GetInternalStateReqOutput(internal_state=ret)
 
@@ -4904,10 +6674,10 @@ class Scheduler(
     def pause_generation(self, recv_req: PauseGenerationReqInput):
         self._engine_paused = True
 
-        if self.enable_overlap and self.last_batch:
-            # Process the results of the last batch
-            tmp_batch, tmp_result = self.result_queue.popleft()
-            self.process_batch_result(tmp_batch, tmp_result)
+        if self.enable_overlap and hasattr(self, "result_queue"):
+            while self.result_queue:
+                tmp_batch, tmp_result = self.result_queue.popleft()
+                self.process_batch_result(tmp_batch, tmp_result)
 
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             chunked_req_to_exclude = set()
@@ -5125,6 +6895,10 @@ class SenderWrapper:
 
 
 def dispatch_event_loop(scheduler: Scheduler):
+    if getattr(scheduler, "is_inplace_standby_rank", False):
+        scheduler.event_loop_inplace_standby()
+        return
+    scheduler._reshard_state_dump("event_loop_entry")
     # Dispatch to the appropriate event loop based on the disaggregation mode
     from sglang.srt.layers.afd import afd_is_attn, afd_is_ffn
 

@@ -314,6 +314,38 @@ class VocabParallelEmbedding(torch.nn.Module):
             weight_loader=self.weight_loader,
         )
 
+    def reshard_recompute_indices(self, new_tp_rank: int, new_tp_size: int):
+        """Recompute the per-partition vocab shard indices for a new TP layout.
+
+        Used by the experimental in-place TP reshard path. The shard indices,
+        tp_size and per-partition counts are otherwise cached from build time;
+        after the weight matrix is re-sharded these must be updated to match the
+        new layout, otherwise the embedding masks the wrong token id range and
+        triggers a device-side index assert during decode.
+        """
+        if not self.enable_tp:
+            return
+        self.tp_size = new_tp_size
+        self.shard_indices = self._get_indices(
+            self.num_embeddings_padded,
+            self.org_vocab_size_padded,
+            self.num_embeddings,
+            self.org_vocab_size,
+            new_tp_rank,
+            new_tp_size,
+        )
+        self.num_embeddings_per_partition = divide(
+            self.num_embeddings_padded, self.tp_size
+        )
+        self.num_org_embeddings_per_partition = (
+            self.shard_indices.org_vocab_end_index
+            - self.shard_indices.org_vocab_start_index
+        )
+        self.num_added_embeddings_per_partition = (
+            self.shard_indices.added_vocab_end_index
+            - self.shard_indices.added_vocab_start_index
+        )
+
     @classmethod
     def _get_indices(
         cls,

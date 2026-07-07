@@ -1528,6 +1528,26 @@ class ResumeMemoryOccupationReqOutput(BaseReq):
 
 
 @dataclass
+class ReshardReqInput(BaseReq):
+    """Request to perform in-process TP reshard."""
+    new_tp_size: int
+    new_tp_rank: int
+    action: str = "reshard"  # "reshard" | "export_weights" | "ipc_reconnect" | "live_reshard_tp"
+    ipc_dir: Optional[str] = None
+    module_type: Optional[str] = None
+    perspective: Optional[str] = None
+    nccl_port: int = 29500
+    pre_drain_sec: float = 0.0
+
+
+@dataclass
+class ReshardReqOutput(BaseReq):
+    success: bool
+    message: str
+    elapsed_s: float = 0.0
+
+
+@dataclass
 class CheckWeightsReqInput(BaseReq):
     action: str
 

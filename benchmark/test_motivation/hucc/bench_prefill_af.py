@@ -150,7 +150,7 @@ def build_prefill_forward_batch(reqs, model_runner):
 
 # ── TP-safe profiling helpers ────────────────────────────────────────────
 
-MIN_MEASURE_TIME_S = 0.5
+MIN_MEASURE_TIME_S = 3
 
 
 def _sync_skip(skip_local: bool, tp_size: int) -> bool:

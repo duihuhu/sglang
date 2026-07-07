@@ -28,7 +28,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 # Must be set before UCX C library initializes (before any `import ucp`)
 os.environ.setdefault("UCX_LOG_LEVEL", "fatal")
 os.environ.setdefault("UCX_WARN_UNUSED_ENV_VARS", "n")
-os.environ.setdefault("UCX_MEMTYPE_CACHE", "n")
+# Keep memtype cache enabled so UCX can detect GPU buffers for cuda_copy transport
+os.environ.setdefault("UCX_MEMTYPE_CACHE", "y")
 
 import numpy as np
 import torch
@@ -131,6 +132,13 @@ class _AsyncBridge:
             raise RuntimeError("UCX event loop thread failed to start")
 
     def _run_loop(self):
+        # Initialize CUDA context in this thread for GPU-direct UCX transfers
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.current_device()
+        except Exception:
+            pass
         self._loop = asyncio.SelectorEventLoop()
         asyncio.set_event_loop(self._loop)
         self._ready.set()
@@ -375,9 +383,11 @@ class _UcxP2PCommunicator:
                         ) from e
 
     def send(self, x: torch.Tensor, original_num_tokens: int = 0):
-        """Synchronous send: blocks until RDMA completes."""
+        """Synchronous send: blocks until transfer completes."""
         torch.cuda.current_stream().synchronize()
-        self._bridge.run(self._async_send(x, original_num_tokens))
+        # GPU -> CPU in main thread (valid CUDA context), then send CPU buffer
+        x_cpu = x.contiguous().cpu()
+        self._bridge.run(self._async_send(x_cpu, original_num_tokens))
 
     def send_nonblocking(self, x: torch.Tensor, original_num_tokens: int = 0,
                           _prof_layer: int = -1, _prof_mb: int = -1):
@@ -441,8 +451,10 @@ class _UcxP2PCommunicator:
         )
 
     def recv(self) -> Tuple[torch.Tensor, int]:
-        """Returns (tensor, original_num_tokens)."""
-        return self._bridge.run(self._async_recv())
+        """Returns (tensor on self._device, original_num_tokens)."""
+        buf_cpu, original_num_tokens = self._bridge.run(self._async_recv())
+        buf = buf_cpu.to(self._device)
+        return buf, original_num_tokens
 
     async def _async_send(self, x: torch.Tensor, original_num_tokens: int = 0,
                           _prof_layer: int = -1, _prof_mb: int = -1):
@@ -455,7 +467,10 @@ class _UcxP2PCommunicator:
             t1 = time.time()
             await self._endpoint.send(meta)
             t2 = time.time()
-            await self._endpoint.send(x.contiguous())
+            # x is CPU tensor; use raw byte view for UCX-Py compatibility
+            x_contig = x.contiguous()
+            x_bytes = x_contig.view(torch.uint8).numpy()
+            await self._endpoint.send(x_bytes)
             t3 = time.time()
             try:
                 from sglang.srt.layers.afd_mixin import _afd_host_events
@@ -482,8 +497,15 @@ class _UcxP2PCommunicator:
             await self._endpoint.recv(meta)
             t1 = time.time()
             shape, dtype, original_num_tokens = _decode_meta(meta)
-            buf = self._pool.get(shape, dtype, self._device)
-            await self._endpoint.recv(buf)
+            # Compute nbytes and recv into CPU numpy byte buffer
+            nbytes = 1
+            for s in shape:
+                nbytes *= s
+            nbytes *= torch.tensor([], dtype=dtype).element_size()
+            buf_np = np.empty(nbytes, dtype=np.uint8)
+            await self._endpoint.recv(buf_np)
+            # Reconstruct tensor from raw bytes
+            buf_cpu = torch.frombuffer(buf_np, dtype=dtype).reshape(shape)
             t2 = time.time()
             try:
                 from sglang.srt.layers.afd_mixin import _afd_host_events
@@ -497,7 +519,7 @@ class _UcxP2PCommunicator:
                 })
             except Exception:
                 pass
-            return buf, original_num_tokens
+            return buf_cpu, original_num_tokens
 
     def close(self):
         if self._endpoint is not None:
@@ -974,6 +996,40 @@ class UcxTensorCommunicator(_FifoTensorCommunicatorBase):
             self._p2p.close()
             self._p2p = None
         self._bridge.stop()
+
+    # ---- Hot Reconnect (for live reshard without PF restart) ----
+
+    def reconnect(self, timeout: Optional[float] = None):
+        """Reconnect UCX endpoint without restarting peer (PF stays alive).
+
+        For ATTN side: closes old endpoint, creates a new one to the same FFN.
+        For FFN side: closes old endpoint, re-listens for new ATTN connection.
+
+        This enables live PA reshard without killing PF.
+        Typical latency: ~50ms (endpoint create + handshake).
+        """
+        t = timeout if timeout is not None else self._timeout
+        if self._p2p is None:
+            logger.warning("reconnect: no P2P communicator, nothing to do")
+            return
+
+        logger.info("UCX reconnect: closing old endpoint...")
+        self._p2p.close()
+        self._p2p._connected.clear()
+
+        logger.info("UCX reconnect: re-establishing connection...")
+        if self._is_ffn:
+            self._p2p.start_listen()
+        else:
+            self._p2p.connect()
+
+        self._p2p.wait_connected(t)
+        self._warmup_buffer_pool()
+        logger.info("UCX reconnect: done")
+
+    # Aliases for compatibility with AFD code paths that call stream-ordered variants
+    send_stream_ordered = send_tensor
+    recv_stream_ordered = recv_tensor
 
     def __del__(self):
         try:

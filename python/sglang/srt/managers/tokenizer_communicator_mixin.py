@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import inspect
 import time
 import uuid
 from collections import deque
@@ -66,6 +67,8 @@ from sglang.srt.managers.io_struct import (
     ProfileReqType,
     ReleaseMemoryOccupationReqInput,
     ReleaseMemoryOccupationReqOutput,
+    ReshardReqInput,
+    ReshardReqOutput,
     ResumeMemoryOccupationReqInput,
     ResumeMemoryOccupationReqOutput,
     SendWeightsToRemoteInstanceReqInput,
@@ -117,12 +120,20 @@ class _Communicator(Generic[T]):
             assert self._result_values is None
 
         if obj:
-            self._sender.send_pyobj(obj)
+            ret = self._sender.send_pyobj(obj)
+            if inspect.isawaitable(ret):
+                await ret
 
         self._result_event = asyncio.Event()
         self._result_values = []
-        await self._result_event.wait()
-        result_values = self._result_values
+        try:
+            await self._result_event.wait()
+            result_values = self._result_values
+        except BaseException:
+            self._result_event = self._result_values = None
+            if len(self._ready_queue) > 0:
+                self._ready_queue.popleft().set()
+            raise
         self._result_event = self._result_values = None
 
         if len(self._ready_queue) > 0:
@@ -196,6 +207,9 @@ class TokenizerCommunicatorMixin:
             self.send_to_scheduler, server_args.dp_size
         )
         self.resume_memory_occupation_communicator = _Communicator(
+            self.send_to_scheduler, server_args.dp_size
+        )
+        self.reshard_communicator = _Communicator(
             self.send_to_scheduler, server_args.dp_size
         )
         self.check_weights_communicator = _Communicator(
@@ -288,6 +302,10 @@ class TokenizerCommunicatorMixin:
                 (
                     ResumeMemoryOccupationReqOutput,
                     self.resume_memory_occupation_communicator.handle_recv,
+                ),
+                (
+                    ReshardReqOutput,
+                    self.reshard_communicator.handle_recv,
                 ),
                 (
                     CheckWeightsReqOutput,
@@ -862,6 +880,14 @@ class TokenizerCommunicatorMixin:
     ):
         self.auto_create_handle_loop()
         await self.resume_memory_occupation_communicator(obj)
+
+    async def handle_reshard(
+        self: TokenizerManager,
+        obj: ReshardReqInput,
+        request: Optional[fastapi.Request] = None,
+    ) -> ReshardReqOutput:
+        self.auto_create_handle_loop()
+        return await self.reshard_communicator(obj)
 
     async def check_weights(
         self: TokenizerManager,

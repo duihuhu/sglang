@@ -6,9 +6,26 @@
 |------|------|
 | GPU | 8× NVIDIA A800-SXM4-80GB |
 | NVLink | NV8 全互联，每条 25 GB/s，8 条链路 |
-| RDMA | Mellanox ConnectX-6 HDR 200Gb/s ×4 (mlx5_0/1/4/5) |
+| RDMA | Mellanox ConnectX-6 HDR 200Gb/s ×4 (mlx5_0/1/4/5) + bond0 (mlx5_bond_0, RoCE) |
 | 连接类型 | IB, RC, MTU 4096B |
 | 节点 | 10.252.129.34 ↔ 10.252.129.35；10.252.129.36 ↔ 10.252.129.35 |
+
+## 文件结构
+
+```
+comm/
+├── read.md                         # 本文档
+├── bench_mooncake_rdma_write.py    # ★ Mooncake Transfer Engine RDMA Write 基准
+│                                   #   (使用 sglang 跨机 PD 传输的同一原语)
+├── bench_gpudirect_rdma.py         # UCX GPUDirect send/recv 基准
+├── plot_comm_comparison.py         # ★ 综合对比绘图（NVLink vs RDMA ×1/×4/batch）
+├── plot_nvlink_vs_rdma.py          # 早期 ib_write_bw 对比图
+├── run_comm_bench.sh               # ★ 全套测试编排脚本（宿主机运行）
+├── run_rdma_bw_test.sh             # ib_write_bw perftest 脚本
+├── run_rdma_send_test.sh           # ib_send_bw/lat perftest 脚本
+├── results/                        # JSON 测试结果
+└── charts/                         # 生成的对比图表
+```
 
 ## 测试结果摘要
 
@@ -137,3 +154,105 @@
 - 大 activation tensor 跨节点传输是性能关键路径
 - 4 端口 IB 聚合实测 ~91.6 GB/s（.36↔.35），仍比 NVLink 慢 ~1.9×
 - 设计 microbatch pipeline 时需充分利用通信-计算重叠掩盖跨节点延迟
+
+---
+
+## Mooncake RDMA Write 基准（匹配 sglang PD 传输原语）
+
+### 背景
+
+SGLang 的跨节点 KV cache 传输（PD disaggregation）使用 **Mooncake Transfer Engine** 的 `transfer_sync_write` / `batch_transfer_sync_write` API。底层是 **RDMA Write**（单边操作，写入远端已注册的 GPU 显存），不是 UCX send/recv 也不是 ib_write_bw perftest。
+
+数据路径：
+```
+Prefill GPU memory (registered) 
+    → mooncake transfer_sync_write(session_id, src_ptr, dst_ptr, length)
+    → RDMA Write via IB NIC → 远端 NIC → Decode GPU memory (registered)
+```
+
+与 perftest 的区别：
+- mooncake 会做 memory region 注册、session 管理、batch 传输优化
+- 实际开销包含 mooncake 软件栈开销 + RDMA verbs 开销
+- batch mode 一次提交多个 transfer（模拟多层 KV 并发传输）
+
+### 测试脚本使用
+
+```bash
+# ── 全套自动化（在 node1 宿主机执行）──
+cd /mnt/workspace/lt/sglang/benchmark/AFlex_bench/comm
+bash run_comm_bench.sh          # 完整版（~15 分钟）
+bash run_comm_bench.sh --quick  # 快速版（~5 分钟，减少迭代）
+
+# ── 手动分步执行 ──
+
+# 1) NVLink baseline（node1 容器内）
+docker exec operator_test python3 /mnt/workspace/lt/sglang/benchmark/AFlex_bench/comm/bench_mooncake_rdma_write.py \
+    nvlink --src-gpu 0 --dst-gpu 4 --outfile results/nvlink.json
+
+# 2) Mooncake RDMA Write 单卡
+#    node2 (receiver):
+python3 bench_mooncake_rdma_write.py receiver --gpu 0 --ib-device mlx5_bond_0
+#    node1 (sender):
+python3 bench_mooncake_rdma_write.py sender --gpu 0 --ib-device mlx5_bond_0 \
+    --remote-host 10.252.129.35 --outfile results/rdma_single.json
+
+# 3) Mooncake RDMA Write 4卡聚合
+#    node2:
+python3 bench_mooncake_rdma_write.py receiver --multi-nic 4
+#    node1:
+python3 bench_mooncake_rdma_write.py sender --multi-nic 4 \
+    --remote-host 10.252.129.35 --outfile results/rdma_4nic.json
+
+# 4) Batch mode（模拟 64 层 KV 并发传输）
+#    node2:
+python3 bench_mooncake_rdma_write.py receiver --gpu 0 --ib-device mlx5_bond_0 --batch-count 64
+#    node1:
+python3 bench_mooncake_rdma_write.py sender --gpu 0 --ib-device mlx5_bond_0 \
+    --remote-host 10.252.129.35 --use-batch --batch-count 64 \
+    --outfile results/rdma_batch64.json
+
+# 5) AFD activation tensor 尺寸
+#    node2:
+python3 bench_mooncake_rdma_write.py receiver --gpu 0 --ib-device mlx5_bond_0 --sizes afd
+#    node1:
+python3 bench_mooncake_rdma_write.py sender --gpu 0 --ib-device mlx5_bond_0 \
+    --remote-host 10.252.129.35 --sizes afd --outfile results/rdma_afd.json
+```
+
+### 测试场景
+
+| # | 场景 | 说明 | 对标 |
+|---|------|------|------|
+| 1 | NVLink P2P | 同节点 GPU0→GPU4 cudaMemcpyPeerAsync | 节点内 AFD 基准上界 |
+| 2 | RDMA Write 1×NIC | mlx5_bond_0 (RoCE)，单 GPU→单 GPU 跨节点 | PD 单实例传输 |
+| 3 | RDMA Write 4×NIC | mlx5_0/1/4/5 并行，4 GPU→4 GPU | PD TP=4 多卡并发传输 |
+| 4 | Batch(64) | 单 NIC，batch_transfer_sync_write 64 块 | PD 所有层 KV 一次性批量 |
+| 5 | AFD sizes | activation tensor 尺寸 (10KB~10MB) | AFD 算子间跨节点传输 |
+
+### 消息尺寸与 KV 传输的对应
+
+Qwen3-32B (hidden=5120, num_kv_heads=8, head_dim=128, bf16):
+- 每 token 每层 KV: 2×8×128×2 = **4096 bytes**
+- 每 token 全部 64 层 KV: 64×4096 = **256 KB**
+- 128 token 全部层: 128×256KB = **32 MB**
+- 1024 token 全部层: 1024×256KB = **256 MB**
+
+### 绘图
+
+```bash
+# 用测试结果（results/ 目录下的 JSON）
+python3 plot_comm_comparison.py
+
+# 用嵌入的参考数据（无需实际测试）
+python3 plot_comm_comparison.py --use-embedded
+```
+
+生成 4 张子图：
+1. 吞吐 (GB/s) vs 消息大小 — 所有配置
+2. 延迟 (μs) vs 消息大小
+3. KV 传输时间 vs token 数 (Qwen3-32B 64层)
+4. NVLink/RDMA 带宽倍率
+
+### 参考图
+
+![NVLink vs RDMA comparison](./charts/mooncake_rdma_vs_nvlink.png)

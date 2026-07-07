@@ -419,6 +419,27 @@ class Qwen3Model(Qwen2Model):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors=None,
     ):
+        # In-place reshard only: a rank activated mid-serving has a persistent
+        # event-loop iteration offset relative to rank0 (the message-queue
+        # broadcaster lets rank0 enqueue several forwards ahead). That makes the
+        # two ranks enqueue mismatched per-forward TP collectives and deadlock.
+        # A single CPU barrier + stream sync per forward pass pins both ranks to
+        # the same iteration without the 64x cost of a per-layer barrier. This
+        # path never runs in normal serving.
+        # In-place reshard only: a rank activated mid-serving has a persistent
+        # event-loop iteration offset relative to rank0, which makes the two ranks
+        # enqueue mismatched per-forward TP collectives and deadlock. A single CPU
+        # barrier + stream sync per forward pass pins both ranks to the same
+        # iteration. This path never runs in normal serving.
+        if (
+            get_global_server_args().inplace_reshard_max_tp is not None
+            and get_tensor_model_parallel_world_size() > 1
+        ):
+            from sglang.srt.distributed import get_tp_group as _gtp
+
+            torch.cuda.current_stream().synchronize()
+            torch.distributed.barrier(group=_gtp().cpu_group)
+
         if self.pp_group.is_first_rank:
             if input_embeds is None:
                 hidden_states = self.embed_tokens(input_ids)
@@ -448,7 +469,6 @@ class Qwen3Model(Qwen2Model):
         else:
             _layer_profile = os.environ.get("SGLANG_LAYER_PROFILE", "0") in ("1", "2")
             if _layer_profile:
-                import torch.cuda
                 torch.cuda.synchronize()
                 _lp_start = time.time()
                 _lp_times = []

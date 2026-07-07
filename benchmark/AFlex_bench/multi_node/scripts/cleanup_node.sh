@@ -5,6 +5,7 @@
 pkill -9 -f sglang.launch_server 2>/dev/null
 pkill -9 -f launch_router 2>/dev/null
 pkill -9 -x sglang::router 2>/dev/null
+pkill -9 -f sglang::schedul 2>/dev/null
 pkill -9 -f sglang_router 2>/dev/null
 
 # Managed port ranges across all architectures:

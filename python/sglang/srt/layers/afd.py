@@ -1185,6 +1185,18 @@ _async_communicator: Optional[AsyncTensorCommunicator] = None
 _per_mb_async_override: Optional[AsyncTensorCommunicator] = None
 
 
+def get_afd_communicator():
+    """Get the underlying tensor communicator (if AFD mode is active).
+
+    Returns the raw FifoTensorCommunicator (e.g., UcxTensorCommunicator)
+    or None if AFD is not configured. Used by live reshard for hot reconnect.
+    """
+    try:
+        return get_tensor_communicator()
+    except (RuntimeError, Exception):
+        return None
+
+
 def get_async_communicator() -> AsyncTensorCommunicator:
     if _per_mb_async_override is not None:
         return _per_mb_async_override
@@ -1771,20 +1783,16 @@ def model_forward_afd(
             _lp_a_times = []
             _lp_f_times = []
             torch.cuda.synchronize()
-        for layer in layers:
-            if _lp:
+            for layer in layers:
                 _t0 = time.time()
-            hs, res = layer.forward_afd_A(pos, hs, fb, res)
-            if _lp:
+                hs, res = layer.forward_afd_A(pos, hs, fb, res)
                 torch.cuda.synchronize()
                 _t1 = time.time()
-            hs, res = layer.forward_afd_F(hs, fb, res)
-            if _lp:
+                hs, res = layer.forward_afd_F(hs, fb, res)
                 torch.cuda.synchronize()
                 _t2 = time.time()
                 _lp_a_times.append(_t1 - _t0)
                 _lp_f_times.append(_t2 - _t1)
-        if _lp and _lp_a_times:
             _a_total = sum(_lp_a_times) * 1000
             _f_total = sum(_lp_f_times) * 1000
             _n = len(_lp_a_times)
@@ -1794,6 +1802,108 @@ def model_forward_afd(
                 f"total={_a_total+_f_total:.1f}ms "
                 f"A_mean={_a_total/_n:.3f}ms F_mean={_f_total/_n:.3f}ms"
             )
+        elif afd_is_attn():
+            _comm = get_async_communicator()
+            _ipc = _comm.inner
+            _use_gpu_ipc = (
+                os.environ.get("AFD_GPU_ONLY_IPC", "0") == "1"
+                and hasattr(_ipc, "send_tensor_gpu_only")
+            )
+            _use_fused = (
+                os.environ.get("AFD_FUSED_PIPELINE", "0") == "1"
+                and hasattr(_ipc, "get_fused_pipeline")
+            )
+            if _use_fused:
+                # C++ fused pipeline: send_recv in one C++ call per layer
+                _fp = _ipc.get_fused_pipeline()
+                # First layer: use full recv to cache metadata
+                layer = layers[0]
+                _inner_lc = layer.layer_communicator.layer_communicator
+                hs, res = _inner_lc.prepare_attn(hs, res, fb)
+                if hs.shape[0] != 0:
+                    hs = layer._run_attn(pos, hs, fb)
+                hs, res = _inner_lc.prepare_mlp(hs, res, fb)
+                _fp.send_only(hs)
+                hs = _fp.recv_only()
+                if not hs.is_contiguous():
+                    hs = hs.contiguous()
+                hs, res = _inner_lc.postprocess_layer(hs, res, fb)
+                # Remaining layers: fused send_recv (1 C++ call instead of 2)
+                for layer in layers[1:]:
+                    _inner_lc = layer.layer_communicator.layer_communicator
+                    hs, res = _inner_lc.prepare_attn(hs, res, fb)
+                    if hs.shape[0] != 0:
+                        hs = layer._run_attn(pos, hs, fb)
+                    hs, res = _inner_lc.prepare_mlp(hs, res, fb)
+                    hs = _fp.send_recv(hs)
+                    if not hs.is_contiguous():
+                        hs = hs.contiguous()
+                    hs, res = _inner_lc.postprocess_layer(hs, res, fb)
+            elif _use_gpu_ipc:
+                for layer in layers[1:]:
+                    _inner_lc = layer.layer_communicator.layer_communicator
+                    hs, res = _inner_lc.prepare_attn(hs, res, fb)
+                    if hs.shape[0] != 0:
+                        hs = layer._run_attn(pos, hs, fb)
+                    hs, res = _inner_lc.prepare_mlp(hs, res, fb)
+                    _ipc.send_tensor_gpu_only(hs)
+                    hs = _ipc.recv_tensor_gpu_only()
+                    if not hs.is_contiguous():
+                        hs = hs.contiguous()
+                    hs, res = _inner_lc.postprocess_layer(hs, res, fb)
+            else:
+                for layer in layers[1:]:
+                    _inner_lc = layer.layer_communicator.layer_communicator
+                    hs, res = _inner_lc.prepare_attn(hs, res, fb)
+                    if hs.shape[0] != 0:
+                        hs = layer._run_attn(pos, hs, fb)
+                    hs, res = _inner_lc.prepare_mlp(hs, res, fb)
+                    _ipc.send_tensor(hs)
+                    hs = _ipc.recv_tensor()
+                    if not hs.is_contiguous():
+                        hs = hs.contiguous()
+                    hs, res = _inner_lc.postprocess_layer(hs, res, fb)
+        else:
+            _comm = get_async_communicator()
+            _ipc = _comm.inner
+            _use_gpu_ipc = (
+                os.environ.get("AFD_GPU_ONLY_IPC", "0") == "1"
+                and hasattr(_ipc, "send_tensor_gpu_only")
+            )
+            _use_fused = (
+                os.environ.get("AFD_FUSED_PIPELINE", "0") == "1"
+                and hasattr(_ipc, "get_fused_pipeline")
+            )
+            if _use_fused:
+                _fp = _ipc.get_fused_pipeline()
+                # First layer: full recv to cache metadata
+                layer = layers[0]
+                hs = _fp.recv_only()
+                if not hs.is_contiguous():
+                    hs = hs.contiguous()
+                hs = layer._run_mlp(hs, fb)
+                _fp.send_only(hs)
+                # Remaining layers: fused recv + compute + send
+                for layer in layers[1:]:
+                    hs = _fp.recv_only()
+                    if not hs.is_contiguous():
+                        hs = hs.contiguous()
+                    hs = layer._run_mlp(hs, fb)
+                    _fp.send_only(hs)
+            elif _use_gpu_ipc:
+                for layer in layers[1:]:
+                    hs = _ipc.recv_tensor_gpu_only()
+                    if not hs.is_contiguous():
+                        hs = hs.contiguous()
+                    hs = layer._run_mlp(hs, fb)
+                    _ipc.send_tensor_gpu_only(hs)
+            else:
+                for layer in layers[1:]:
+                    hs = _ipc.recv_tensor()
+                    if not hs.is_contiguous():
+                        hs = hs.contiguous()
+                    hs = layer._run_mlp(hs, fb)
+                    _ipc.send_tensor(hs)
         results = [StageIO(hs, res)]
     else:
         for i, (stage_type, *args) in enumerate(pipeline):
