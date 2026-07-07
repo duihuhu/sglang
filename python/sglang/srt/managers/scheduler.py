@@ -1333,38 +1333,7 @@ class Scheduler(
             return False
 
         if self._inplace_reshard_centralized_scheduling():
-            if self.tp_rank == 0:
-                logger.info(
-                    "In-place reshard rank0 centralized prep round TP%d->TP%d",
-                    old_tp,
-                    new_tp,
-                )
-                broadcast_pyobj(
-                    [
-                        {
-                            "__inplace_reshard_prep__": True,
-                            "old_tp": old_tp,
-                            "new_tp": new_tp,
-                        }
-                    ],
-                    self.tp_group.rank,
-                    self.tp_cpu_group,
-                    src=self.tp_group.ranks[0],
-                )
-                self._inplace_reshard_world_prep_body(old_tp, new_tp)
-                prep_cmd = {
-                    "action": "prepare_inplace_reshard",
-                    "old_tp_size": int(old_tp),
-                    "new_tp_size": int(new_tp),
-                }
-                broadcast_pyobj(
-                    prep_cmd,
-                    self.world_group.rank,
-                    self.world_group.cpu_group,
-                    src=self.world_group.ranks[0],
-                )
-                st = self.tp_worker.model_runner._inplace_reshard_prep_state_obj()
-                st.joiners_prepared = True
+            # Centralized prep is handled in get_next_batch_to_run().
             return True
 
         if self.tp_rank == 0:
@@ -5545,48 +5514,99 @@ class Scheduler(
     def stash_chunked_request(self, req: Req):
         self.tree_cache.cache_unfinished_req(req, chunked=True)
 
+    def _pack_inplace_reshard_centralized_plan(self) -> dict:
+        """Build the next centralized scheduling action for active TP ranks."""
+        pending_prep = getattr(self, "_inplace_reshard_prep_pending", None)
+        if pending_prep is not None:
+            old_tp, new_tp = pending_prep
+            if not self.tp_worker.model_runner.inplace_reshard_prep_is_ready(new_tp):
+                return {
+                    "__inplace_reshard_prep__": True,
+                    "old_tp": int(old_tp),
+                    "new_tp": int(new_tp),
+                }
+        pending = getattr(self, "_inplace_reshard_execute_pending", None)
+        if pending is not None:
+            recv_req, _ = pending
+            new_tp = int(recv_req.new_tp_size)
+            old_tp = self.tp_size
+            return {
+                "__inplace_reshard__": True,
+                "new_tp": new_tp,
+                "old_tp": old_tp,
+                "activate_cmd": {
+                    "action": "activate_inplace_reshard",
+                    "old_tp_size": old_tp,
+                    "new_tp_size": new_tp,
+                },
+            }
+        batch = self._get_next_batch_to_run_body()
+        return self._pack_inplace_reshard_batch_plan(batch)
+
+    def _dispatch_inplace_reshard_centralized_plan(
+        self, plan: dict
+    ) -> Optional[ScheduleBatch]:
+        """Run prep/execute locally on rank0; batch plans return the batch."""
+        if plan.get("__inplace_reshard_prep__"):
+            old_tp = int(plan["old_tp"])
+            new_tp = int(plan["new_tp"])
+            logger.info(
+                "In-place reshard rank0 centralized prep round TP%d->TP%d",
+                old_tp,
+                new_tp,
+            )
+            self._inplace_reshard_world_prep_body(old_tp, new_tp)
+            prep_cmd = {
+                "action": "prepare_inplace_reshard",
+                "old_tp_size": old_tp,
+                "new_tp_size": new_tp,
+            }
+            broadcast_pyobj(
+                prep_cmd,
+                self.world_group.rank,
+                self.world_group.cpu_group,
+                src=self.world_group.ranks[0],
+            )
+            st = self.tp_worker.model_runner._inplace_reshard_prep_state_obj()
+            st.joiners_prepared = True
+            from sglang.srt.reshard.inplace_reshard_background import prep_state_key
+
+            if self.tp_worker.model_runner.inplace_reshard_prep_is_ready(new_tp):
+                self._inplace_reshard_prep_pending = None
+                self._inplace_reshard_prep_key = prep_state_key(old_tp, new_tp)
+                self._publish_inplace_reshard_status(
+                    phase="prepared",
+                    active_tp=old_tp,
+                    target_tp=new_tp,
+                    old_tp=old_tp,
+                    message=f"background prep ready TP{old_tp}→TP{new_tp}",
+                )
+            return None
+        if plan.get("__inplace_reshard__"):
+            pending = getattr(self, "_inplace_reshard_execute_pending", None)
+            if pending is None:
+                return None
+            recv_req, t0 = pending
+            self._inplace_reshard_execute_pending = None
+            self._inplace_reshard_plan_sent = False
+            self._live_reshard_tp_execute(recv_req, t0)
+            return None
+        return self._rebuild_inplace_reshard_batch(plan)
+
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         if self._inplace_reshard_centralized_scheduling():
+            import torch.distributed as dist
+
+            dist.barrier(group=self.tp_cpu_group)
             if self.tp_rank == 0:
-                if self._maybe_run_inplace_reshard_background_prep():
-                    return None
-                pending = getattr(self, "_inplace_reshard_execute_pending", None)
-                if pending is not None:
-                    recv_req, t0 = pending
-                    new_tp = int(recv_req.new_tp_size)
-                    old_tp = self.tp_size
-                    activate_cmd = {
-                        "action": "activate_inplace_reshard",
-                        "old_tp_size": old_tp,
-                        "new_tp_size": new_tp,
-                    }
-                    if not getattr(self, "_inplace_reshard_plan_sent", False):
-                        broadcast_pyobj(
-                            [
-                                {
-                                    "__inplace_reshard__": True,
-                                    "new_tp": new_tp,
-                                    "old_tp": old_tp,
-                                    "activate_cmd": activate_cmd,
-                                }
-                            ],
-                            self.tp_group.rank,
-                            self.tp_cpu_group,
-                            src=self.tp_group.ranks[0],
-                        )
-                        self._inplace_reshard_plan_sent = True
-                    self._inplace_reshard_plan_sent = False
-                    self._inplace_reshard_execute_pending = None
-                    self._live_reshard_tp_execute(recv_req, t0)
-                    return None
-                batch = self._get_next_batch_to_run_body()
+                plan = self._pack_inplace_reshard_centralized_plan()
                 broadcast_pyobj(
-                    [self._pack_inplace_reshard_batch_plan(batch)],
+                    [plan],
                     self.tp_group.rank,
                     self.tp_cpu_group,
                     src=self.tp_group.ranks[0],
                 )
-                return batch
+                return self._dispatch_inplace_reshard_centralized_plan(plan)
             plan_list = broadcast_pyobj(
                 None,
                 self.tp_group.rank,
@@ -5601,8 +5621,6 @@ class Scheduler(
                 new_tp = int(plan["new_tp"])
                 self.tp_worker.model_runner.reset_inplace_reshard_prep()
                 self._inplace_reshard_world_prep_body(old_tp, new_tp)
-                # Active follower must join the world broadcast so standby ranks
-                # can receive prepare_inplace_reshard from rank0.
                 broadcast_pyobj(
                     None,
                     self.world_group.rank,
