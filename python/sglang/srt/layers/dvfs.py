@@ -508,3 +508,70 @@ class DVFSManager:
 
     def info_all(self) -> dict[int, dict]:
         return {i: ctrl.info() for i, ctrl in self.controllers.items()}
+
+
+# ── Multi-GPU batch helpers (benchmark harness / deploy scripts) ─────────
+
+
+def lock_gpus(device_indices: List[int], sm_mhz: int) -> int:
+    """Lock multiple GPUs to the same SM frequency. Returns failure count."""
+    failures = 0
+    for idx in device_indices:
+        try:
+            ctrl = DVFSController(device_index=idx)
+            ret = ctrl.lock_sm_clock(sm_mhz)
+            if ret != 0:
+                failures += 1
+                logger.warning(
+                    "lock_sm_clock(%d MHz) failed on GPU %d: ret=%d",
+                    sm_mhz,
+                    idx,
+                    ret,
+                )
+        except Exception as exc:
+            failures += 1
+            logger.warning("lock_sm_clock(%d MHz) failed on GPU %d: %s", sm_mhz, idx, exc)
+    if failures == 0:
+        logger.info("Locked GPUs %s to %d MHz", device_indices, sm_mhz)
+    return failures
+
+
+def unlock_gpus(device_indices: List[int]) -> int:
+    """Remove locked-clock constraints on multiple GPUs. Returns failure count."""
+    failures = 0
+    for idx in device_indices:
+        try:
+            ctrl = DVFSController(device_index=idx)
+            ret = ctrl.unlock_sm_clock()
+            if ret != 0:
+                failures += 1
+                logger.warning("unlock_sm_clock failed on GPU %d: ret=%d", idx, ret)
+        except Exception as exc:
+            failures += 1
+            logger.warning("unlock_sm_clock failed on GPU %d: %s", idx, exc)
+    if failures == 0:
+        logger.info("Unlocked GPUs %s", device_indices)
+    return failures
+
+
+def lock_gpu_freq_map(gpu_freq: dict[int, int]) -> int:
+    """Lock each GPU to its own target frequency. Returns failure count."""
+    failures = 0
+    for gpu, freq in sorted(gpu_freq.items()):
+        try:
+            ctrl = DVFSController(device_index=gpu)
+            ret = ctrl.lock_sm_clock(freq)
+            if ret != 0:
+                failures += 1
+                logger.warning(
+                    "lock_sm_clock(%d MHz) failed on GPU %d: ret=%d",
+                    freq,
+                    gpu,
+                    ret,
+                )
+        except Exception as exc:
+            failures += 1
+            logger.warning("lock_sm_clock(%d MHz) failed on GPU %d: %s", freq, gpu, exc)
+    if failures == 0:
+        logger.info("Locked GPU freq map: %s", dict(sorted(gpu_freq.items())))
+    return failures

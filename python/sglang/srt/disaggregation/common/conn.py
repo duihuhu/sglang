@@ -54,6 +54,7 @@ class PrefillServerInfo:
     page_size: Optional[int]
     kv_cache_dtype: Optional[str]
     follow_bootstrap_room: bool
+    generation: int = 0
 
     # Pre-computed rank mapping (set by try_ensure_parallel_info on decode side)
     target_tp_rank: Optional[int] = None
@@ -73,6 +74,7 @@ class PrefillServerInfo:
             str(self.kv_cache_dtype) if self.kv_cache_dtype is not None else None
         )
         self.follow_bootstrap_room = bool(self.follow_bootstrap_room)
+        self.generation = int(self.generation)
 
 
 @dataclasses.dataclass
@@ -115,6 +117,9 @@ class CommonKVManager(BaseKVManager):
         )
         self.pp_size = server_args.pp_size
         self.pp_rank = self.kv_args.pp_rank
+        self.bootstrap_generation = int(
+            getattr(server_args, "afd_component_bootstrap_generation", 0)
+        )
         self.local_ip = get_local_ip_auto()
         self.enable_all_cp_ranks_for_transfer = (
             envs.SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER.get()
@@ -148,7 +153,10 @@ class CommonKVManager(BaseKVManager):
             except Exception:
                 pass
             if not _skip_bootstrap:
-                self.register_to_bootstrap()
+                self.register_to_bootstrap(
+                    generation=self.bootstrap_generation,
+                    wait_for_publish=self.bootstrap_generation > 0,
+                )
             self.transfer_infos = {}
             self.decode_kv_args_table = {}
             self.pp_group = get_pp_group()
@@ -204,7 +212,11 @@ class CommonKVManager(BaseKVManager):
     def try_ensure_parallel_info(self, bootstrap_addr: str) -> bool:
         """Single non-blocking attempt to fetch and cache prefill parallel info.
         Returns True if info is available (cached or freshly fetched)."""
-        if bootstrap_addr in self.prefill_info_table:
+        cached = self.prefill_info_table.get(bootstrap_addr)
+        required_generation = int(
+            getattr(self.server_args, "afd_component_bootstrap_generation", 0)
+        )
+        if cached is not None and cached.generation >= required_generation:
             return True
 
         info: PrefillServerInfo = None
@@ -325,19 +337,62 @@ class CommonKVManager(BaseKVManager):
         info.required_dst_info_num = required_dst_info_num
         info.required_prefill_response_num = required_prefill_response_num
 
-    def register_to_bootstrap(self):
-        """Register prefill server info to bootstrap server via HTTP POST."""
+    def _bootstrap_url(self) -> str:
         if self.dist_init_addr:
-            # Multi-node case: bootstrap server's host is dist_init_addr
             host = NetworkAddress.parse(self.dist_init_addr).resolved().host
         else:
-            # Single-node case: bootstrap server's host is the same as http server's host
             host = self.bootstrap_host
+        return f"{NetworkAddress(host, self.bootstrap_port).to_url()}/route"
 
-        bootstrap_na = NetworkAddress(host, self.bootstrap_port)
-        bootstrap_server_url = bootstrap_na.to_host_port_str()
-        url = f"{bootstrap_na.to_url()}/route"
+    def invalidate_prefill_topology_cache(self) -> None:
+        if hasattr(self, "prefill_info_table"):
+            self.prefill_info_table.clear()
+
+    def wait_for_bootstrap_generation(
+        self, generation: int, timeout: float = 30.0
+    ) -> PrefillServerInfo:
+        deadline = time.monotonic() + timeout
+        url = self._bootstrap_url()
+        params = {
+            "prefill_dp_rank": -1, "prefill_cp_rank": -1,
+            "target_tp_rank": -1, "target_pp_rank": -1,
+        }
+        last = ""
+        while time.monotonic() < deadline:
+            try:
+                response = requests.get(url, params=params, timeout=5)
+                last = response.text
+                if response.status_code == 200:
+                    info = PrefillServerInfo(**response.json())
+                    if info.generation >= generation:
+                        return info
+            except Exception as exc:
+                last = str(exc)
+            time.sleep(0.02)
+        raise TimeoutError(
+            f"bootstrap generation {generation} was not published: {last}"
+        )
+
+    def register_to_bootstrap(
+        self, generation: Optional[int] = None, wait_for_publish: bool = False
+    ) -> None:
+        """Register one Prefill Attention rank into an atomic topology generation."""
+        generation = self.bootstrap_generation if generation is None else int(generation)
+        # Groups and runtime may have changed since manager construction.
+        self.attn_tp_size = get_attention_tp_size()
+        self.attn_tp_rank = get_attention_tp_rank()
+        self.attn_cp_size = get_attention_cp_size()
+        self.attn_cp_rank = get_attention_cp_rank()
+        self.attn_dp_size = get_attention_dp_size()
+        self.attn_dp_rank = get_attention_dp_rank()
+        logger.info(
+            "register_to_bootstrap: generation=%d tp_size=%d tp_rank=%d "
+            "wait_for_publish=%s url=%s",
+            generation, self.attn_tp_size, self.attn_tp_rank,
+            wait_for_publish, self._bootstrap_url(),
+        )
         payload = {
+            "generation": generation,
             "attn_tp_size": self.attn_tp_size,
             "attn_tp_rank": self.attn_tp_rank,
             "attn_cp_size": self.attn_cp_size,
@@ -354,19 +409,18 @@ class CommonKVManager(BaseKVManager):
             "kv_cache_dtype": self.server_args.kv_cache_dtype,
             "load_balance_method": self.server_args.load_balance_method,
         }
+        response = requests.put(self._bootstrap_url(), json=payload, timeout=5)
+        logger.info(
+            "register_to_bootstrap: generation=%d tp_rank=%d PUT status=%d body=%s",
+            generation, self.attn_tp_rank, response.status_code,
+            response.text[:200],
+        )
+        if response.status_code == 409:
+            raise RuntimeError(f"stale bootstrap generation rejected: {response.text}")
+        response.raise_for_status()
+        if wait_for_publish:
+            self.wait_for_bootstrap_generation(generation)
 
-        try:
-            response = requests.put(url, json=payload, timeout=5)
-            if response.status_code == 200:
-                logger.debug("Prefill successfully registered to bootstrap server.")
-            else:
-                logger.error(
-                    f"Prefill instance failed to connect to bootstrap server: {response.status_code}, {response.text}"
-                )
-        except Exception as e:
-            logger.error(
-                f"Prefill instance failed to register to bootstrap server: {e}"
-            )
 
     @cache
     def _connect(self, endpoint: str, is_ipv6: bool = False):
@@ -659,9 +713,14 @@ class CommonKVReceiver(BaseKVReceiver):
 
 
 class CommonKVBootstrapServer(BaseKVBootstrapServer):
+    # Max number of ports to try when the requested port is already in use
+    _PORT_RETRY_RANGE = 100
+
     def __init__(self, host: str, port: int):
         self.host = host
         self.port = port
+        self.actual_port: Optional[int] = None
+        self._started_event = threading.Event()
         self.app = web.Application()
         self.store = dict()
         self.lock = asyncio.Lock()
@@ -678,6 +737,13 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         ] = {}
         self.room_to_dp_rank: Dict[int, Dict[str, Union[int, float]]] = {}
         self._registered_count = 0
+        self.generation = -1
+        self._pending_generation: Optional[int] = None
+        self._pending_metadata: Optional[Dict[str, object]] = None
+        self._pending_table: Dict[
+            int, Dict[int, Dict[int, Dict[int, PrefillRankInfo]]]
+        ] = {}
+        self._pending_keys: Set[Tuple[int, int, int, int]] = set()
         self.entry_cleanup_interval = (
             envs.SGLANG_DISAGGREGATION_BOOTSTRAP_ENTRY_CLEANUP_INTERVAL.get()
         )
@@ -685,6 +751,9 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         # Start bootstrap server
         self.thread = threading.Thread(target=self._run_server, daemon=True)
         self.run()
+        # Wait for the server to start and determine its actual port
+        if not self._started_event.wait(timeout=30):
+            logger.error("Bootstrap server failed to start within 30 seconds")
 
     def run(self):
         self.thread.start()
@@ -723,72 +792,124 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                 text="Method not allowed", status=405, content_type="application/json"
             )
 
+    @staticmethod
+    def _registration_metadata(data: Dict[str, object]) -> Dict[str, object]:
+        system_dp_size = int(data["system_dp_size"])
+        return {
+            "attn_tp_size": int(data["attn_tp_size"]),
+            "attn_cp_size": int(data["attn_cp_size"]),
+            "dp_size": (
+                int(data["attn_dp_size"])
+                if system_dp_size == 1
+                else system_dp_size
+            ),
+            "pp_size": int(data["pp_size"]),
+            "page_size": int(data["page_size"]),
+            "kv_cache_dtype": data["kv_cache_dtype"],
+            "follow_bootstrap_room": (
+                data.get("load_balance_method", "follow_bootstrap_room")
+                == "follow_bootstrap_room"
+            ),
+        }
+
     async def _handle_route_put(self, request: web.Request):
         data = await request.json()
-        attn_tp_size = data["attn_tp_size"]
-        attn_tp_rank = data["attn_tp_rank"]
-        attn_cp_size = data["attn_cp_size"]
-        attn_cp_rank = data["attn_cp_rank"]
-        attn_dp_size = data["attn_dp_size"]
-        attn_dp_rank = data["attn_dp_rank"]
-        pp_size = data["pp_size"]
-        pp_rank = data["pp_rank"]
-        system_dp_size = data["system_dp_size"]
-        system_dp_rank = data["system_dp_rank"]
-        rank_ip = data["rank_ip"]
-        rank_port = int(data["rank_port"])
-        page_size = int(data["page_size"])
-        kv_cache_dtype = data["kv_cache_dtype"]
-
-        if self.attn_tp_size is None:
-            self.attn_tp_size = attn_tp_size
-
-        if self.attn_cp_size is None:
-            self.attn_cp_size = attn_cp_size
-
-        if self.dp_size is None:
-            self.dp_size = attn_dp_size if system_dp_size == 1 else system_dp_size
-
-        if self.pp_size is None:
-            self.pp_size = pp_size
-
-        if self.page_size is None and page_size is not None:
-            self.page_size = page_size
-
-        if self.kv_cache_dtype is None and kv_cache_dtype is not None:
-            self.kv_cache_dtype = kv_cache_dtype
-
-        if self.follow_bootstrap_room is None:
-            load_balance_method = data.get(
-                "load_balance_method", "follow_bootstrap_room"
-            )
-            self.follow_bootstrap_room = load_balance_method == "follow_bootstrap_room"
-
-        if system_dp_size == 1:
-            dp_group = attn_dp_rank
-        else:
-            dp_group = system_dp_rank
-
-        # Add lock to make sure thread-safe
-        async with self.lock:
-            dp_group_table = self.prefill_port_table.setdefault(dp_group, {})
-            cp_group_table = dp_group_table.setdefault(attn_cp_rank, {})
-            tp_group_table = cp_group_table.setdefault(attn_tp_rank, {})
-
-            tp_group_table[pp_rank] = PrefillRankInfo(
-                rank_ip=rank_ip,
-                rank_port=rank_port,
-            )
-
-            self._registered_count += 1
-
-        expected = self.dp_size * self.attn_cp_size * self.attn_tp_size * self.pp_size
-        logger.debug(
-            f"Register prefill bootstrap: DP{dp_group} CP{attn_cp_rank} TP{attn_tp_rank} PP{pp_rank} with rank_ip: {rank_ip} and rank_port: {rank_port}"
-            f" ({self._registered_count}/{expected} registered)"
+        generation = int(data.get("generation", 0))
+        metadata = self._registration_metadata(data)
+        system_dp_size = int(data["system_dp_size"])
+        dp_group = (
+            int(data["attn_dp_rank"])
+            if system_dp_size == 1
+            else int(data["system_dp_rank"])
         )
+        cp_rank = int(data["attn_cp_rank"])
+        tp_rank = int(data["attn_tp_rank"])
+        pp_rank = int(data["pp_rank"])
+        key = (dp_group, cp_rank, tp_rank, pp_rank)
+        info = PrefillRankInfo(data["rank_ip"], int(data["rank_port"]))
 
-        return web.Response(text="OK", status=200)
+        async with self.lock:
+            if generation < self.generation or (
+                self._pending_generation is not None
+                and generation < self._pending_generation
+            ):
+                return web.Response(
+                    text=(
+                        f"stale generation {generation}; published={self.generation}, "
+                        f"pending={self._pending_generation}"
+                    ),
+                    status=409,
+                )
+            if generation == self.generation:
+                published_metadata = {
+                    "attn_tp_size": self.attn_tp_size,
+                    "attn_cp_size": self.attn_cp_size,
+                    "dp_size": self.dp_size,
+                    "pp_size": self.pp_size,
+                    "page_size": self.page_size,
+                    "kv_cache_dtype": self.kv_cache_dtype,
+                    "follow_bootstrap_room": self.follow_bootstrap_room,
+                }
+                if metadata != published_metadata:
+                    return web.Response(
+                        text="registration metadata mismatch for published generation",
+                        status=409,
+                    )
+                if not (
+                    0 <= dp_group < int(self.dp_size)
+                    and 0 <= cp_rank < int(self.attn_cp_size)
+                    and 0 <= tp_rank < int(self.attn_tp_size)
+                    and 0 <= pp_rank < int(self.pp_size)
+                ):
+                    return web.Response(
+                        text="rank is outside published topology", status=409
+                    )
+                # Idempotent endpoint refresh without changing readiness/count.
+                self.prefill_port_table[dp_group][cp_rank][tp_rank][pp_rank] = info
+                return web.json_response(
+                    {"generation": generation, "published": True}, status=200
+                )
+            if self._pending_generation != generation:
+                self._pending_generation = generation
+                self._pending_metadata = metadata
+                self._pending_table = {}
+                self._pending_keys = set()
+            elif self._pending_metadata != metadata:
+                return web.Response(
+                    text="registration metadata mismatch within generation", status=409
+                )
+
+            self._pending_table.setdefault(dp_group, {}).setdefault(
+                cp_rank, {}
+            ).setdefault(tp_rank, {})[pp_rank] = info
+            self._pending_keys.add(key)
+            expected = (
+                int(metadata["dp_size"]) * int(metadata["attn_cp_size"])
+                * int(metadata["attn_tp_size"]) * int(metadata["pp_size"])
+            )
+            published = len(self._pending_keys) == expected
+            if published:
+                # Atomic pointer/state swap: readers see either complete old or
+                # complete new topology, never an empty/partial table.
+                self.prefill_port_table = self._pending_table
+                self.attn_tp_size = int(metadata["attn_tp_size"])
+                self.attn_cp_size = int(metadata["attn_cp_size"])
+                self.dp_size = int(metadata["dp_size"])
+                self.pp_size = int(metadata["pp_size"])
+                self.page_size = int(metadata["page_size"])
+                self.kv_cache_dtype = metadata["kv_cache_dtype"]
+                self.follow_bootstrap_room = bool(
+                    metadata["follow_bootstrap_room"]
+                )
+                self._registered_count = expected
+                self.generation = generation
+                self._pending_generation = None
+                self._pending_metadata = None
+                self._pending_table = {}
+                self._pending_keys = set()
+        return web.json_response(
+            {"generation": generation, "published": published}, status=200
+        )
 
     async def _handle_route_get(self, request: web.Request):
         prefill_dp_rank = request.query.get("prefill_dp_rank")
@@ -827,6 +948,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                     if self.follow_bootstrap_room is not None
                     else True
                 ),
+                generation=self.generation,
             )
             return web.json_response(dataclasses.asdict(info), status=200)
 
@@ -908,14 +1030,44 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
             self._runner = web.AppRunner(self.app, access_log=access_log)
             self._loop.run_until_complete(self._runner.setup())
 
-            site = web.TCPSite(self._runner, host=self.host, port=self.port)
-            self._loop.run_until_complete(site.start())
+            # Try binding to the requested port; on conflict, try subsequent ports
+            bound_port = None
+            for attempt_port in range(self.port, self.port + self._PORT_RETRY_RANGE):
+                try:
+                    site = web.TCPSite(self._runner, host=self.host, port=attempt_port)
+                    self._loop.run_until_complete(site.start())
+                    bound_port = attempt_port
+                    break
+                except OSError as e:
+                    if e.errno in (98, 48):  # EADDRINUSE (Linux=98, macOS=48)
+                        logger.warning(
+                            f"Bootstrap port {attempt_port} already in use, trying {attempt_port + 1}"
+                        )
+                        continue
+                    raise
+
+            if bound_port is None:
+                logger.error(
+                    f"Could not bind bootstrap server to any port in range "
+                    f"[{self.port}, {self.port + self._PORT_RETRY_RANGE})"
+                )
+                self._started_event.set()
+                return
+
+            self.actual_port = bound_port
+            if bound_port != self.port:
+                logger.info(
+                    f"Bootstrap server bound to fallback port {bound_port} "
+                    f"(requested {self.port})"
+                )
             logger.info(
-                f"CommonKVBootstrapServer started successfully on {self.host}:{self.port}"
+                f"CommonKVBootstrapServer started successfully on {self.host}:{bound_port}"
             )
+            self._started_event.set()
             self._loop.run_forever()
         except Exception as e:
             logger.error(f"Server error: {str(e)}", exc_info=True)
+            self._started_event.set()
         finally:
             # Cleanup
             self._loop.run_until_complete(self._runner.cleanup())

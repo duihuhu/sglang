@@ -1,0 +1,141 @@
+\begin{table}[t]
+    \centering
+    \caption{Benefits of dynamic microbatch depth $M$ and adaptive request batching \xu{during decode}. Low and high RPS use batch sizes of 2 and 384; the latter use equal ($192+192$) or adaptive ($128+256$). \xu{E2E time denotes per-layer latency.}}
+    \label{tab:adaptive-batching}
+    \begingroup
+    \small
+    \setlength{\tabcolsep}{2.5pt}
+    \renewcommand{\arraystretch}{0.85}
+    \setlength{\aboverulesep}{0.5pt}
+    \setlength{\belowrulesep}{0.5pt}
+    \begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}} l l c c c @{}}
+        \toprule
+        Optimization
+        & Workload
+        & Configuration
+        & E2E time
+        & Bubble  \\
+        \midrule
+        \multirow[c]{2}{*}{Dynamic depth}
+        & Low RPS
+        & $M: 2 \rightarrow 1$
+        & -37.9\%
+        & -8.5\% \\
+        & High RPS
+        & $M: 1 \rightarrow 2$
+        & -20.0\%
+        & -65.1\% \\
+        \midrule
+        Request batching
+        & High RPS
+        & \xu{Equal} $\rightarrow$ \xu{Adaptive}
+        & -19.9\%
+        & -16.1\% \\
+        \bottomrule
+    \end{tabular*}
+    \endgroup
+\end{table}
+
+\begin{table}[!t]
+\centering
+\caption{
+  Average ILP latency breakdown (scheduling window = 5\,min).
+  All values are in milliseconds.
+}
+\label{tab:tier1-solver-breakdown}
+\begingroup
+\small
+\setlength{\tabcolsep}{2.5pt}
+\renewcommand{\arraystretch}{0.9}
+\setlength{\aboverulesep}{1pt}
+\setlength{\belowrulesep}{1pt}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}} l c c c c c c @{}}
+\toprule
+& \multicolumn{3}{c}{Conversation}
+& \multicolumn{3}{c}{Coding} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+& $G{=}8$ & $G{=}16$ & $G{=}32$
+& $G{=}8$ & $G{=}16$ & $G{=}32$ \\
+\midrule
+Search
+& 490.33 & 532.88 & 479.13
+& 570.42 & 544.75 & 510.62 \\
+Other
+& 1.12 & 3.47 & 7.50
+& 1.35 & 3.84 & 7.83 \\
+Total
+& 491.45 & 536.35 & 486.63
+& 571.77 & 548.59 & 518.45 \\
+\textbf{Overhead (\%)}
+& \textbf{0.16} & \textbf{0.18} & \textbf{0.16}
+& \textbf{0.19} & \textbf{0.18} & \textbf{0.17} \\
+\bottomrule
+\end{tabular*}
+\endgroup
+\end{table}
+
+\begin{table}[!t]
+\centering
+\caption{Reconfiguration overhead (s): NCCL setup (Comm.), weight/KV cache init (W/KV), and RDMA init.}
+\label{tab:reshard-vs-baseline}
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{0.6pt}
+\renewcommand{\arraystretch}{0.9}
+\setlength{\aboverulesep}{1pt}
+\setlength{\belowrulesep}{1pt}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}} l c c c c c c c c @{}}
+\toprule
+& \multicolumn{4}{c}{TP2$\!\to\!$TP4}
+& \multicolumn{4}{c}{TP4$\!\to\!$TP1} \\
+\cmidrule(lr){2-5}
+\cmidrule(lr){6-9}
+& Comm. & W/KV & RDMA & Tot.
+& Comm. & W/KV & RDMA & Tot. \\
+\midrule
+Base.
+& 1.50 & 5.40 & 1.40 & 8.30
+& 0.16 & 11.10 & 1.30 & 12.56 \\
+\AFlex
+& 0.71 & 2.16 & 1.10 & \textbf{3.97}
+& 0.71 & 1.48 & 1.29 & \textbf{3.48} \\
+\midrule
+\textbf{Reduc.}
+& \multicolumn{3}{c}{--} & \textbf{52.2\%}
+& \multicolumn{3}{c}{--} & \textbf{72.3\%} \\
+\bottomrule
+\end{tabular*}
+\endgroup
+\end{table}
+
+
+% \begin{table}[!t]
+% \centering
+% \caption{Performance Prediction Model Evaluation.}
+% \label{tab:aflex-predictor}
+% \small
+% \setlength{\tabcolsep}{2.5pt}
+% \renewcommand{\arraystretch}{1.05}
+% \begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}} l c c c c c c c c @{}}
+% \toprule
+% & \multicolumn{4}{c}{Prefill}
+% & \multicolumn{4}{c}{Decode} \\
+% \cmidrule(lr){2-5} \cmidrule(lr){6-9}
+% & \multicolumn{2}{c}{\textit{train = 90\%}}
+% & \multicolumn{2}{c}{\textit{train = 10\%}}
+% & \multicolumn{2}{c}{\textit{train = 90\%}}
+% & \multicolumn{2}{c}{\textit{train = 10\%}} \\
+% \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+% \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+% & $R^2$ & MAPE
+% & $R^2$ & MAPE
+% & $R^2$ & MAPE
+% & $R^2$ & MAPE \\
+% \midrule
+% Energy
+% & 0.97 & 8.1  & 0.97 & 10.5 & 0.98 & 1.8 & 0.98 & 2.0 \\
+% Latency
+% & 0.98 & 8.0  & 0.97 & 7.8  & 0.99 & 1.6 & 0.99 & 1.7 \\
+% \bottomrule
+% \end{tabular*}
+% \end{table}

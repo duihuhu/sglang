@@ -48,6 +48,11 @@ class MiniLoadBalancer:
         self.prefill_bootstrap_ports = [url[1] for url in router_args.prefill_urls]
         self.decode_urls = router_args.decode_urls
         self.test_external_dp_routing = router_args.test_external_dp_routing
+        # Decode requests are intentionally round-robin instead of random. Fixed-length
+        # PD workloads otherwise develop avoidable KV-cache hotspots. Deriving the
+        # initial offset from the router port staggers multiple sub-routers that share
+        # the same decode pool (for example ports 45000, 45001, 45002).
+        self._decode_rr_index = self.port % len(self.decode_urls)
         self.prefill_dp_size = None
         self.decode_dp_size = None
 
@@ -121,13 +126,19 @@ class MiniLoadBalancer:
         ]
 
         if not active_prefill or not active_decode:
-            # All servers draining — fallback to any available
+            # All servers draining — fallback to any available. Keep decode selection
+            # deterministic so one unhealthy routing state does not create hotspots.
             pidx = random.randint(0, len(self.prefill_urls) - 1)
-            didx = random.randint(0, len(self.decode_urls) - 1)
+            didx = self._decode_rr_index % len(self.decode_urls)
+            self._decode_rr_index += 1
         else:
             p_choice = random.choice(active_prefill)
             pidx = p_choice[0]
-            didx = self.decode_urls.index(random.choice(active_decode))
+            # Round-robin over the active URL list. The counter is global to this
+            # sub-router, while the port-derived initial offset staggers peer routers.
+            decode_url = active_decode[self._decode_rr_index % len(active_decode)]
+            self._decode_rr_index += 1
+            didx = self.decode_urls.index(decode_url)
 
         return (
             self.prefill_urls[pidx],

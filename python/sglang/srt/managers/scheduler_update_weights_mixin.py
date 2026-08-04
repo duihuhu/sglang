@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Tuple
 
 import torch
 
+from sglang.srt.environ import envs
 from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.constants import (
     GPU_MEMORY_ALL_TYPES,
@@ -218,6 +219,7 @@ class SchedulerUpdateWeightsMixin:
 
         Actions:
           - "live_reshard_tp": Full live TP reshard (drain + NCCL transfer + UCX reconnect)
+          - "gang_restart_drain": Drain only and wait for planned gang replacement
           - "reshard": Perform in-process TP change
           - "export_weights": Export weights as IPC handles for other ranks
           - "ipc_reconnect": Re-create IPC communicator for new peer handshake
@@ -226,6 +228,8 @@ class SchedulerUpdateWeightsMixin:
 
         if recv_req.action == "live_reshard_tp":
             return self._live_reshard_tp(recv_req)
+        elif recv_req.action == "gang_restart_drain":
+            return self._gang_restart_drain(recv_req)
         elif recv_req.action == "export_weights":
             return self._export_weights_for_reshard(recv_req)
         elif recv_req.action == "reshard":
@@ -234,6 +238,50 @@ class SchedulerUpdateWeightsMixin:
             return self._ipc_reconnect(recv_req)
         else:
             return ReshardReqOutput(success=False, message=f"Unknown action: {recv_req.action}")
+
+    def _gang_restart_drain(self: Scheduler, recv_req):
+        """Drain active work, publish readiness, then await planned termination."""
+        from sglang.srt.managers.io_struct import (
+            PauseGenerationReqInput,
+            ReshardReqOutput,
+        )
+
+        target_tp = int(recv_req.new_tp_size)
+        old_tp = self.tp_worker.model_runner.tp_size
+        if self.server_args.inplace_reshard_max_tp is None:
+            return ReshardReqOutput(
+                success=False,
+                message="gang_restart_drain requires inplace_reshard_max_tp",
+            )
+        if target_tp != int(self.server_args.inplace_reshard_max_tp):
+            return ReshardReqOutput(
+                success=False,
+                message="gang_restart_drain is only valid for the max-TP final hop",
+            )
+
+        if not self._inplace_reshard_is_drained():
+            self._pending_inplace_reshard = (recv_req, time.time())
+            self._publish_inplace_reshard_status(
+                phase="draining",
+                active_tp=old_tp,
+                target_tp=target_tp,
+                old_tp=old_tp,
+                message=f"draining {len(self.running_batch.reqs)} in-flight request(s)",
+            )
+            return ReshardReqOutput(success=True, message="draining for gang restart")
+
+        self._pending_inplace_reshard = None
+        self.pause_generation(PauseGenerationReqInput(mode="in_place"))
+        self._gang_restart_waiting = True
+        if not self._inplace_reshard_centralized_scheduling():
+            self._publish_inplace_reshard_status(
+                phase="gang_restart_ready",
+                active_tp=old_tp,
+                target_tp=target_tp,
+                old_tp=old_tp,
+                message="scheduler gang drained and awaiting planned restart",
+            )
+        return ReshardReqOutput(success=True, message="gang restart drain ready")
 
     def _live_reshard_tp(self: Scheduler, recv_req):
         """Full live TP reshard: drain → NCCL transfer → UCX reconnect → resume.
@@ -264,6 +312,24 @@ class SchedulerUpdateWeightsMixin:
 
         nccl_port = getattr(recv_req, "nccl_port", 29500)
         old_tp = self.tp_worker.model_runner.tp_size
+        from sglang.srt.reshard.inplace_reshard_background import (
+            ensure_timing_context,
+        )
+
+        ctx = ensure_timing_context(
+            getattr(self, "_inplace_reshard_timing_context", None),
+            operation_id=getattr(recv_req, "operation_id", None),
+            accepted_at_s=getattr(recv_req, "accepted_at", None),
+            old_tp=old_tp,
+            new_tp=int(new_tp),
+        )
+        self._inplace_reshard_timing_context = ctx
+        # Normalize generated metadata onto the request object so every deferred
+        # tuple carries the exact same operation identity.
+        recv_req.operation_id = ctx.operation_id
+        recv_req.accepted_at = ctx.accepted_at_s
+        if self._inplace_reshard_is_drained():
+            ctx.mark_drained()
 
         logger.info("live_reshard_tp: TP%d → TP%d", old_tp, new_tp)
         self._schedule_inplace_reshard_background_prep(old_tp, new_tp)
@@ -382,6 +448,7 @@ class SchedulerUpdateWeightsMixin:
             and self.tp_rank == 0
         ):
             self._inplace_reshard_execute_pending = (recv_req, t0)
+            ctx.execute_queued_at_s = time.time()
             return ReshardReqOutput(
                 success=True,
                 message="queued synchronized in-place reshard execute",
@@ -401,6 +468,28 @@ class SchedulerUpdateWeightsMixin:
         new_tp = getattr(recv_req, "new_tp_size", None)
         nccl_port = getattr(recv_req, "nccl_port", 29500)
         old_tp = self.tp_worker.model_runner.tp_size
+        from sglang.srt.reshard.inplace_reshard_background import (
+            ensure_timing_context,
+        )
+
+        ctx = ensure_timing_context(
+            getattr(self, "_inplace_reshard_timing_context", None),
+            operation_id=getattr(recv_req, "operation_id", None),
+            accepted_at_s=getattr(recv_req, "accepted_at", None),
+            old_tp=old_tp,
+            new_tp=int(new_tp),
+        )
+        self._inplace_reshard_timing_context = ctx
+        recv_req.operation_id = ctx.operation_id
+        recv_req.accepted_at = ctx.accepted_at_s
+        ctx.mark_drained()
+        ctx.execute_start_at_s = time.time()
+        prep_state = self.tp_worker.model_runner._inplace_reshard_prep_state_obj()
+        # Do not overwrite context timestamps with None after a prep-state reset.
+        if prep_state.started_at_s is not None:
+            ctx.prep_start_at_s = prep_state.started_at_s
+        if prep_state.done_at_s is not None:
+            ctx.prep_done_at_s = prep_state.done_at_s
 
         self._publish_inplace_reshard_status(
             phase="executing",
@@ -408,11 +497,14 @@ class SchedulerUpdateWeightsMixin:
             target_tp=new_tp,
             old_tp=old_tp,
             message=f"committing TP{old_tp}→TP{new_tp}",
+            operation_id=ctx.operation_id if ctx is not None else getattr(recv_req, "operation_id", None),
         )
 
         # Drop queued work before pausing so clients get a fast error instead of
         # hanging until timeout when init_running_status() clears the queue.
+        _phase_t = time.perf_counter()
         self._abort_waiting_queue_for_inplace_reshard()
+        timings["abort_waiting_queue_ms"] = (time.perf_counter() - _phase_t) * 1000.0
 
         # Phase 1: Pause now that no forward is in-flight.
         t1 = time.time()
@@ -420,11 +512,14 @@ class SchedulerUpdateWeightsMixin:
         self.chunked_req = None
         self.running_batch = ScheduleBatch(reqs=[], batch_is_full=False)
         timings["drain_ms"] = (time.time() - t1) * 1000
+        timings["legacy_pause_call_ms"] = timings["drain_ms"]
         logger.info("  Phase 1 drain complete: %.1fms", timings["drain_ms"])
 
         # Phase 2: NCCL weight transfer
         t2 = time.time()
+        _phase_t = time.perf_counter()
         self._detach_inplace_reshard_kv_refs()
+        timings["detach_kv_refs_ms"] = (time.perf_counter() - _phase_t) * 1000.0
         ok, msg, xfer_elapsed = self.tp_worker.model_runner.live_reshard_tp(
             new_tp=new_tp,
             nccl_port=nccl_port,
@@ -441,6 +536,7 @@ class SchedulerUpdateWeightsMixin:
                 old_tp=old_tp,
                 message=msg,
                 elapsed_s=time.time() - t0,
+                operation_id=ctx.operation_id,
             )
             return ReshardReqOutput(success=False, message=msg, elapsed_s=time.time()-t0)
 
@@ -454,6 +550,7 @@ class SchedulerUpdateWeightsMixin:
             get_attention_tp_group,
             compute_dp_attention_world_info,
         )
+        _phase_t = time.perf_counter()
         self.tp_size = new_tp
         self.server_args.tp_size = new_tp
         self.tp_worker.tp_size = new_tp
@@ -480,6 +577,7 @@ class SchedulerUpdateWeightsMixin:
             else self.tp_group
         )
         self.dp_tp_cpu_group = self.dp_tp_group.cpu_group
+        timings["scheduler_group_rebind_ms"] = (time.perf_counter() - _phase_t) * 1000.0
 
         # Phase 3: UCX hot reconnect (if AFD mode with UCX communicator)
         t3 = time.time()
@@ -519,11 +617,17 @@ class SchedulerUpdateWeightsMixin:
             # "token_to_kv_pool_allocator memory leak detected" assert when a
             # request finishes. Re-bind to the freshly built pool and rebuild the
             # tree_cache on the new allocator, mirroring scheduler __init__.
+            _phase_t = time.perf_counter()
             self.req_to_token_pool, self.token_to_kv_pool_allocator = (
                 self.tp_worker.get_memory_pool()
             )
+            timings["pool_rebind_ms"] = (time.perf_counter() - _phase_t) * 1000.0
+            _phase_t = time.perf_counter()
             self._reshard_rebuild_tree_cache()
+            timings["tree_cache_rebind_ms"] = (time.perf_counter() - _phase_t) * 1000.0
+            _phase_t = time.perf_counter()
             self.tp_worker.finalize_inplace_reshard_activation()
+            timings["worker_finalize_ms"] = (time.perf_counter() - _phase_t) * 1000.0
             (
                 self.max_total_num_tokens,
                 self.max_prefill_tokens,
@@ -538,19 +642,27 @@ class SchedulerUpdateWeightsMixin:
                 _,
                 _,
             ) = self.tp_worker.get_worker_info()
+            _phase_t = time.perf_counter()
             self._reshard_finalize_scheduler_for_resume()
+            timings["scheduler_state_reinit_ms"] = (time.perf_counter() - _phase_t) * 1000.0
         import torch.distributed as dist
+        _phase_t = time.perf_counter()
         dist.barrier(group=self.tp_cpu_group)
+        timings["resume_barrier_ms"] = (time.perf_counter() - _phase_t) * 1000.0
+        _phase_t = time.perf_counter()
         self.continue_generation(ContinueGenerationReqInput())
+        timings["continue_generation_ms"] = (time.perf_counter() - _phase_t) * 1000.0
         if self.tp_rank == 0:
             self.tp_worker.model_runner._schedule_inplace_reshard_background_memory_trim()
         if self.server_args.inplace_reshard_max_tp is not None:
+            _phase_t = time.perf_counter()
             broadcast_pyobj(
                 {"action": "join_active_loop", "new_tp_size": new_tp},
                 self.world_group.rank,
                 self.world_group.cpu_group,
                 src=self.world_group.ranks[0],
             )
+            timings["join_active_loop_broadcast_ms"] = (time.perf_counter() - _phase_t) * 1000.0
         timings["resume_ms"] = (time.time() - t4) * 1000
         logger.info("  Phase 4 resume: %.1fms", timings["resume_ms"])
         self._reshard_state_dump("post_reshard")
@@ -568,6 +680,14 @@ class SchedulerUpdateWeightsMixin:
         if self.server_args.inplace_reshard_max_tp is not None and self.tp_size > 1:
             self.enable_overlap = False
             self._inplace_reshard_restart_event_loop = True
+        model_runner_breakdown = (
+            self.tp_worker.model_runner.get_last_inplace_reshard_breakdown()
+        )
+        breakdown = None
+        if ctx is not None:
+            ctx.done_at_s = time.time()
+            ctx.scheduler_ms.update(timings)
+            breakdown = ctx.snapshot(model_runner_breakdown)
         self._inplace_reshard_prep_key = None
         self._inplace_reshard_prep_pending = None
         self.tp_worker.model_runner.reset_inplace_reshard_prep()
@@ -579,7 +699,10 @@ class SchedulerUpdateWeightsMixin:
             message=result_msg,
             elapsed_s=total_ms / 1000,
             timings=timings,
+            breakdown=breakdown,
+            operation_id=ctx.operation_id if ctx is not None else None,
         )
+        self._inplace_reshard_timing_context = None
         return ReshardReqOutput(success=True, message=result_msg, elapsed_s=total_ms/1000)
 
     def _detach_inplace_reshard_kv_refs(self):
@@ -710,6 +833,148 @@ class SchedulerUpdateWeightsMixin:
             return ReshardReqOutput(success=True, message=f"Exported to {path}", elapsed_s=time.time()-t0)
         except Exception as e:
             return ReshardReqOutput(success=False, message=str(e), elapsed_s=time.time()-t0)
+
+    def _mark_inplace_reshard_kv_grow_deferred(self: Scheduler) -> None:
+        runner = self.tp_worker.model_runner
+        timing = getattr(runner, "_inplace_reshard_kv_grow_timing", None)
+        if timing is not None and getattr(
+            runner, "_inplace_reshard_kv_grow_pending", False
+        ):
+            timing["pending"] = True
+            timing["deferred_for_reshard_count"] = int(
+                timing.get("deferred_for_reshard_count", 0)
+            ) + 1
+            timing["last_deferred_at"] = time.time()
+
+    def _maybe_grow_kv_pool_background(
+        self: Scheduler, *, coordinated: bool = False
+    ):
+        """Grow KV only when all active ranks made the same scheduling choice."""
+        runner = self.tp_worker.model_runner
+        locally_pending = getattr(
+            runner, "_inplace_reshard_kv_grow_pending", False
+        )
+        if not locally_pending and not coordinated:
+            return
+
+        if not envs.SGLANG_INPLACE_RESHARD_ASYNC_KV_GROW.get():
+            runner._inplace_reshard_kv_grow_pending = False
+            timing = getattr(runner, "_inplace_reshard_kv_grow_timing", None)
+            if timing is not None:
+                timing.update(
+                    enabled=False, disabled=True, pending=False,
+                    disabled_reason="SGLANG_INPLACE_RESHARD_ASYNC_KV_GROW=0",
+                )
+            return
+
+        if not coordinated and not self.is_fully_idle():
+            return
+
+        # In joinable multi-rank mode, grow contains collectives. It may only be
+        # entered via the existing centralized plan broadcast. Direct idle-path
+        # callers return here, so rank0 cannot race ahead based on its local file.
+        if self._inplace_reshard_centralized_scheduling() and not coordinated:
+            return
+
+        # Before a centralized plan is broadcast, rank0 performs the local
+        # control-file preflight. After broadcast, every rank must execute the
+        # selected grow plan without another rank0-only branch.
+        if (
+            not coordinated
+            and self.tp_rank == 0
+            and self._inplace_reshard_should_defer_async_kv_grow_rank0()
+        ):
+            self._mark_inplace_reshard_kv_grow_deferred()
+            return
+
+        import torch
+        import torch.distributed as dist
+
+        from sglang.srt.distributed.parallel_state import get_tp_group
+
+        runner._inplace_reshard_kv_grow_pending = False
+        grow_timing = getattr(runner, "_inplace_reshard_kv_grow_timing", None)
+        if grow_timing is not None:
+            grow_timing["pending"] = False
+            grow_timing["start_at"] = time.time()
+        tp_cpu = get_tp_group().cpu_group
+
+        profile_t0 = time.perf_counter()
+        if runner.tp_rank == 0:
+            runner._maybe_reload_inplace_reshard_rank0_weights_for_memory(
+                runner.tp_size
+            )
+        runner._compact_inplace_reshard_cuda_memory()
+
+        current_tokens = int(getattr(runner, "max_total_num_tokens", 0) or 0)
+        local_cfg = runner._resolve_memory_pool_config_fill_inplace_reshard(
+            distributed=False
+        )
+        if grow_timing is not None:
+            grow_timing["profile_ms"] = (time.perf_counter() - profile_t0) * 1000.0
+        tokens_t = torch.tensor(
+            [local_cfg.max_total_num_tokens], dtype=torch.int64
+        )
+        reqs_t = torch.tensor(
+            [local_cfg.max_running_requests], dtype=torch.int64
+        )
+        dist.all_reduce(tokens_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+        dist.all_reduce(reqs_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+
+        probe_t0 = time.perf_counter()
+        probed = runner._probe_inplace_reshard_kv_tokens(
+            int(tokens_t.item()), max_running_requests=int(reqs_t.item())
+        )
+        if grow_timing is not None:
+            grow_timing["probe_ms"] = (time.perf_counter() - probe_t0) * 1000.0
+        probed_t = torch.tensor([probed], dtype=torch.int64)
+        dist.all_reduce(probed_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+        target_tokens = int(probed_t.item())
+
+        if target_tokens <= current_tokens:
+            if grow_timing is not None:
+                grow_timing["done_at"] = time.time()
+                grow_timing["tokens_after"] = current_tokens
+            if runner.tp_rank == 0:
+                logger.info(
+                    "KV pool grow: no expansion needed (%d <= %d)",
+                    target_tokens, current_tokens,
+                )
+            return
+
+        grow_t0 = time.perf_counter()
+        grew = runner._grow_inplace_reshard_kv_pool_to_target(target_tokens)
+        if grow_timing is not None:
+            grow_timing["grow_ms"] = (time.perf_counter() - grow_t0) * 1000.0
+            grow_timing["done_at"] = time.time()
+            grow_timing["tokens_after"] = int(
+                getattr(runner, "max_total_num_tokens", current_tokens) or current_tokens
+            )
+
+        if grew:
+            self.req_to_token_pool, self.token_to_kv_pool_allocator = (
+                self.tp_worker.get_memory_pool()
+            )
+            self._reshard_rebuild_tree_cache()
+            (
+                self.max_total_num_tokens,
+                self.max_prefill_tokens,
+                self.max_running_requests,
+                self.max_queued_requests,
+                self.max_req_len,
+                self.max_req_input_len,
+                self.random_seed,
+                self.device,
+                self.forward_stream,
+                _,
+                _,
+                _,
+            ) = self.tp_worker.get_worker_info()
+            if runner.tp_rank == 0:
+                logger.info(
+                    "Background KV grow done: %d -> %d tokens",
+                    current_tokens, target_tokens,
+                )
 
     def _ipc_reconnect(self: Scheduler, recv_req):
         """Trigger IPC reconnect in the scheduler process.

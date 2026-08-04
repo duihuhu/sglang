@@ -19,6 +19,7 @@ processes (TokenizerManager, DetokenizerManager, Scheduler).
 from __future__ import annotations
 
 import copy
+import time
 import uuid
 from abc import ABC
 from dataclasses import dataclass, field
@@ -945,6 +946,10 @@ class BatchTokenizedEmbeddingReqInput(BaseBatchReq):
 class AFDReqInput(BaseReq):
     """Scheduler-to-scheduler message for AF disaggregation synchronization."""
 
+    dispatch_id: int = 0
+    pf_group_id: int = 0
+    lane_id: int = 0
+    parent_batch_size: int = 0
     batch_size: int = 0
     forward_mode: Any = None  # ForwardMode enum
     req_ids: Optional[List[str]] = None
@@ -1528,6 +1533,68 @@ class ResumeMemoryOccupationReqOutput(BaseReq):
 
 
 @dataclass
+class AFDComponentReshardReqInput(BaseReq):
+    """Request for the isolated AFD component reshard control plane."""
+
+    stage: Literal["prefill", "decode"]
+    expected_attn_tp: int
+    expected_ffn_tp: int
+    target_attn_tp: int
+    target_ffn_tp: int
+    expected_epoch: int
+    operation_id: Optional[str] = None
+    dry_run: bool = False
+
+
+@dataclass
+class AFDComponentReshardOutput(BaseReq):
+    accepted: bool
+    operation_id: str
+    capability: str
+    runtime_supported: bool
+    status: "AFDComponentReshardStatus"
+
+
+@dataclass
+class AFDComponentReshardStatus:
+    operation_id: str
+    stage: Literal["prefill", "decode"]
+    phase: str
+    epoch: int
+    expected_attn_tp: int
+    expected_ffn_tp: int
+    target_attn_tp: int
+    target_ffn_tp: int
+    dry_run: bool
+    capability: str
+    runtime_supported: bool
+    message: str
+    created_at: float
+    updated_at: float
+    completed_at: Optional[float] = None
+    breakdown: Dict[str, float] = field(default_factory=dict)
+
+
+@dataclass
+class AFDComponentReshardCancelInput(BaseReq):
+    operation_id: str
+    expected_epoch: Optional[int] = None
+
+
+@dataclass
+class AFDComponentReshardTopology:
+    stage: Literal["prefill", "decode"]
+    pair_id: str
+    epoch: int
+    attn_tp: int
+    ffn_tp: int
+    max_tp: int
+    channel_base: int
+    control_base: int
+    updated_at: float = field(default_factory=time.time)
+
+
+@dataclass
 class ReshardReqInput(BaseReq):
     """Request to perform in-process TP reshard."""
     new_tp_size: int
@@ -1538,6 +1605,8 @@ class ReshardReqInput(BaseReq):
     perspective: Optional[str] = None
     nccl_port: int = 29500
     pre_drain_sec: float = 0.0
+    operation_id: Optional[str] = None
+    accepted_at: Optional[float] = None
 
 
 @dataclass

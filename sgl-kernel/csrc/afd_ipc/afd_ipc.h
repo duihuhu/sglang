@@ -23,7 +23,7 @@ namespace afd_ipc {
 // Ring buffer configuration
 constexpr int RING_SIZE = 4;
 constexpr int HEADER_BYTES = 64;
-constexpr size_t MAX_MSG_SIZE = 128 * 1024 * 1024;  // 128 MB (prefill batch: 8192×5120×bf16=80MB max)
+constexpr size_t MAX_MSG_SIZE = 256 * 1024 * 1024;  // 256 MB (prefill batch: 32768×4096×bf16=256MB)
 
 // SHM layout: per-slot flags + sizes + metadata for bidirectional communication
 // Layout (per direction):

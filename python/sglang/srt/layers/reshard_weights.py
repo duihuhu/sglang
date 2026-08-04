@@ -22,6 +22,75 @@ import torch
 import torch.distributed as dist
 
 
+def get_tp_split_rules_from_config(model_path) -> Dict[str, Tuple]:
+    """Infer TP split rules from safetensor parameter names (no model instance needed).
+
+    Supports both raw HF names (q_proj, k_proj, v_proj, gate_proj, up_proj)
+    and sglang fused names (qkv_proj, gate_up_proj).
+
+    Uses HuggingFace naming convention for transformers models:
+    - *q_proj*, *k_proj*, *v_proj*, *gate_proj*, *up_proj*, embed_tokens, lm_head → column, dim 0
+    - *qkv_proj* → column_fused with [q, k, v] segment sizes from config.json
+    - *gate_up_proj* → column_fused with [intermediate, intermediate] segments
+    - *o_proj*, *down_proj* → row, dim 1
+    """
+    import json
+    from pathlib import Path
+
+    p = Path(model_path)
+    config_file = p / "config.json"
+    config = {}
+    if config_file.exists():
+        with open(config_file) as f:
+            config = json.load(f)
+
+    num_heads = config.get("num_attention_heads", 32)
+    num_kv_heads = config.get("num_key_value_heads", num_heads)
+    hidden_size = config.get("hidden_size", 4096)
+    head_dim = config.get("head_dim", hidden_size // num_heads)
+    intermediate_size = config.get("intermediate_size", hidden_size * 4)
+
+    q_size = num_heads * head_dim
+    k_size = num_kv_heads * head_dim
+    v_size = num_kv_heads * head_dim
+
+    from safetensors import safe_open
+
+    shard_files = sorted(p.glob("*.safetensors"))
+    if not shard_files:
+        return {}
+
+    all_names = []
+    for sf in shard_files:
+        with safe_open(str(sf), framework="pt", device="cpu") as f:
+            all_names.extend(f.keys())
+
+    COLUMN_KEYWORDS = ("q_proj", "k_proj", "v_proj", "gate_proj", "up_proj")
+    ROW_KEYWORDS = ("o_proj", "down_proj")
+
+    rules: Dict[str, Tuple] = {}
+    for name in all_names:
+        if not name.endswith(".weight"):
+            continue
+        if "embed_tokens" in name or "lm_head" in name:
+            rules[name] = ("column", 0)
+        elif "qkv_proj" in name:
+            rules[name] = ("column_fused", 0, (q_size, k_size, v_size))
+        elif "gate_up_proj" in name:
+            rules[name] = ("column_fused", 0, (intermediate_size, intermediate_size))
+        elif any(kw in name for kw in COLUMN_KEYWORDS):
+            rules[name] = ("column", 0)
+        elif any(kw in name for kw in ROW_KEYWORDS):
+            rules[name] = ("row", 1)
+
+    # Also add fused names that the caller may query after _fuse_safetensor_weights
+    # (these won't appear in safetensor files but may be used by the subprocess)
+    for name in list(rules.keys()):
+        pass  # safetensor names already handled above
+
+    return rules
+
+
 def get_tp_split_rules(model) -> Dict[str, Tuple[str, int]]:
     """Extract TP split rules from model layers.
     

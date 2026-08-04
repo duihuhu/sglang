@@ -10,11 +10,13 @@ from sglang.srt.configs.model_config import get_nsa_index_head_dim, is_deepseek_
 from sglang.srt.distributed.parallel_state import get_world_group, get_tp_group
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.mem_cache.allocator import (
+    AFDFFNNoKVPoolAllocator,
     PagedTokenToKVPoolAllocator,
     TokenToKVPoolAllocator,
 )
 from sglang.srt.mem_cache.memory_pool import (
     DoubleSparseTokenToKVPool,
+    AFDFFNReqToTokenPool,
     HybridLinearKVPool,
     HybridReqToTokenPool,
     MHATokenToKVPool,
@@ -646,8 +648,73 @@ class ModelRunnerKVCacheMixin:
 
         return MAMBA_CACHE_SIZE_MAX_RUNNING_REQUESTS_RATIO + additional_ratio
 
+    def _is_afd_ffn_no_kv(self: ModelRunner) -> bool:
+        """Whether this runner is the no-attention AFD FFN perspective."""
+        from sglang.srt.layers.afd_type import AFDPerspective
+
+        return (
+            self.server_args.afd_perspective
+            == AFDPerspective.AFD_PERSPECTIVE_FFN
+        )
+
+    def _resolve_afd_ffn_memory_pool_config(self: ModelRunner) -> MemoryPoolConfig:
+        """Resolve scheduler-only capacity without profiling GPU KV memory."""
+        max_num_reqs = self.server_args.max_running_requests
+        if max_num_reqs is None:
+            max_num_reqs = min(
+                max(
+                    int(
+                        self.server_args.max_prefill_tokens
+                        / self.model_config.context_len
+                        * 512
+                    ),
+                    2048,
+                ),
+                4096,
+            )
+        else:
+            max_num_reqs = max(int(max_num_reqs) // self.dp_size, 1)
+
+        token_capacity = self.server_args.max_total_tokens
+        if token_capacity is None:
+            # This is only a logical accounting limit, so cover every request's
+            # full context without reserving any corresponding storage.
+            token_capacity = max(
+                self.server_args.max_prefill_tokens,
+                max_num_reqs * self.model_config.context_len,
+                1,
+            )
+        token_capacity = max(int(token_capacity), 1)
+        return MemoryPoolConfig(
+            max_total_num_tokens=token_capacity,
+            max_running_requests=max_num_reqs,
+            mem_fraction_static=self.server_args.mem_fraction_static,
+        )
+
+    def _init_afd_ffn_no_kv_pools(self: ModelRunner) -> None:
+        """Create request bookkeeping plus a zero-storage logical KV allocator."""
+        if self.req_to_token_pool is None:
+            self.req_to_token_pool = AFDFFNReqToTokenPool(
+                size=self.max_running_requests,
+                max_context_len=self.model_config.context_len + 4,
+                device=self.device,
+                enable_memory_saver=self.server_args.enable_memory_saver,
+            )
+        self.token_to_kv_pool = None
+        if self.token_to_kv_pool_allocator is None:
+            self.token_to_kv_pool_allocator = AFDFFNNoKVPoolAllocator(
+                size=self.max_total_num_tokens,
+                page_size=self.page_size,
+                dtype=self.kv_cache_dtype,
+                device=self.device,
+            )
+
     def _init_pools(self: ModelRunner):
         """Initialize the memory pools."""
+        if self._is_afd_ffn_no_kv():
+            self._init_afd_ffn_no_kv_pools()
+            return
+
         max_num_reqs = self.max_running_requests
 
         # Initialize req_to_token_pool
@@ -1069,6 +1136,16 @@ class ModelRunnerKVCacheMixin:
         )
 
     def init_memory_pool(self: ModelRunner, pre_model_load_memory: int):
+        if self._is_afd_ffn_no_kv():
+            self.memory_pool_config = self._resolve_afd_ffn_memory_pool_config()
+            self._apply_memory_pool_config(self.memory_pool_config)
+            logger.info(
+                "AFD FFN no-KV runtime initialized: tokens=%d reqs=%d",
+                self.max_total_num_tokens,
+                self.max_running_requests,
+            )
+            return
+
         if not self.spec_algorithm.is_none() and self.is_draft_worker:
             assert (
                 self.memory_pool_config is not None
@@ -1118,12 +1195,29 @@ class ModelRunnerKVCacheMixin:
             self.device, self.gpu_id, distributed=False, empty_cache=True
         )
 
+    def rebuild_afd_ffn_memory_pool_after_reshard(self: ModelRunner) -> MemoryPoolConfig:
+        """Recreate only FFN request bookkeeping after TP changes; never build KV."""
+        # Standby ranks only load a model shell before joining, so they have not
+        # necessarily run the initial memory-pool dtype configuration yet.
+        self.configure_kv_cache_dtype()
+        cfg = self._resolve_afd_ffn_memory_pool_config()
+        self.req_to_token_pool = None
+        self.token_to_kv_pool = None
+        self.token_to_kv_pool_allocator = None
+        self.memory_pool_config = cfg
+        self._apply_memory_pool_config(cfg)
+        self._update_model_tp_metadata(self.tp_size)
+        return cfg
+
     def rebuild_memory_pool_after_inplace_reshard(self: ModelRunner) -> MemoryPoolConfig:
         """Re-profile GPU memory and rebuild KV pools after in-place TP reshard.
 
         Each rank fills ``mem_fraction_static`` of its post-weight free memory; the
         TP group takes MIN(tokens) so all ranks stay consistent while maximizing KV
         on clean GPUs (standby activations)."""
+        if self._is_afd_ffn_no_kv():
+            return self.rebuild_afd_ffn_memory_pool_after_reshard()
+
         import torch.distributed as dist
 
         tp_cpu = get_tp_group().cpu_group
@@ -1153,9 +1247,24 @@ class ModelRunnerKVCacheMixin:
         dist.barrier(group=tp_cpu)
 
         prev_tokens = int(getattr(self, "max_total_num_tokens", 0) or 0)
-        local_cfg = self._resolve_memory_pool_config_fill_inplace_reshard(
-            distributed=False
+        st = getattr(self, "_inplace_reshard_prep_state", None)
+        hint = (
+            getattr(st, "kv_cfg_hint", None)
+            if st is not None and int(getattr(st, "new_tp", 0)) == int(self.tp_size)
+            else None
         )
+        if hint is not None and getattr(hint, "max_total_num_tokens", 0) > 0:
+            local_cfg = MemoryPoolConfig(
+                max_total_num_tokens=int(hint.max_total_num_tokens),
+                max_running_requests=int(hint.max_running_requests),
+                full_max_total_num_tokens=hint.full_max_total_num_tokens,
+                swa_max_total_num_tokens=hint.swa_max_total_num_tokens,
+                mem_fraction_static=hint.mem_fraction_static,
+            )
+        else:
+            local_cfg = self._resolve_memory_pool_config_fill_inplace_reshard(
+                distributed=False
+            )
         tokens_t = torch.tensor(
             [local_cfg.max_total_num_tokens], dtype=torch.int64
         )
@@ -1301,3 +1410,293 @@ class ModelRunnerKVCacheMixin:
         self._pre_reshard_tp = saved_pre
         dist.barrier(group=tp_cpu)
         return cfg
+
+    def rebuild_memory_pool_fast_inplace_reshard(self: ModelRunner) -> MemoryPoolConfig:
+        """Fast KV pool rebuild using pre-computed hint; skips profiling/probing.
+
+        This is phase 1 of the two-phase async KV rebuild. It allocates a
+        conservative KV pool using kv_cfg_hint (computed during background prep)
+        so serving can resume in <1s. The full probe + grow happens later in the
+        background via _grow_inplace_reshard_kv_pool_to_target().
+        """
+        if self._is_afd_ffn_no_kv():
+            return self.rebuild_afd_ffn_memory_pool_after_reshard()
+
+        import torch.distributed as dist
+
+        tp_cpu = get_tp_group().cpu_group
+        dist.barrier(group=tp_cpu)
+        self.configure_kv_cache_dtype()
+        self._release_inplace_reshard_attention_state()
+        self._compact_inplace_reshard_cuda_memory()
+
+        st = getattr(self, "_inplace_reshard_prep_state", None)
+        hint = (
+            getattr(st, "kv_cfg_hint", None)
+            if st is not None and int(getattr(st, "new_tp", 0)) == int(self.tp_size)
+            else None
+        )
+
+        if hint is not None and getattr(hint, "max_total_num_tokens", 0) > 0:
+            hint_tokens = int(hint.max_total_num_tokens)
+            hint_reqs = int(hint.max_running_requests)
+        else:
+            analytic_avail = self._inplace_reshard_analytic_avail_gb()
+            est_bytes_per_token = self._estimate_kv_bytes_per_token()
+            if est_bytes_per_token > 0:
+                est_tokens = int(analytic_avail * 0.5 * (1 << 30) / est_bytes_per_token)
+            else:
+                est_tokens = max(int(getattr(self, "max_total_num_tokens", 4096)), 4096)
+            hint_tokens = max(est_tokens, 4096)
+            # A joining rank (e.g. AFD component activate) has no prep hint and
+            # falls through here. Honor the operator's --max-total-tokens cap so
+            # the rebuilt KV pool respects the configured budget instead of
+            # filling half of free memory.
+            user_cap = self.server_args.max_total_tokens
+            if user_cap is not None:
+                hint_tokens = min(hint_tokens, max(int(user_cap), 1))
+            hint_reqs = self._resolve_max_num_reqs(hint_tokens)
+
+        tokens_t = torch.tensor([hint_tokens], dtype=torch.int64)
+        reqs_t = torch.tensor([hint_reqs], dtype=torch.int64)
+        dist.all_reduce(tokens_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+        dist.all_reduce(reqs_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+
+        cfg = MemoryPoolConfig(
+            max_total_num_tokens=int(tokens_t.item()),
+            max_running_requests=int(reqs_t.item()),
+            full_max_total_num_tokens=(
+                hint.full_max_total_num_tokens if hint else None
+            ),
+            swa_max_total_num_tokens=(
+                hint.swa_max_total_num_tokens if hint else None
+            ),
+            mem_fraction_static=(
+                hint.mem_fraction_static
+                if hint
+                else self.server_args.mem_fraction_static
+            ),
+        )
+
+        try:
+            self._apply_memory_pool_config(cfg)
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "not enough memory" in msg or "out of memory" in msg:
+                shrink = max(int(cfg.max_total_num_tokens * 0.6), 4096)
+                logger.warning(
+                    "Fast KV rebuild OOM, shrinking %d -> %d tokens",
+                    cfg.max_total_num_tokens, shrink,
+                )
+                self.req_to_token_pool = None
+                self.token_to_kv_pool = None
+                self.token_to_kv_pool_allocator = None
+                self._compact_inplace_reshard_cuda_memory()
+                cfg = MemoryPoolConfig(
+                    max_total_num_tokens=shrink,
+                    max_running_requests=self._resolve_max_num_reqs(shrink),
+                    full_max_total_num_tokens=cfg.full_max_total_num_tokens,
+                    swa_max_total_num_tokens=cfg.swa_max_total_num_tokens,
+                    mem_fraction_static=cfg.mem_fraction_static,
+                )
+                tokens_t = torch.tensor(
+                    [cfg.max_total_num_tokens], dtype=torch.int64
+                )
+                dist.all_reduce(tokens_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+                cfg = MemoryPoolConfig(
+                    max_total_num_tokens=int(tokens_t.item()),
+                    max_running_requests=self._resolve_max_num_reqs(
+                        int(tokens_t.item())
+                    ),
+                    full_max_total_num_tokens=cfg.full_max_total_num_tokens,
+                    swa_max_total_num_tokens=cfg.swa_max_total_num_tokens,
+                    mem_fraction_static=cfg.mem_fraction_static,
+                )
+                self._apply_memory_pool_config(cfg)
+            else:
+                raise
+
+        self.memory_pool_config = cfg
+        self.max_total_num_tokens = cfg.max_total_num_tokens
+        self.max_running_requests = cfg.max_running_requests
+
+        saved_pre = getattr(self, "_pre_reshard_tp", self.tp_size)
+        self._pre_reshard_tp = self.tp_size
+        self._update_model_tp_metadata(self.tp_size)
+        self._pre_reshard_tp = saved_pre
+
+        if self.tp_rank == 0:
+            logger.info(
+                "Fast KV rebuild done: %d tokens, %d reqs (hint=%s)",
+                cfg.max_total_num_tokens,
+                cfg.max_running_requests,
+                "yes" if hint else "analytic-fallback",
+            )
+        dist.barrier(group=tp_cpu)
+        return cfg
+
+    def _estimate_kv_bytes_per_token(self: ModelRunner) -> int:
+        """Estimate bytes per KV token for analytic fallback sizing."""
+        try:
+            hf = self.model_config.hf_config
+            num_layers = getattr(hf, "num_hidden_layers", 32)
+            num_kv_heads = getattr(
+                hf, "num_key_value_heads", getattr(hf, "num_attention_heads", 32)
+            )
+            head_dim = getattr(
+                hf, "head_dim",
+                getattr(hf, "hidden_size", 4096) // getattr(hf, "num_attention_heads", 32),
+            )
+            kv_heads_per_rank = max(num_kv_heads // self.tp_size, 1)
+            bytes_per_elem = 2
+            return num_layers * 2 * kv_heads_per_rank * head_dim * bytes_per_elem
+        except Exception:
+            return 0
+
+    def _grow_inplace_reshard_kv_pool_to_target(
+        self: ModelRunner, target_tokens: int
+    ) -> bool:
+        """Grow KV pool in-place to target_tokens. Must be called when idle.
+
+        Returns True if pool was successfully grown, False otherwise.
+        This drops old pools, re-compacts memory, and allocates a larger pool.
+        """
+        import torch.distributed as dist
+
+        tp_cpu = get_tp_group().cpu_group
+        current = int(getattr(self, "max_total_num_tokens", 0) or 0)
+        if target_tokens <= current:
+            return False
+
+        self.req_to_token_pool = None
+        self.token_to_kv_pool = None
+        self.token_to_kv_pool_allocator = None
+        self._compact_inplace_reshard_cuda_memory()
+
+        tokens_t = torch.tensor([target_tokens], dtype=torch.int64)
+        dist.all_reduce(tokens_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+        final_tokens = int(tokens_t.item())
+        final_reqs = self._resolve_max_num_reqs(final_tokens)
+
+        old_cfg = self.memory_pool_config
+        new_cfg = MemoryPoolConfig(
+            max_total_num_tokens=final_tokens,
+            max_running_requests=final_reqs,
+            full_max_total_num_tokens=(
+                old_cfg.full_max_total_num_tokens if old_cfg else None
+            ),
+            swa_max_total_num_tokens=(
+                old_cfg.swa_max_total_num_tokens if old_cfg else None
+            ),
+            mem_fraction_static=(
+                old_cfg.mem_fraction_static
+                if old_cfg
+                else self.server_args.mem_fraction_static
+            ),
+        )
+
+        try:
+            self._apply_memory_pool_config(new_cfg)
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if "not enough memory" in msg or "out of memory" in msg:
+                logger.warning(
+                    "KV pool grow to %d tokens failed (OOM), restoring %d",
+                    final_tokens, current,
+                )
+                self.req_to_token_pool = None
+                self.token_to_kv_pool = None
+                self.token_to_kv_pool_allocator = None
+                self._compact_inplace_reshard_cuda_memory()
+                restore_cfg = MemoryPoolConfig(
+                    max_total_num_tokens=current,
+                    max_running_requests=self._resolve_max_num_reqs(current),
+                    full_max_total_num_tokens=new_cfg.full_max_total_num_tokens,
+                    swa_max_total_num_tokens=new_cfg.swa_max_total_num_tokens,
+                    mem_fraction_static=new_cfg.mem_fraction_static,
+                )
+                self._apply_memory_pool_config(restore_cfg)
+                self.memory_pool_config = restore_cfg
+                self.max_total_num_tokens = current
+                self.max_running_requests = restore_cfg.max_running_requests
+                return False
+            else:
+                raise
+
+        self.memory_pool_config = new_cfg
+        self.max_total_num_tokens = final_tokens
+        self.max_running_requests = final_reqs
+        logger.info(
+            "KV pool grow complete: %d -> %d tokens",
+            current, final_tokens,
+        )
+        return True
+
+    def _sync_inplace_reshard_kv_collective_only(self: ModelRunner) -> MemoryPoolConfig:
+        """Fast post-xfer KV sync when pools were pre-built during background prep."""
+        import torch.distributed as dist
+
+        tp_cpu = get_tp_group().cpu_group
+        dist.barrier(group=tp_cpu)
+        if self.tp_rank == 0 and getattr(
+            self, "_needs_inplace_reshard_rank0_cold_reload", False
+        ):
+            self._needs_inplace_reshard_rank0_cold_reload = False
+            self._cold_reload_inplace_reshard_rank0_weights(self.tp_size)
+        elif self.tp_rank == 0 and not getattr(
+            self, "_rank0_inplace_reshard_cold_reloaded", False
+        ):
+            self._maybe_reload_inplace_reshard_rank0_weights_for_memory(self.tp_size)
+        if self.tp_rank == 0:
+            self._rank0_inplace_reshard_cold_reloaded = False
+        dist.barrier(group=tp_cpu)
+
+        cfg = self.memory_pool_config
+        if cfg is None:
+            return self.rebuild_memory_pool_after_inplace_reshard()
+
+        self._compact_inplace_reshard_cuda_memory()
+        local_avail = self._inplace_reshard_effective_avail_gb()
+        avail_t = torch.tensor([local_avail], dtype=torch.float64)
+        max_t = avail_t.clone()
+        dist.all_reduce(max_t, op=dist.ReduceOp.MAX, group=tp_cpu)
+        self._maybe_reclaim_inplace_reshard_memory_imbalance(float(max_t.item()))
+        dist.barrier(group=tp_cpu)
+
+        tokens_t = torch.tensor([cfg.max_total_num_tokens], dtype=torch.int64)
+        reqs_t = torch.tensor([cfg.max_running_requests], dtype=torch.int64)
+        feasible_t = torch.tensor(
+            [
+                self._probe_inplace_reshard_kv_tokens(
+                    int(tokens_t.item()),
+                    max_running_requests=int(reqs_t.item()),
+                )
+            ],
+            dtype=torch.int64,
+        )
+        dist.all_reduce(tokens_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+        dist.all_reduce(reqs_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+        dist.all_reduce(feasible_t, op=dist.ReduceOp.MIN, group=tp_cpu)
+        new_cfg = MemoryPoolConfig(
+            max_total_num_tokens=int(feasible_t.item()),
+            max_running_requests=int(reqs_t.item()),
+            full_max_total_num_tokens=cfg.full_max_total_num_tokens,
+            swa_max_total_num_tokens=cfg.swa_max_total_num_tokens,
+            mem_fraction_static=cfg.mem_fraction_static,
+        )
+        if int(new_cfg.max_total_num_tokens) < int(cfg.max_total_num_tokens):
+            self.token_to_kv_pool = None
+            self.token_to_kv_pool_allocator = None
+            self.req_to_token_pool = None
+            self._apply_memory_pool_config(new_cfg)
+        self.memory_pool_config = new_cfg
+        self.max_total_num_tokens = new_cfg.max_total_num_tokens
+        self.max_running_requests = new_cfg.max_running_requests
+        if self.tp_rank == 0:
+            logger.info(
+                "In-place reshard KV fast-sync: %d tokens, %d reqs",
+                new_cfg.max_total_num_tokens,
+                new_cfg.max_running_requests,
+            )
+        dist.barrier(group=tp_cpu)
+        return new_cfg

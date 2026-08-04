@@ -411,6 +411,8 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     afd_parent_token_range: Optional[Tuple[int, int]] = None
     afd_children: Optional[List[ForwardBatch]] = None
     can_run_afd_overlap: bool = False
+    afd_pf_group_ids: Optional[List[int]] = None
+    afd_pf_group_id: int = 0
 
     # For matryoshka embeddings
     dimensions: Optional[list[int]] = None
@@ -471,6 +473,12 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             token_type_ids=batch.token_type_ids,
             tbo_split_seq_index=batch.tbo_split_seq_index,
             afd_split_seq_index=batch.afd_split_seq_index,
+            afd_pf_group_ids=batch.afd_pf_group_ids,
+            afd_pf_group_id=(
+                batch.afd_pf_group_ids[0]
+                if batch.afd_pf_group_ids and len(batch.afd_pf_group_ids) == 1
+                else 0
+            ),
             dimensions=batch.dimensions,
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
             rids=[req.rid for req in batch.reqs],

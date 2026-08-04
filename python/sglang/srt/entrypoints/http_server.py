@@ -67,6 +67,7 @@ from sglang.srt.entrypoints.anthropic.protocol import (
 from sglang.srt.entrypoints.anthropic.serving import AnthropicServing
 from sglang.srt.entrypoints.engine import (
     Engine,
+    SchedulerInitResult,
     init_tokenizer_manager,
     run_detokenizer_process,
     run_scheduler_process,
@@ -203,6 +204,8 @@ class _GlobalState:
     #         )
     # }
     remote_instance_transfer_engine_info: Optional[Dict] = None
+    scheduler_init_result: Optional[SchedulerInitResult] = None
+    afd_component_reshard_coordinator: Optional[Any] = None
 
 
 _global_state: Optional[_GlobalState] = None
@@ -210,6 +213,57 @@ _global_state: Optional[_GlobalState] = None
 
 def set_global_state(global_state: _GlobalState):
     global _global_state
+    server_args = global_state.tokenizer_manager.server_args
+    if global_state.afd_component_reshard_coordinator is None:
+        from sglang.srt.reshard.afd_component_reshard import (
+            AFDComponentReshardCoordinator,
+        )
+
+        global_state.afd_component_reshard_coordinator = AFDComponentReshardCoordinator(
+            enabled=server_args.enable_afd_component_reshard,
+            max_tp=server_args.afd_component_max_tp or max(
+                server_args.tp_size,
+                server_args.afd_attn_tp or server_args.tp_size,
+                server_args.afd_ffn_tp or server_args.tp_size,
+            ),
+            stage_id=server_args.afd_reshard_stage_id or "prefill",
+            pair_id=server_args.afd_reshard_pair_id,
+            attn_tp=server_args.afd_attn_tp or server_args.tp_size,
+            ffn_tp=server_args.afd_ffn_tp or server_args.tp_size,
+            channel_base=server_args.afd_reshard_channel_base,
+            control_base=server_args.afd_reshard_control_base,
+        )
+        if (
+            server_args.enable_afd_component_reshard
+            and str(getattr(server_args.afd_perspective, "value", server_args.afd_perspective)).lower().endswith("attn")
+        ):
+            from sglang.srt.reshard.afd_component_adapter import (
+                AFDComponentSchedulerProxyAdapter, ZMQSchedulerControlClient,
+            )
+            from sglang.srt.reshard.afd_component_runtime import (
+                AFDComponentRuntime, register_afd_colocated_runtime,
+            )
+            stage_offset = 0 if server_args.afd_reshard_stage_id == "prefill" else 10
+            attn_host = os.getenv("AFD_RESHARD_ATTN_CONTROL_HOST", "127.0.0.1")
+            ffn_host = os.getenv("AFD_RESHARD_FFN_CONTROL_HOST", "127.0.0.1")
+            control_base = server_args.afd_reshard_control_base + stage_offset
+            endpoint = f"tcp://{attn_host}:{control_base}"
+            peer_endpoint = f"tcp://{ffn_host}:{control_base + 1}"
+            runtime = AFDComponentRuntime(
+                pair_id=server_args.afd_reshard_pair_id,
+                stage=server_args.afd_reshard_stage_id,
+                max_world_size=server_args.afd_component_max_tp,
+                attn_tp=server_args.afd_attn_tp or server_args.tp_size,
+                ffn_tp=server_args.afd_ffn_tp or server_args.tp_size,
+            )
+            register_afd_colocated_runtime(
+                global_state.afd_component_reshard_coordinator, runtime,
+                AFDComponentSchedulerProxyAdapter(
+                    ZMQSchedulerControlClient(endpoint),
+                    timeout=server_args.afd_reshard_timeout,
+                    peer_client=ZMQSchedulerControlClient(peer_endpoint),
+                ),
+            )
     _global_state = global_state
 
 
@@ -1238,6 +1292,210 @@ async def ipc_reconnect(request: Request):
         )
 
 
+def _atomic_write_json(path, payload: Dict[str, Any]) -> None:
+    import json
+
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    tmp.write_text(json.dumps(payload))
+    os.replace(tmp, path)
+
+
+async def _complete_gang_restart(target_tp: int, status_path) -> None:
+    """Wait for scheduler drain, restart the gang, and keep HTTP serving."""
+    started_at = time.time()
+    timeout_s = float(os.environ.get("SGLANG_GANG_RESTART_DRAIN_TIMEOUT", "600"))
+    try:
+        while True:
+            if time.time() - started_at > timeout_s:
+                raise TimeoutError("timed out waiting for gang_restart_ready")
+            try:
+                import json
+
+                status = json.loads(status_path.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                status = {}
+            if status.get("phase") == "gang_restart_ready":
+                break
+            if status.get("phase") == "failed":
+                raise RuntimeError(status.get("message", "scheduler drain failed"))
+            await asyncio.sleep(0.05)
+
+        restarting = {
+            **status,
+            "phase": "restarting",
+            "message": f"restarting scheduler gang at TP{target_tp}",
+            "updated_at": time.time(),
+        }
+        _atomic_write_json(status_path, restarting)
+        init_result = _global_state.scheduler_init_result
+        scheduler_infos = await asyncio.to_thread(
+            init_result.restart_scheduler_gang, target_tp
+        )
+        scheduler_info = scheduler_infos[0]
+        tokenizer_manager = _global_state.tokenizer_manager
+        tokenizer_manager.server_args.tp_size = target_tp
+        tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
+        _global_state.scheduler_info = scheduler_info
+        _global_state.remote_instance_transfer_engine_info = (
+            parse_remote_instance_transfer_engine_info_from_scheduler_infos(
+                scheduler_infos
+            )
+        )
+        _atomic_write_json(
+            status_path,
+            {
+                **restarting,
+                "phase": "done",
+                "active_tp": target_tp,
+                "message": f"scheduler gang restarted at TP{target_tp}",
+                "updated_at": time.time(),
+                "done_at": time.time(),
+                "elapsed_s": time.time() - started_at,
+            },
+        )
+        async with tokenizer_manager.is_pause_cond:
+            tokenizer_manager.is_pause = False
+            tokenizer_manager.is_pause_cond.notify_all()
+    except Exception as e:
+        logger.exception("Scheduler gang restart to TP%d failed", target_tp)
+        _atomic_write_json(
+            status_path,
+            {
+                "phase": "failed",
+                "active_tp": _global_state.tokenizer_manager.server_args.tp_size,
+                "target_tp": target_tp,
+                "message": str(e),
+                "started_at": started_at,
+                "updated_at": time.time(),
+                "done_at": time.time(),
+                "elapsed_s": time.time() - started_at,
+            },
+        )
+
+
+def _afd_reshard_response(value, status_code: int = HTTPStatus.OK):
+    if isinstance(value, list):
+        payload = [dataclasses.asdict(item) for item in value]
+    else:
+        payload = dataclasses.asdict(value)
+    return ORJSONResponse(payload, status_code=status_code)
+
+
+def _afd_reshard_error(exc: Exception):
+    from sglang.srt.reshard.afd_component_reshard import AFDComponentReshardError
+
+    status_code = exc.status_code if isinstance(exc, AFDComponentReshardError) else 400
+    return ORJSONResponse(
+        {"error": type(exc).__name__, "message": str(exc)}, status_code=status_code
+    )
+
+
+def _afd_reshard_coordinator():
+    from sglang.srt.layers.afd_type import AFDPerspective
+    from sglang.srt.reshard.afd_component_reshard import (
+        AFDComponentReshardDisabled,
+    )
+
+    server_args = _global_state.tokenizer_manager.server_args
+    if (
+        not server_args.enable_afd_component_reshard
+        or server_args.afd_perspective != AFDPerspective.AFD_PERSPECTIVE_ATTN
+    ):
+        raise AFDComponentReshardDisabled(
+            "AFD component reshard requires the feature flag and Attention perspective"
+        )
+    return _global_state.afd_component_reshard_coordinator
+
+
+@app.post("/v1/afd/reshard")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def afd_component_reshard(request: Request):
+    from sglang.srt.managers.io_struct import (
+        AFDComponentReshardOutput,
+        AFDComponentReshardReqInput,
+    )
+
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("request body must be a JSON object")
+        required = (
+            "stage",
+            "expected_attn_tp",
+            "expected_ffn_tp",
+            "target_attn_tp",
+            "target_ffn_tp",
+            "expected_epoch",
+        )
+        missing = [field for field in required if field not in body]
+        if missing:
+            raise ValueError(f"missing required fields: {', '.join(missing)}")
+        req = AFDComponentReshardReqInput(
+            stage=body["stage"],
+            expected_attn_tp=body["expected_attn_tp"],
+            expected_ffn_tp=body["expected_ffn_tp"],
+            target_attn_tp=body["target_attn_tp"],
+            target_ffn_tp=body["target_ffn_tp"],
+            expected_epoch=body["expected_epoch"],
+            operation_id=body.get("operation_id"),
+            dry_run=body.get("dry_run", False),
+        )
+        status = _afd_reshard_coordinator().submit(req)
+        output = AFDComponentReshardOutput(
+            accepted=True,
+            operation_id=status.operation_id,
+            capability=status.capability,
+            runtime_supported=status.runtime_supported,
+            status=status,
+        )
+        return _afd_reshard_response(
+            output,
+            HTTPStatus.OK if req.dry_run else HTTPStatus.ACCEPTED,
+        )
+    except Exception as exc:
+        return _afd_reshard_error(exc)
+
+
+@app.get("/v1/afd/reshard/status")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def afd_component_reshard_status(operation_id: Optional[str] = Query(None)):
+    try:
+        return _afd_reshard_response(
+            _afd_reshard_coordinator().get_status(operation_id)
+        )
+    except Exception as exc:
+        return _afd_reshard_error(exc)
+
+
+@app.post("/v1/afd/reshard/cancel")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def afd_component_reshard_cancel(request: Request):
+    from sglang.srt.managers.io_struct import AFDComponentReshardCancelInput
+
+    try:
+        body = await request.json()
+        if not isinstance(body, dict) or "operation_id" not in body:
+            raise ValueError("operation_id is required")
+        req = AFDComponentReshardCancelInput(
+            operation_id=body["operation_id"],
+            expected_epoch=body.get("expected_epoch"),
+        )
+        return _afd_reshard_response(_afd_reshard_coordinator().cancel(req))
+    except Exception as exc:
+        return _afd_reshard_error(exc)
+
+
+@app.get("/v1/afd/reshard/topology")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def afd_component_reshard_topology(stage: Optional[str] = Query(None)):
+    try:
+        return _afd_reshard_response(
+            _afd_reshard_coordinator().get_topology(stage)
+        )
+    except Exception as exc:
+        return _afd_reshard_error(exc)
+
+
 @app.post("/reshard_tp")
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def reshard_tp(request: Request):
@@ -1265,11 +1523,16 @@ async def reshard_tp(request: Request):
         )
 
     from sglang.srt.managers.io_struct import ReshardReqInput
+    accepted_at = time.time()
+    operation_id = str(body.get("operation_id") or f"reshard-{int(accepted_at * 1_000_000)}")
     obj = ReshardReqInput(
         action="live_reshard_tp",
         new_tp_size=int(new_tp),
         new_tp_rank=0,
         nccl_port=int(body.get("nccl_port", 29500)),
+        pre_drain_sec=float(body.get("pre_drain_sec", 0.0) or 0.0),
+        operation_id=operation_id,
+        accepted_at=accepted_at,
     )
     try:
         # Experimental true in-place mode launches standby scheduler ranks that are
@@ -1277,20 +1540,79 @@ async def reshard_tp(request: Request):
         # request on the tokenizer communicator result path; the reshard result is
         # verified via scheduler logs and subsequent /generate requests.
         if _global_state.tokenizer_manager.server_args.inplace_reshard_max_tp is not None:
-            import json
             from pathlib import Path
+
+            target_tp = int(new_tp)
+            server_args = _global_state.tokenizer_manager.server_args
+            max_tp = int(server_args.inplace_reshard_max_tp)
+            final_hop_mode = os.environ.get(
+                "SGLANG_INPLACE_RESHARD_FINAL_HOP_MODE", "gang_restart"
+            )
+            is_gang_restart = target_tp == max_tp and final_hop_mode == "gang_restart"
+            if is_gang_restart:
+                init_result = _global_state.scheduler_init_result
+                if init_result is None or init_result.supervisor is None:
+                    raise RuntimeError(
+                        "gang_restart final hop is unavailable for this scheduler backend"
+                    )
+                if server_args.tokenizer_worker_num != 1:
+                    raise RuntimeError("gang_restart requires tokenizer_worker_num=1")
+
+                ctrl = Path("/tmp/sglang_inplace_reshard_cmd.json")
+                status_path = Path("/tmp/sglang_inplace_reshard_status.json")
+                status_path.unlink(missing_ok=True)
+                _atomic_write_json(
+                    ctrl,
+                    {
+                        "action": "gang_restart_drain",
+                        "operation_id": operation_id,
+                        "accepted_at": accepted_at,
+                        "pre_drain_sec": float(body.get("pre_drain_sec", 0.0) or 0.0),
+                        "new_tp_size": target_tp,
+                        "new_tp_rank": 0,
+                        "nccl_port": int(body.get("nccl_port", 29500)),
+                    },
+                )
+                async with _global_state.tokenizer_manager.is_pause_cond:
+                    _global_state.tokenizer_manager.is_pause = True
+                asyncio.create_task(
+                    _complete_gang_restart(target_tp, status_path),
+                    name=f"sglang-gang-restart-tp{target_tp}",
+                )
+                logger.info(
+                    "/reshard_tp accepted scheduler gang restart to TP%d", target_tp
+                )
+                return ORJSONResponse(
+                    {
+                        "success": True,
+                        "message": f"scheduler gang restart to TP{target_tp} accepted",
+                        "elapsed_s": 0.0,
+                        "operation_id": operation_id,
+                        "accepted_at": accepted_at,
+                    },
+                    status_code=HTTPStatus.ACCEPTED,
+                )
+
             ctrl = Path("/tmp/sglang_inplace_reshard_cmd.json")
-            ctrl.write_text(json.dumps({
-                "action": "live_reshard_tp",
-                "new_tp_size": int(new_tp),
-                "new_tp_rank": 0,
-                "nccl_port": int(body.get("nccl_port", 29500)),
-            }))
+            _atomic_write_json(
+                ctrl,
+                {
+                    "action": "live_reshard_tp",
+                    "operation_id": operation_id,
+                    "accepted_at": accepted_at,
+                    "pre_drain_sec": float(body.get("pre_drain_sec", 0.0) or 0.0),
+                    "new_tp_size": target_tp,
+                    "new_tp_rank": 0,
+                    "nccl_port": int(body.get("nccl_port", 29500)),
+                },
+            )
             logger.info("/reshard_tp accepted: wrote in-place reshard control file %s", ctrl)
             return ORJSONResponse({
                 "success": True,
-                "message": f"in-place TP reshard to TP{int(new_tp)} accepted",
+                "message": f"in-place TP reshard to TP{target_tp} accepted",
                 "elapsed_s": 0.0,
+                "operation_id": operation_id,
+                "accepted_at": accepted_at,
             }, status_code=HTTPStatus.ACCEPTED)
 
         result = await _global_state.tokenizer_manager.handle_reshard(obj, request)
@@ -1327,6 +1649,9 @@ async def inplace_reshard_status():
         "done_at": None,
         "elapsed_s": None,
         "timings": None,
+        "breakdown": None,
+        "operation_id": None,
+        "accepted_at": None,
     }
     ctrl = Path("/tmp/sglang_inplace_reshard_status.json")
     if not ctrl.exists():
@@ -2159,6 +2484,7 @@ def _setup_and_run_http_server(
     template_manager,
     port_args: PortArgs,
     scheduler_infos: List[Dict],
+    scheduler_init_result: Optional[SchedulerInitResult] = None,
     execute_warmup_func: Callable = _execute_server_warmup,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
@@ -2178,6 +2504,7 @@ def _setup_and_run_http_server(
             template_manager=template_manager,
             scheduler_info=scheduler_infos[0],
             remote_instance_transfer_engine_info=remote_instance_transfer_engine_info,
+            scheduler_init_result=scheduler_init_result,
         )
     )
 
@@ -2366,6 +2693,7 @@ def launch_server(
         template_manager,
         port_args,
         scheduler_init_result.scheduler_infos,
+        scheduler_init_result=scheduler_init_result,
         execute_warmup_func=execute_warmup_func,
         launch_callback=launch_callback,
     )

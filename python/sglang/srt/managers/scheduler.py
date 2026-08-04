@@ -78,6 +78,7 @@ from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.layers.quantization.fp4_utils import initialize_fp4_gemm_config
 from sglang.srt.layers.quantization.fp8_utils import initialize_fp8_gemm_config
 from sglang.srt.lora.lora_overlap_loader import LoRAOverlapLoader
+from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
 from sglang.srt.managers.io_struct import (
     AbortReq,
     ActiveRanksOutput,
@@ -264,7 +265,26 @@ class EmbeddingBatchResult:
         self.copy_done.record()
 
 
+def _should_init_afd_scheduler_channels(
+    server_args,
+    *,
+    pp_rank: int,
+    global_tp_rank: int,
+    attn_tp_rank: int,
+    inplace_standby_ipc: bool,
+) -> bool:
+    """Return whether this process owns the AFD scheduler hotpath sockets."""
+    if pp_rank != 0 or attn_tp_rank != 0 or inplace_standby_ipc:
+        return False
+    if getattr(server_args, "enable_afd_component_reshard_participant", False):
+        # Standby singleton groups also report rank_in_group == 0. Only the
+        # active component's global rank zero may bind/connect cross-side IPC.
+        return global_tp_rank == 0
+    return True
+
+
 class Scheduler(
+    SchedulerAFDMixin,
     SchedulerOutputProcessorMixin,
     SchedulerUpdateWeightsMixin,
     SchedulerProfilerMixin,
@@ -336,6 +356,8 @@ class Scheduler(
             server_args.speculative_algorithm
         )
         self.gpu_id = gpu_id
+        if gpu_id >= 0:
+            torch.cuda.set_device(gpu_id)
         self.page_size = server_args.page_size
         self.enable_hierarchical_cache = server_args.enable_hierarchical_cache
         self.enable_hicache_storage = server_args.hicache_storage_backend is not None
@@ -389,7 +411,14 @@ class Scheduler(
         self.is_inplace_standby_rank = bool(
             getattr(self.tp_worker.model_runner, "is_inplace_standby_rank", False)
         )
-        if self.is_inplace_standby_rank:
+        self.is_afd_component_standby_rank = bool(
+            getattr(self.tp_worker.model_runner, "is_afd_component_standby_rank", False)
+        )
+        if self.is_inplace_standby_rank and self.is_afd_component_standby_rank:
+            raise RuntimeError("native and AFD component standby ranks are mutually exclusive")
+        from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
+        SchedulerAFDMixin.afd_component_init_lifecycle(self)
+        if self.is_inplace_standby_rank or self.is_afd_component_standby_rank:
             # Standby ranks are real scheduler/model-worker processes in the
             # distributed world, but they are not part of the active TP serving
             # group yet. They must not allocate KV cache or enter the normal
@@ -403,10 +432,11 @@ class Scheduler(
             self.forward_stream = self.tp_worker.model_runner.forward_stream
             self.is_initializing = False
             logger.info(
-                "In-place reshard standby scheduler ready: rank=%d active_tp=%d max_tp=%d",
+                "%s standby scheduler ready: rank=%d active_tp=%d max_tp=%d",
+                "AFD component" if self.is_afd_component_standby_rank else "In-place reshard",
                 self.tp_rank,
                 self.server_args.tp_size,
-                self.server_args.inplace_reshard_max_tp,
+                self.server_args.inplace_reshard_max_tp or self.server_args.afd_component_max_tp,
             )
             return
 
@@ -448,6 +478,10 @@ class Scheduler(
 
         # Init request dispatcher
         self.init_request_dispatcher()
+
+        from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
+        SchedulerAFDMixin.afd_init_state(self)
+        SchedulerAFDMixin.afd_component_init_runtime(self)
 
         # Init LoRA overlap loader
         if self.enable_lora_overlap_loading:
@@ -491,7 +525,7 @@ class Scheduler(
         # and the standby ranks, and half the requests are silently swallowed by a
         # rank that never runs the serving loop.
         _inplace_standby_ipc = (
-            self.server_args.inplace_reshard_max_tp is not None
+            (self.server_args.inplace_reshard_max_tp is not None or self.server_args.enable_afd_component_reshard_participant)
             and self.tp_rank >= self.server_args.tp_size
         )
 
@@ -545,18 +579,46 @@ class Scheduler(
 
         # AFD inter-scheduler channels (C5: configurable ports)
         self.afd_send_to_ffn = None
+        self.afd_send_to_ffn_groups = {}
         self.afd_recv_from_attn = None
         from sglang.srt.layers.afd_type import AFDPerspective
 
         afd_perspective = getattr(self.server_args, "afd_perspective", None)
-        if self.pp_rank == 0 and self.attn_tp_rank == 0:
+        if _should_init_afd_scheduler_channels(
+            self.server_args,
+            pp_rank=self.pp_rank,
+            global_tp_rank=self.tp_rank,
+            attn_tp_rank=self.attn_tp_rank,
+            inplace_standby_ipc=_inplace_standby_ipc,
+        ):
             host = os.getenv("AFD_SCHED_HOST", "127.0.0.1")
             port = int(os.getenv("AFD_SCHED_PORT", "65300"))
             afd_ipc = f"tcp://{host}:{port}"
             if afd_perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN:
-                self.afd_send_to_ffn = get_zmq_socket(
-                    context, zmq.PUSH, afd_ipc, False
-                )
+                if getattr(
+                    self.server_args, "afd_multi_pf_continuation", False
+                ):
+                    endpoints = [
+                        item.strip()
+                        for item in self.server_args.afd_pf_scheduler_endpoints.split(",")
+                        if item.strip()
+                    ]
+                    for group_id, endpoint in enumerate(endpoints):
+                        if not endpoint.startswith("tcp://"):
+                            endpoint = f"tcp://{endpoint}"
+                        self.afd_send_to_ffn_groups[group_id] = get_zmq_socket(
+                            context, zmq.PUSH, endpoint, False
+                        )
+                else:
+                    self.afd_send_to_ffn = get_zmq_socket(
+                        context, zmq.PUSH, afd_ipc, False
+                    )
+                    if os.getenv("AFD_CROSS_NODE_EXPERIMENTAL", "0") == "1":
+                        self.afd_send_to_ffn.setsockopt(zmq.IMMEDIATE, 1)
+                        self.afd_send_to_ffn.setsockopt(
+                            zmq.SNDTIMEO,
+                            int(os.getenv("AFD_ZMQ_TIMEOUT_MS", "60000")),
+                        )
             elif afd_perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
                 self.afd_recv_from_attn = get_zmq_socket(
                     context, zmq.PULL, afd_ipc, True
@@ -787,8 +849,10 @@ class Scheduler(
         )
 
         # Create cache
+        from sglang.srt.layers.afd import afd_is_ffn
+
         params = CacheInitParams(
-            disable=server_args.disable_radix_cache,
+            disable=server_args.disable_radix_cache or afd_is_ffn(),
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             page_size=self.page_size,
@@ -1056,7 +1120,17 @@ class Scheduler(
             and not getattr(self, "is_inplace_standby_rank", False)
         ):
             cur = getattr(self, "_inplace_reshard_status", {}).get("phase")
-            if cur not in ("draining", "executing"):
+            if cur is None:
+                import json as _json_init
+                from pathlib import Path as _Path_init
+
+                _sf = _Path_init("/tmp/sglang_inplace_reshard_status.json")
+                if _sf.exists():
+                    try:
+                        cur = _json_init.loads(_sf.read_text()).get("phase")
+                    except Exception:
+                        pass
+            if cur not in ("draining", "executing", "gang_restart_ready", "restarting"):
                 self._publish_inplace_reshard_status(
                     phase="idle",
                     active_tp=self.tp_size,
@@ -1074,6 +1148,8 @@ class Scheduler(
         message: str = "",
         elapsed_s: Optional[float] = None,
         timings: Optional[dict] = None,
+        breakdown: Optional[dict] = None,
+        operation_id: Optional[str] = None,
     ):
         """Publish in-place reshard phase for external probes (rank0 only)."""
         if self.tp_rank != 0 or getattr(self, "is_inplace_standby_rank", False):
@@ -1083,18 +1159,20 @@ class Scheduler(
 
         now = time.time()
         prev = getattr(self, "_inplace_reshard_status", None) or {}
-        started_at = prev.get("started_at")
-        generation = prev.get("generation", 0)
-        if phase in ("draining", "executing") and prev.get("phase") in (
-            "idle",
-            "done",
-            "failed",
-            None,
-        ):
-            generation = generation + 1
-            started_at = now
-        elif phase in ("draining", "executing", "preparing") and started_at is None:
-            started_at = now
+        ctx = getattr(self, "_inplace_reshard_timing_context", None)
+        resolved_operation_id = operation_id
+        if resolved_operation_id is None and ctx is not None:
+            resolved_operation_id = ctx.operation_id
+        if resolved_operation_id is None:
+            resolved_operation_id = prev.get("operation_id")
+
+        from sglang.srt.reshard.inplace_reshard_background import (
+            status_operation_transition,
+        )
+
+        generation, started_at, operation_changed = status_operation_transition(
+            prev, phase, resolved_operation_id, now
+        )
 
         status = {
             "phase": phase,
@@ -1107,7 +1185,16 @@ class Scheduler(
             "updated_at": now,
             "done_at": now if phase == "done" else None,
             "elapsed_s": elapsed_s,
-            "timings": timings,
+            "timings": timings if timings is not None else (None if operation_changed else prev.get("timings")),
+            "breakdown": (
+                breakdown if breakdown is not None
+                else (None if operation_changed else prev.get("breakdown"))
+            ),
+            "operation_id": resolved_operation_id,
+            "accepted_at": (
+                ctx.accepted_at_s if ctx is not None
+                else prev.get("accepted_at")
+            ),
         }
         self._inplace_reshard_status = status
         try:
@@ -1140,7 +1227,14 @@ class Scheduler(
         if self._inplace_reshard_draining():
             return True
         phase = (getattr(self, "_inplace_reshard_status", None) or {}).get("phase")
-        return phase in ("pre_draining", "preparing", "draining", "executing")
+        return phase in (
+            "pre_draining",
+            "preparing",
+            "draining",
+            "executing",
+            "gang_restart_ready",
+            "restarting",
+        )
 
     def _should_skip_memory_check(self) -> bool:
         """Skip strict pool accounting during in-place reshard transitions.
@@ -1150,6 +1244,12 @@ class Scheduler(
         pool rebuild, idle self_check can false-positive as req_to_token_pool
         memory leak (C-round symptom under SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_IDLE).
         """
+        from sglang.srt.layers.afd import afd_is_ffn
+
+        if afd_is_ffn():
+            # The FFN perspective uses virtual cache locations and intentionally
+            # has no physical KV ownership to account for.
+            return True
         if getattr(self, "_engine_paused", False):
             return True
         if self.server_args.inplace_reshard_max_tp is not None:
@@ -1167,9 +1267,16 @@ class Scheduler(
             return
         if not self._inplace_reshard_is_drained():
             return
+        ctx = getattr(self, "_inplace_reshard_timing_context", None)
+        if ctx is not None:
+            ctx.mark_drained()
         self._pending_inplace_reshard = None
         self._inplace_reshard_pre_drain_until = 0.0
         recv_req, t0 = pending
+        if recv_req.action == "gang_restart_drain":
+            result = self._gang_restart_drain(recv_req)
+            logger.info("Gang restart drain state: %s", result.message)
+            return
         new_tp = int(recv_req.new_tp_size)
         old_tp = self.tp_worker.model_runner.tp_size
         from sglang.srt.reshard.inplace_reshard_background import background_prep_enabled
@@ -1189,6 +1296,8 @@ class Scheduler(
             and self.tp_worker.model_runner.tp_size > 1
         ):
             self._inplace_reshard_execute_pending = (recv_req, t0)
+            if ctx is not None:
+                ctx.execute_queued_at_s = time.time()
             logger.info("Deferred in-place reshard queued for synchronized execute")
             return
         result = self._live_reshard_tp_execute(recv_req, t0)
@@ -1223,6 +1332,11 @@ class Scheduler(
                 target_tp=new_tp,
                 old_tp=old_tp,
                 message=f"background prep TP{old_tp}→TP{new_tp}",
+                operation_id=(
+                    getattr(self, "_inplace_reshard_timing_context", None).operation_id
+                    if getattr(self, "_inplace_reshard_timing_context", None) is not None
+                    else None
+                ),
             )
 
     def _run_inplace_reshard_prep_collective(self, old_tp: int, new_tp: int) -> bool:
@@ -1246,19 +1360,9 @@ class Scheduler(
             old_tp,
             new_tp,
         )
-        prep_cmd = {
-            "action": "prepare_inplace_reshard",
-            "old_tp_size": int(old_tp),
-            "new_tp_size": int(new_tp),
-        }
-        broadcast_pyobj(
-            prep_cmd,
-            self.world_group.rank,
-            self.world_group.cpu_group,
-            src=self.world_group.ranks[0],
+        self._broadcast_inplace_reshard_world_prep_cmd(
+            old_tp, new_tp, initiate=True
         )
-        logger.info("In-place reshard rank0 prep broadcast done, running body")
-        self._inplace_reshard_world_prep_body(old_tp, new_tp)
         ready = mr.inplace_reshard_prep_is_ready(new_tp)
         if ready:
             self._inplace_reshard_prep_pending = None
@@ -1269,6 +1373,11 @@ class Scheduler(
                 target_tp=new_tp,
                 old_tp=old_tp,
                 message=f"background prep ready TP{old_tp}→TP{new_tp}",
+                operation_id=(
+                    getattr(self, "_inplace_reshard_timing_context", None).operation_id
+                    if getattr(self, "_inplace_reshard_timing_context", None) is not None
+                    else None
+                ),
             )
         return ready
 
@@ -1298,9 +1407,14 @@ class Scheduler(
             )
             if self.tp_rank >= old_tp and self.tp_rank < new_tp:
                 handles_by_src = ipc_recv[0]
+        ctx = getattr(self, "_inplace_reshard_timing_context", None)
+        if ctx is not None and ctx.prep_start_at_s is None:
+            ctx.prep_start_at_s = time.time()
         ok, msg, elapsed = self.tp_worker.model_runner.prepare_inplace_reshard_tp(
             new_tp, old_tp, handles_by_src=handles_by_src
         )
+        if ctx is not None:
+            ctx.prep_done_at_s = time.time()
         logger.info(
             "In-place reshard world prep rank %d TP%d->TP%d ok=%s %.3fs: %s",
             self.tp_rank,
@@ -1310,6 +1424,24 @@ class Scheduler(
             elapsed,
             msg,
         )
+        dist.barrier(group=wg.cpu_group)
+
+    def _broadcast_inplace_reshard_world_prep_cmd(
+        self, old_tp: int, new_tp: int, *, initiate: bool
+    ) -> None:
+        """Broadcast prepare_inplace_reshard on the world group, then run prep body."""
+        prep_cmd = {
+            "action": "prepare_inplace_reshard",
+            "old_tp_size": int(old_tp),
+            "new_tp_size": int(new_tp),
+        }
+        broadcast_pyobj(
+            prep_cmd if initiate else None,
+            self.world_group.rank,
+            self.world_group.cpu_group,
+            src=self.world_group.ranks[0],
+        )
+        self._inplace_reshard_world_prep_body(old_tp, new_tp)
 
     def _maybe_run_inplace_reshard_background_prep(self) -> bool:
         """Run one synchronized background-prep round if queued."""
@@ -1329,6 +1461,11 @@ class Scheduler(
                     target_tp=new_tp,
                     old_tp=old_tp,
                     message=f"background prep ready TP{old_tp}→TP{new_tp}",
+                    operation_id=(
+                        getattr(self, "_inplace_reshard_timing_context", None).operation_id
+                        if getattr(self, "_inplace_reshard_timing_context", None) is not None
+                        else None
+                    ),
                 )
             return False
 
@@ -1338,6 +1475,34 @@ class Scheduler(
 
         if self.tp_rank == 0:
             self._run_inplace_reshard_prep_collective(old_tp, new_tp)
+        return True
+
+    def _maybe_run_inplace_reshard_runtime_prep_local(self) -> bool:
+        """Standby joining rank: build KV/attention after weights prep (no world sync)."""
+        from sglang.srt.reshard.inplace_reshard_background import runtime_prep_enabled
+
+        if not runtime_prep_enabled():
+            return False
+        if not getattr(self, "is_inplace_standby_rank", False):
+            return False
+        mr = self.tp_worker.model_runner
+        st = mr._inplace_reshard_prep_state_obj()
+        if not st.weights_ready or st.runtime_ready:
+            return False
+        old_tp = int(st.old_tp)
+        new_tp = int(st.new_tp)
+        if new_tp <= old_tp:
+            return False
+        if not (self.tp_rank >= old_tp and self.tp_rank < new_tp):
+            return False
+        if mr._prepare_inplace_reshard_runtime_local(old_tp, new_tp):
+            st.runtime_ready = True
+            logger.info(
+                "Standby rank %d runtime prep done TP%d->TP%d",
+                self.tp_rank,
+                old_tp,
+                new_tp,
+            )
         return True
 
     def _follower_participate_inplace_reshard_world(self, plan: dict):
@@ -1393,12 +1558,9 @@ class Scheduler(
         self.pause_generation(PauseGenerationReqInput(mode="in_place"))
         self._detach_inplace_reshard_kv_refs()
         mr = self.tp_worker.model_runner
-        if mr.inplace_reshard_prep_is_ready(new_tp):
-            ok, msg, _ = mr.commit_inplace_reshard_tp(new_tp, old_tp)
-        else:
-            ok, msg, _ = mr.expand_inplace_reshard_active_rank(
-                new_tp, activate_cmd=activate_cmd
-            )
+        ok, msg, _ = mr.expand_inplace_reshard_active_rank(
+            new_tp, activate_cmd=activate_cmd
+        )
         logger.info("Follower rank %d inplace reshard expand: ok=%s %s", self.tp_rank, ok, msg)
         if not ok:
             return
@@ -1498,6 +1660,8 @@ class Scheduler(
         if getattr(self, "_inplace_reshard_execute_pending", None) is not None:
             return True
         if getattr(self, "_follower_reshard_world_pending", None) is not None:
+            return True
+        if getattr(self, "_gang_restart_waiting", False):
             return True
         return False
 
@@ -2247,6 +2411,7 @@ class Scheduler(
         class _StubQueue:
             """Minimal stub that mimics queue-like attributes."""
             queue = []
+            pending_reqs = []
             retracted_queue = []
             num_tokens_pre_allocated = 0
 
@@ -2461,6 +2626,14 @@ class Scheduler(
 
         return result_dict
 
+    def _init_schedule_stream(self) -> None:
+        """Create the scheduler stream once, including the CPU compatibility shim."""
+        if getattr(self, "schedule_stream", None) is not None:
+            return
+        self.schedule_stream = self.device_module.Stream(priority=0)
+        if self.device == "cpu":
+            self.schedule_stream.synchronize = lambda: None  # No-op for CPU
+
     def run_event_loop(self) -> None:
         """Run the scheduler's event loop.
 
@@ -2470,12 +2643,45 @@ class Scheduler(
         if getattr(self, "is_inplace_standby_rank", False):
             self.event_loop_inplace_standby()
             return
-        self.schedule_stream = self.device_module.Stream(priority=0)
-        if self.device == "cpu":
-            self.schedule_stream.synchronize = lambda: None  # No-op for CPU
+        from sglang.srt.reshard.afd_component_standby import AFDComponentRankState
+
+        component_enabled = getattr(
+            self.server_args, "enable_afd_component_reshard_participant", False
+        )
+        if component_enabled:
+            self._afd_component_active_scheduler_initialized = not getattr(
+                self, "is_afd_component_standby_rank", False
+            )
+            if self._afd_component_active_scheduler_initialized:
+                self._init_schedule_stream()
+            while True:
+                if self.is_afd_component_standby_rank:
+                    state = self.event_loop_afd_component_standby()
+                    if state == AFDComponentRankState.SHUTDOWN:
+                        return
+                if not self._afd_component_active_scheduler_initialized:
+                    self.afd_component_enter_active_loop()
+                with self.device_module.StreamContext(self.schedule_stream):
+                    dispatch_event_loop(self)
+                if not self.is_afd_component_standby_rank:
+                    return
+        self._init_schedule_stream()
         with self.device_module.StreamContext(self.schedule_stream):
             dispatch_event_loop(self)
 
+
+    def event_loop_afd_component_standby(self):
+        """Standby loop isolated from native in-place reshard control."""
+        from sglang.srt.reshard.afd_component_standby import AFDComponentRankState
+
+        while self._afd_component_lifecycle.is_standby:
+            payload = self.afd_component_receive_world_command()
+            if payload is None:
+                continue
+            state = self.afd_component_apply_safe_point(payload)
+            if state == AFDComponentRankState.SHUTDOWN:
+                return
+        return self._afd_component_lifecycle.state
 
     def event_loop_inplace_standby(self):
         """Standby loop for experimental in-place TP reshard ranks."""
@@ -2491,6 +2697,13 @@ class Scheduler(
                     cmd = cmd[0]
                 else:
                     continue
+            if cmd.get("action") == "gang_restart_wait":
+                logger.info(
+                    "Standby rank %d awaiting planned scheduler gang restart",
+                    self.tp_rank,
+                )
+                while True:
+                    time.sleep(3600)
             if cmd.get("action") == "prepare_inplace_reshard":
                 old_tp = int(cmd["old_tp_size"])
                 new_tp = int(cmd["new_tp_size"])
@@ -2501,6 +2714,7 @@ class Scheduler(
                     new_tp,
                 )
                 self._inplace_reshard_world_prep_body(old_tp, new_tp)
+                self._maybe_run_inplace_reshard_runtime_prep_local()
                 continue
             if cmd.get("action") != "activate_inplace_reshard":
                 continue
@@ -2744,6 +2958,7 @@ class Scheduler(
             else:
                 # When the server is idle, do self-check and re-init some states.
                 self.self_check_during_idle()
+                self._maybe_grow_kv_pool_background()
 
             # Update last_batch
             self.last_batch = batch
@@ -2787,7 +3002,12 @@ class Scheduler(
         # instead of the legacy single comm, for the same reason: the FFN
         # side must be listening on every per-mb endpoint before the Attn
         # side connects on its first forward.
-        if getattr(self.server_args, "afd_async_schedule", False):
+        if not SchedulerAFDMixin.afd_component_should_eager_init_data_plane(self):
+            logger.info(
+                "event_loop_afd: deferring joining communicator init to "
+                "post-activate readiness"
+            )
+        elif getattr(self.server_args, "afd_async_schedule", False):
             # Interleaved schedule uses the same single shared channel as
             # the batch schedule — no per-mb channels needed.  Just init
             # the regular communicator.
@@ -2882,6 +3102,9 @@ class Scheduler(
             batch.afd_split_seq_index = split_indices
 
         # F3: CPU/GPU overlap scheduling support
+        # Only enable overlap when explicitly configured — DF (FFN) side has
+        # KV cache management in process_batch_result that must complete before
+        # the next batch is scheduled, so we cannot safely defer it.
         afd_overlap = self.afd_overlap_enabled
         if afd_overlap:
             self.result_queue: Deque = deque()
@@ -2892,6 +3115,18 @@ class Scheduler(
 
         while True:
             _afd_loop_iter += 1
+            SchedulerAFDMixin.afd_component_begin_active_iteration(self)
+            if SchedulerAFDMixin.afd_component_should_leave_active_loop(self):
+                return
+            if SchedulerAFDMixin.afd_component_should_restart_active_iteration(self):
+                continue
+            # Check control again immediately before entering a potentially
+            # blocking data-plane receive. All active ranks call this in order.
+            SchedulerAFDMixin.afd_component_post_receive_control_checkpoint(
+                self
+            )
+            if SchedulerAFDMixin.afd_component_should_restart_active_iteration(self):
+                continue
             recv_reqs = self.recv_requests()
 
             # Step 3.6: FFN also receives AFD messages
@@ -2913,28 +3148,35 @@ class Scheduler(
                         src=self.tp_group.ranks[0],
                     )
 
+            SchedulerAFDMixin.afd_component_post_receive_control_checkpoint(
+                self
+            )
+            # ACTIVATE may be consumed by the post-receive checkpoint,
+            # after the loop-top restart guard has already run. Old surviving
+            # ranks must skip this data-plane round and meet joining ranks at
+            # the next post-activation readiness preamble.
+            if SchedulerAFDMixin.afd_component_should_restart_active_iteration(self):
+                continue
             self._afd_process_input_requests(recv_reqs)
 
             # FFN waits until Attn sends batch info
             if afd_is_ffn() and self._afd_batchsize_attn is None:
                 if afd_poller is not None:
-                    afd_poller.poll(timeout=10)
+                    afd_poller.poll(timeout=1)
 
-                # If running_batch is non-empty but Attn stopped sending
-                # batch info, the requests are stale — clean them up.
-                if (
-                    self.running_batch is not None
-                    and not self.running_batch.is_empty()
-                ):
-                    self._afd_ffn_cleanup_all()
+                # FFN has no in-flight AFD work here (branch guard guarantees
+                # _afd_batchsize_attn is None and the pending queue was already
+                # drained by _afd_process_input_requests above). Reset the FFN
+                # batch ledger to idle so is_fully_idle() can go True; see
+                # _afd_ffn_reset_idle_ledger for the full rationale.
+                self._afd_ffn_reset_idle_ledger()
 
                 # Idle freq lock for FFN (Prefill) side while waiting
                 if (self._idle_lock_enabled
                         and not self._idle_freq_locked
                         and self._dvfs_hw_list
                         and disagg_mode == DisaggregationMode.PREFILL):
-                    for hw in self._dvfs_hw_list:
-                        hw.lock_sm_clock(self._idle_lock_freq)
+                    self._lock_all_sm_clocks(self._idle_lock_freq)
                     self._idle_freq_locked = True
                 continue
 
@@ -2949,14 +3191,15 @@ class Scheduler(
             self.cur_batch = batch
             disable_overlap_for_batch = False
 
-            # ── FFN side: force-sync batch to match Attn's AFDReqInput ──
+            # ── FFN side: force-sync decode batches to match Attn metadata ──
             if afd_is_ffn() and batch is not None:
-                # UCX always brings [1, hidden_size] per-layer regardless of
-                # the Attn-side batch size.  Force extend_lens=1 per req so
-                # embedding + logits-extraction stay in sync.
+                # Decode sends one token per request, but Prefill EXTEND sends
+                # the full prompt tensor.  Collapsing Prefill extend_lens to 1
+                # makes the FFN batch metadata disagree with the tensor shape
+                # received from the remote Attn node.
                 bs = batch.batch_size()
-                if bs > 0:
-                    # Preserve original extend_input_len for DVFS prediction
+                if bs > 0 and batch.forward_mode.is_decode():
+                    # Preserve original extend_input_len for DVFS prediction.
                     for r in batch.reqs:
                         r._orig_extend_input_len = r.extend_input_len
                     batch.extend_lens = [1] * bs
@@ -2981,7 +3224,8 @@ class Scheduler(
                     _pop_and_process()
 
             if batch:
-                # Attn side: notify FFN about current batch
+                if afd_is_attn():
+                    self._afd_dvfs_before_batch(batch)
                 SchedulerAFDMixin.afd_send_batch_info(self, batch)
                 # Record ZMQ-send wall-clock for cross-GPU latency breakdown
                 if afd_is_attn():
@@ -2994,8 +3238,20 @@ class Scheduler(
                 print(f"[AFD_DBG] === ITER {_afd_loop_iter} {perspective} batch={bsz} max_running={self.max_running_requests} ===", flush=True)
 
                 self._tier1_record_batch_start(is_prefill=not is_decode)
-                self._afd_dvfs_before_batch(batch)
+                if not afd_is_attn():
+                    self._afd_dvfs_before_batch(batch)
                 _prepare_afd_overlap(batch)
+
+                # Deferred drain: wait for previous forward's async sends
+                # to complete before starting new forward.  This runs AFTER
+                # all scheduler CPU work, maximizing overlap with GPU sends.
+                try:
+                    from sglang.srt.layers.afd import get_async_communicator
+                    _drain_comm = get_async_communicator()
+                    _drain_comm.drain_sends()
+                except Exception:
+                    pass
+
                 batch_result = self.run_batch(batch)
                 self._afd_dvfs_after_prefill_batch(batch)
 
@@ -3019,17 +3275,26 @@ class Scheduler(
                 self._afd_req_ids = None
             else:
                 batch_result = None
-                self._afd_batchsize_attn = None
-                self._afd_forward_mode = None
-                self._afd_req_ids = None
+                # Metadata can arrive before the PD decode queue makes its batch
+                # schedulable. Keep the dispatch latched and continue polling;
+                # resetting or FFN cleanup here would drop the final forward.
+                afd_metadata_waiting_for_batch = (
+                    afd_is_ffn()
+                    and self._afd_batchsize_attn is not None
+                    and self._afd_current_metadata is not None
+                )
+                if not afd_metadata_waiting_for_batch:
+                    self._afd_batchsize_attn = None
+                    self._afd_forward_mode = None
+                    self._afd_req_ids = None
+                    self._afd_current_metadata = None
                 if afd_overlap:
                     self.cancel_bubble_timer()
-                else:
-                    # FFN side: force-clean any remaining stale requests before
-                    # the idle memory check, since no more AFDReqInput will arrive.
+                elif not afd_metadata_waiting_for_batch:
                     if afd_is_ffn():
                         self._afd_ffn_cleanup_all()
                     self.self_check_during_idle()
+                    self._maybe_grow_kv_pool_background()
 
                 # Idle freq lock: reduce GPU frequency when no batch is pending.
                 # Only applies to PREFILL instances — Decode side has tight
@@ -3038,8 +3303,7 @@ class Scheduler(
                         and not self._idle_freq_locked
                         and self._dvfs_hw_list
                         and disagg_mode == DisaggregationMode.PREFILL):
-                    for hw in self._dvfs_hw_list:
-                        hw.lock_sm_clock(self._idle_lock_freq)
+                    self._lock_all_sm_clocks(self._idle_lock_freq)
                     self._idle_freq_locked = True
 
             # F3: overlap — process last batch (while GPU runs current batch)
@@ -3049,6 +3313,7 @@ class Scheduler(
                         _pop_and_process()
                 elif batch is None:
                     self.self_check_during_idle()
+                    self._maybe_grow_kv_pool_background()
                 if self.is_generation:
                     self.launch_batch_sample_if_needed(batch_result)
 
@@ -3558,28 +3823,11 @@ class Scheduler(
             self._unified_dvfs_ctrl = None
             return
 
-        if self.tp_rank != 0:
-            self._dvfs_hw_list = []
-            self._dvfs_decision_log = None
-            return
-        try:
-            import torch
-            from sglang.srt.layers.dvfs import DVFSController
-
-            nvml_indices = _parse_gpu_indices_env("AFD_NVML_DEVICE_INDICES")
-            if not nvml_indices:
-                single = int(os.environ.get(
-                    "AFD_NVML_DEVICE_INDEX",
-                    torch.cuda.current_device() if torch.cuda.is_available() else 0))
-                nvml_indices = [single]
-            self._dvfs_hw_list = [DVFSController(device_index=i) for i in nvml_indices]
-            logger.info("Unified DVFS HW controllers on NVML GPUs %s", nvml_indices)
-        except Exception as e:
-            logger.warning("Unified DVFS HW unavailable (libdvfs_ctrl.so?): %s. "
-                           "Decisions logged but not applied.", e)
-            self._dvfs_hw_list = []
-
         self._dvfs_decision_log = None
+        self._init_dvfs_hw_for_rank(server_args)
+        if self.tp_rank != 0:
+            return
+
         self._unified_prefill_pending = None
         self._unified_prefill_start_t = None
         log_tmpl = os.environ.get("AFD_DVFS_DECISION_LOG") or os.environ.get(
@@ -3734,9 +3982,6 @@ class Scheduler(
 
     def _unified_log_prefill_observed(self, batch):
         """Log observed prefill latency after batch completes."""
-        from sglang.srt.model_executor.forward_batch_info import ForwardMode
-        if batch.forward_mode != ForwardMode.EXTEND:
-            return
         pending = getattr(self, "_unified_prefill_pending", None)
         if pending is None:
             return
@@ -3834,6 +4079,34 @@ class Scheduler(
             pass
         return 0.0
 
+    def _init_dvfs_hw_for_rank(self, server_args) -> None:
+        """Create an NVML controller for this TP rank's physical GPU.
+
+        Each TP rank is a separate scheduler process and must lock its own
+        card.  Letting only tp_rank==0 lock the whole TP group races sibling
+        ranks that may enter CUDA kernels before multi-card locking finishes.
+        """
+        from sglang.srt.layers.dvfs import DVFSController
+
+        nvml_idx = _nvml_index_for_tp_rank(server_args, self.tp_rank)
+        try:
+            self._dvfs_hw_list = [DVFSController(device_index=nvml_idx)]
+            self._dvfs_hw = self._dvfs_hw_list[0]
+            logger.info(
+                "DVFS HW controller on NVML GPU %d (tp_rank=%d)",
+                nvml_idx,
+                self.tp_rank,
+            )
+        except Exception as e:
+            logger.warning(
+                "DVFS HW unavailable on NVML GPU %d (tp_rank=%d): %s",
+                nvml_idx,
+                self.tp_rank,
+                e,
+            )
+            self._dvfs_hw = None
+            self._dvfs_hw_list = []
+
     def _init_afd_dvfs(self, server_args):
         """Initialize Tier 2 DVFS components (predictor + controller + HW)."""
         try:
@@ -3857,11 +4130,12 @@ class Scheduler(
                 feedback_hold=getattr(self.server_args, "afd_dvfs_feedback_hold", 30),
                 online_calibration=getattr(self.server_args, "afd_dvfs_online_calibration", False),
                 calibration_ema=getattr(self.server_args, "afd_dvfs_calibration_ema", 0.2),
-                moe_freq_floor=0,  # disabled: MoE freq floor needs more research
+                moe_freq_floor=690,  # MoE needs higher freq floor (V1 model inaccurate below 690MHz)
                 headroom_aggressive_threshold=getattr(
                     server_args, "afd_dvfs_headroom_aggressive", 0.0
                 ),
                 decode_compositional=getattr(server_args, "afd_dvfs_decode_compositional", False),
+                prefill_slack_factor=getattr(server_args, "afd_dvfs_prefill_slack_factor", 1.0),
             )
             logger.info("AFD DVFS controller initialized")
 
@@ -3875,39 +4149,12 @@ class Scheduler(
             self._af_dvfs_ctrl = None
             return
 
-        # NVML locking and decision logging only run on tp_rank 0 of each
-        # process. Locking is system-wide per physical GPU, so a single rank
-        # locking all owned cards is sufficient; letting every rank lock (and
-        # write the shared decision log) causes redundant NVML calls and
-        # interleaved/corrupted JSONL.
+        # NVML locking: each TP rank locks its own physical GPU.  Decision
+        # logging stays on tp_rank==0 to avoid interleaved JSONL corruption.
+        self._dvfs_decision_log = None
+        self._init_dvfs_hw_for_rank(server_args)
         if self.tp_rank != 0:
-            self._dvfs_hw = None
-            self._dvfs_hw_list = []
-            self._dvfs_decision_log = None
             return
-
-        try:
-            import torch
-            from sglang.srt.layers.dvfs import DVFSController
-
-            # Physical NVML GPU indices owned by this process. A TP>1 process
-            # spans multiple physical cards, so we must lock ALL of them, not
-            # just the first one. Prefer the explicit CSV list set by the
-            # launcher; fall back to the single-index var, then CUDA index.
-            nvml_indices = _parse_gpu_indices_env("AFD_NVML_DEVICE_INDICES")
-            if not nvml_indices:
-                single = int(os.environ.get("AFD_NVML_DEVICE_INDEX",
-                    torch.cuda.current_device() if torch.cuda.is_available() else 0))
-                nvml_indices = [single]
-
-            self._dvfs_hw_list = [DVFSController(device_index=i) for i in nvml_indices]
-            self._dvfs_hw = self._dvfs_hw_list[0] if self._dvfs_hw_list else None
-            logger.info("DVFS HW controllers initialized on NVML GPUs %s", nvml_indices)
-        except Exception as e:
-            logger.warning("DVFS HW unavailable (libdvfs_ctrl.so missing?): %s. "
-                           "Frequency decisions will be logged but not applied.", e)
-            self._dvfs_hw = None
-            self._dvfs_hw_list = []
 
         # Optional: structured DVFS decision log (JSONL) for accuracy analysis.
         # Each process writes its own file (path templated with NVML index) so
@@ -4116,6 +4363,43 @@ class Scheduler(
                 min_slack = min(min_slack, slo_us - elapsed)
         return max(min_slack, 0)
 
+    def _lock_all_sm_clocks(self, sm_mhz: int) -> int:
+        """Lock every GPU in _dvfs_hw_list to sm_mhz. Returns failure count."""
+        if not self._dvfs_hw_list:
+            return 0
+        failures = 0
+        for hw in self._dvfs_hw_list:
+            ret = hw.lock_sm_clock(sm_mhz)
+            if ret != 0:
+                failures += 1
+                logger.warning(
+                    "NVML lock_sm_clock(%d MHz) failed on GPU %d: ret=%d",
+                    sm_mhz,
+                    hw.device_index,
+                    ret,
+                )
+        return failures
+
+    def _restore_active_freq_from_idle_lock(self):
+        """Re-apply active DVFS frequency on every owned GPU before a batch.
+
+        Idle-lock may leave some cards at 210 MHz if a prior restore partially
+        failed or was skipped between back-to-back batches.  Always enforce the
+        current target on all cards when idle-lock is enabled.
+        """
+        if not (self._idle_lock_enabled and self._dvfs_hw_list):
+            return
+        from sglang.srt.layers.afd import afd_is_attn
+
+        target_f = self._cur_f_a if afd_is_attn() else self._cur_f_f
+        self._lock_all_sm_clocks(target_f)
+        self._idle_freq_locked = False
+
+    def _on_afd_batch_info_received(self):
+        """FFN: restore working freq as soon as Attn notifies a batch (before forward)."""
+        if self._idle_lock_enabled:
+            self._restore_active_freq_from_idle_lock()
+
     def _apply_freq(self, f_a: int, f_f: int):
         """Apply frequency via NVML. Each process locks ALL of its own GPUs.
 
@@ -4125,8 +4409,7 @@ class Scheduler(
         """
         from sglang.srt.layers.afd import afd_is_attn
         target_f = f_a if afd_is_attn() else f_f
-        for hw in self._dvfs_hw_list:
-            hw.lock_sm_clock(target_f)
+        self._lock_all_sm_clocks(target_f)
         self._cur_f_a = f_a
         self._cur_f_f = f_f
 
@@ -4144,13 +4427,8 @@ class Scheduler(
 
     def _afd_dvfs_before_batch(self, batch):
         """Select and apply frequency before running a batch."""
-        # Restore from idle freq lock: set GPU back to last active frequency
-        if self._idle_freq_locked and self._dvfs_hw_list:
-            from sglang.srt.layers.afd import afd_is_attn
-            target_f = self._cur_f_a if afd_is_attn() else self._cur_f_f
-            for hw in self._dvfs_hw_list:
-                hw.lock_sm_clock(target_f)
-            self._idle_freq_locked = False
+        # Restore from idle freq lock on every owned GPU (not only when flag set).
+        self._restore_active_freq_from_idle_lock()
 
         # Poll Tier 1 freq config (for non-PA processes)
         if not getattr(self.server_args, "enable_tier1_pa", False):
@@ -4178,20 +4456,34 @@ class Scheduler(
                 (getattr(r, "_orig_extend_input_len", r.extend_input_len)
                  for r in batch.reqs), default=1024
             )
-            decision = self._af_dvfs_ctrl.select_freq_prefill(
-                bs=batch.batch_size(), il=max_il,
-                slack_us=slack_us, M=M,
-            )
-            if decision.f_a != self._cur_f_a or decision.f_f != self._cur_f_f:
-                self._apply_freq(decision.f_a, decision.f_f)
+            if getattr(self.server_args, "afd_dvfs_prefill_fixed_max", False):
+                from sglang.srt.energy.af_dvfs_controller import F_MAX
+
+                decision_f_a = decision_f_f = F_MAX
+                pred_lat_us = 0.0
+                pred_energy_mj = 0.0
+            else:
+                decision = self._af_dvfs_ctrl.select_freq_prefill(
+                    bs=batch.batch_size(), il=max_il,
+                    slack_us=slack_us, M=M,
+                )
+                decision_f_a, decision_f_f = decision.f_a, decision.f_f
+                pred_lat_us = decision.latency_us
+                pred_energy_mj = decision.energy_mj
+            if (
+                decision_f_a != self._cur_f_a
+                or decision_f_f != self._cur_f_f
+                or self._idle_freq_locked
+            ):
+                self._apply_freq(decision_f_a, decision_f_f)
             # Save prefill timing context for post-batch obs_lat measurement
             self._prefill_dvfs_pending = {
                 "phase": "prefill", "reeval": "per_request",
                 "bs": batch.batch_size(), "il": max_il,
                 "slack_us": round(slack_us, 1),
-                "f_a": decision.f_a, "f_f": decision.f_f,
-                "pred_lat_us": round(decision.latency_us, 1),
-                "pred_energy_mj": round(decision.energy_mj, 1),
+                "f_a": decision_f_a, "f_f": decision_f_f,
+                "pred_lat_us": round(pred_lat_us, 1),
+                "pred_energy_mj": round(pred_energy_mj, 1),
             }
             self._prefill_dvfs_start_t = time.perf_counter()
 
@@ -4212,7 +4504,17 @@ class Scheduler(
             self._last_decode_batch_time = time.perf_counter()
 
             # Share decode iteration time with PA's Tier1 monitor via stats file
-            self._write_afd_decode_stats(t_iter_us, batch.batch_size())
+            decode_bs = batch.batch_size()
+            self._write_afd_decode_stats(t_iter_us, decode_bs)
+            sample_path = os.environ.get("AFD_DECODE_BATCH_SAMPLE_PATH")
+            if sample_path:
+                try:
+                    with open(sample_path, "a") as sample_file:
+                        sample_file.write(
+                            f"{time.time():.6f},{decode_bs},{t_iter_us:.3f}\n"
+                        )
+                except OSError:
+                    pass
 
             reeval_reason = self._af_dvfs_ctrl.should_reevaluate_decode(
                 batch.batch_size(),
@@ -4374,12 +4676,27 @@ class Scheduler(
             if pred > 0 and obs_lat_us > 0:
                 err = (pred - obs_lat_us) / obs_lat_us * 100
                 pending["pred_err_pct"] = round(err, 1)
+            # Feed observed prefill latency into the controller's prefill
+            # calibration so latency predictions track reality (the layer model
+            # tends to overestimate full-batch prefill time).
+            ctrl = getattr(self, "_af_dvfs_ctrl", None)
+            if ctrl is not None and obs_lat_us > 0:
+                bs = pending.get("bs", 0)
+                il = pending.get("il", 0)
+                f_a = pending.get("f_a", 0)
+                f_f = pending.get("f_f", 0)
+                if bs and il and f_a and f_f:
+                    raw_pred = ctrl.predict_prefill_latency(
+                        bs, il, f_a, f_f, calibrated=False,
+                    )
+                    if raw_pred > 0 and raw_pred != float("inf"):
+                        ctrl.update_prefill_calibration(obs_lat_us, raw_pred)
         if self._dvfs_decision_log is not None:
             self._log_dvfs_decision(pending)
         self._prefill_dvfs_pending = None
         self._prefill_dvfs_start_t = None
 
-    def _afd_process_input_requests(self, recv_reqs):
+    def _afd_process_input_requests(self, recv_reqs, *, work_already_forwarded=False):
         """Process input requests with AFD awareness (S1, S4).
 
         AFDReqInput messages are queued and consumed one per iteration
@@ -4388,6 +4705,7 @@ class Scheduler(
         """
         from sglang.srt.layers.afd import afd_is_attn
         from sglang.srt.managers.io_struct import AFDReqInput
+        from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
         from sglang.srt.managers.io_struct import (
             TokenizedEmbeddingReqInput,
             TokenizedGenerateReqInput,
@@ -4402,7 +4720,11 @@ class Scheduler(
                 self._afd_pending_batch_infos.append(recv_req)
                 continue
 
-            if afd_is_attn() and self.afd_send_to_ffn is not None:
+            if (
+                not work_already_forwarded
+                and afd_is_attn()
+                and self.afd_send_to_ffn is not None
+            ):
                 if isinstance(
                     recv_req, (TokenizedGenerateReqInput, TokenizedEmbeddingReqInput)
                 ):
@@ -4430,11 +4752,29 @@ class Scheduler(
 
         if self._afd_batchsize_attn is None and pending:
             afd_req = self._afd_pending_batch_infos.popleft()
+            if (
+                getattr(
+                    self.server_args,
+                    "afd_multi_pf_continuation",
+                    False,
+                )
+                and not afd_is_attn()
+                and afd_req.pf_group_id
+                != int(self.server_args.afd_pf_group_id)
+            ):
+                raise RuntimeError(
+                    "AFD PF control message routed to the wrong group: "
+                    f"expected={self.server_args.afd_pf_group_id}, "
+                    f"received={afd_req.pf_group_id}, "
+                    f"dispatch={afd_req.dispatch_id}"
+                )
             consumed_afd_req = afd_req
             old_req_ids = self._afd_req_ids
             self._afd_batchsize_attn = afd_req.batch_size
             self._afd_forward_mode = afd_req.forward_mode
-            self._afd_req_ids = afd_req.req_ids
+            self._afd_req_ids = list(afd_req.req_ids)
+            SchedulerAFDMixin.afd_set_current_metadata(self, afd_req)
+            self._on_afd_batch_info_received()
 
             if afd_req.output_ids_per_req and afd_req.req_ids:
                 self._afd_sync_output_ids(afd_req)
@@ -4448,21 +4788,98 @@ class Scheduler(
         # process_input_requests handles TokenizedGenerateReqInput → creates Req objects
         self.process_input_requests(filtered_reqs)
 
-        # Now create Reqs from AFDReqInput for any rids that still don't exist
-        if (
-            consumed_afd_req is not None
-            and not afd_is_attn()
-            and consumed_afd_req.input_ids_per_req
+        # The batch-info message is the authoritative FFN request protocol.  In
+        # particular, joining TP ranks may never have observed the historical
+        # per-request transport messages that created these requests on surviving
+        # ranks.  Always validate/reconstruct from the consumed snapshot; do not
+        # silently keep a partial local queue when creation metadata is absent.
+        if consumed_afd_req is not None and not afd_is_attn():
+            from sglang.srt.disaggregation.utils import DisaggregationMode
+
+            self._afd_ensure_reqs_from_afdreq(
+                consumed_afd_req,
+                authoritative_waiting=(
+                    getattr(self, "disaggregation_mode", None)
+                    == DisaggregationMode.PREFILL
+                ),
+            )
+
+    @staticmethod
+    def _afd_validate_req_metadata(afd_req):
+        """Validate AFD request metadata and return normalized per-request rows."""
+        req_ids = list(afd_req.req_ids or [])
+        fields = {
+            "seq_lens": afd_req.seq_lens,
+            "extend_lens": afd_req.extend_lens,
+            "input_ids_per_req": afd_req.input_ids_per_req,
+        }
+        for name, values in fields.items():
+            if values is None or len(values) != len(req_ids):
+                raise ValueError(
+                    f"Invalid AFD metadata dispatch={afd_req.dispatch_id} rid=<batch>: "
+                    f"len(req_ids)={len(req_ids)}, len({name})="
+                    f"{None if values is None else len(values)}"
+                )
+        for name in ("output_ids_per_req", "max_new_tokens_per_req"):
+            values = getattr(afd_req, name, None)
+            if values is not None and len(values) != len(req_ids):
+                raise ValueError(
+                    f"Invalid AFD metadata dispatch={afd_req.dispatch_id} rid=<batch>: "
+                    f"len(req_ids)={len(req_ids)}, len({name})={len(values)}"
+                )
+        if len(set(req_ids)) != len(req_ids):
+            raise ValueError(
+                f"Invalid AFD metadata dispatch={afd_req.dispatch_id}: duplicate req_ids"
+            )
+
+        rows = []
+        output_ids_per_req = afd_req.output_ids_per_req or [[] for _ in req_ids]
+        for rid, seq_len, extend_len, input_ids, output_ids in zip(
+            req_ids,
+            afd_req.seq_lens,
+            afd_req.extend_lens,
+            afd_req.input_ids_per_req,
+            output_ids_per_req,
         ):
-            self._afd_ensure_reqs_from_afdreq(consumed_afd_req)
+            seq_len = int(seq_len)
+            extend_len = int(extend_len)
+            fill_ids = list(input_ids) + list(output_ids)
+            if not 0 <= extend_len <= seq_len:
+                raise ValueError(
+                    f"Invalid AFD metadata dispatch={afd_req.dispatch_id} rid={rid}: "
+                    f"extend_len={extend_len}, seq_len={seq_len}"
+                )
+            if seq_len != len(fill_ids):
+                raise ValueError(
+                    f"Invalid AFD metadata dispatch={afd_req.dispatch_id} rid={rid}: "
+                    f"seq_len={seq_len}, constructible_fill_len={len(fill_ids)}"
+                )
+            rows.append((rid, seq_len, extend_len, list(input_ids), list(output_ids)))
+        return rows
 
-    def _afd_ensure_reqs_from_afdreq(self, afd_req):
-        """FFN decode: create Req objects from AFDReqInput data when missing.
+    @staticmethod
+    def _afd_apply_req_metadata(req, row):
+        """Apply PA sequence geometry to one PF bookkeeping-only request."""
+        _, seq_len, extend_len, input_ids, output_ids = row
+        req.origin_input_ids = input_ids
+        req.output_ids = output_ids
+        req.fill_ids = input_ids + output_ids
+        prefix_len = seq_len - extend_len
+        req.prefix_indices = torch.arange(prefix_len, dtype=torch.int64)
+        req.set_extend_input_len(extend_len)
 
-        In PD+AF decode, DA sends AFDReqInput with metadata but the FFN side
-        may not have corresponding Req objects (since they arrive via KV-cache
-        transfer, not TokenizedGenerateReqInput). This creates minimal Reqs so
-        get_next_disagg_decode_batch_to_run can build a batch.
+    def _afd_ensure_reqs_from_afdreq(
+        self, afd_req, *, authoritative_waiting=False
+    ):
+        """Reconstruct missing FFN Reqs and apply the authoritative PA snapshot.
+
+        ``AFDReqInput`` is broadcast in the active FFN TP group and therefore is
+        the first request message guaranteed to be seen by ranks that join during
+        a grow.  For disaggregated prefill, also make its request IDs the exact
+        ordered waiting set for this dispatch.  Local requests outside the
+        snapshot are discarded: a later dispatch can reconstruct them from its
+        own complete snapshot, while retaining them here could contaminate the
+        current collective batch.
         """
         from sglang.srt.layers.afd import afd_is_attn
         from sglang.srt.managers.schedule_batch import Req
@@ -4471,72 +4888,70 @@ class Scheduler(
         if afd_is_attn():
             return
 
-        existing_rids = set(req.rid for req in self.waiting_queue)
-        if self.running_batch is not None:
-            existing_rids.update(req.rid for req in self.running_batch.reqs)
-        # AFD event_loop never populates running_batch on FFN side — reqs
-        # live in last_batch instead.  Without this check every AFDReqInput
-        # creates a duplicate Req, tripling the batch.
-        if self.last_batch is not None:
-            existing_rids.update(req.rid for req in self.last_batch.reqs)
+        rows = self._afd_validate_req_metadata(afd_req)
+        existing = {}
+        for req in self.waiting_queue:
+            existing.setdefault(req.rid, []).append(req)
+        if not authoritative_waiting:
+            for batch in (self.running_batch, self.last_batch):
+                if batch is not None:
+                    for req in batch.reqs:
+                        bucket = existing.setdefault(req.rid, [])
+                        if all(req is not other for other in bucket):
+                            bucket.append(req)
 
-        for i, rid in enumerate(afd_req.req_ids):
-            if rid in existing_rids:
-                continue
+        max_new_tokens = afd_req.max_new_tokens_per_req
+        ordered = []
+        for i, row in enumerate(rows):
+            rid = row[0]
+            matching = existing.get(rid, [])
+            if authoritative_waiting and len(matching) > 1:
+                raise RuntimeError(
+                    f"Invalid AFD PF local request state dispatch={afd_req.dispatch_id} "
+                    f"rid={rid}: expected at most one request object, "
+                    f"found={len(matching)}"
+                )
+            if matching:
+                req = matching[0]
+            else:
+                req = Req(
+                    rid=rid,
+                    origin_input_text="",
+                    origin_input_ids=row[3],
+                    sampling_params=SamplingParams(
+                        max_new_tokens=(max_new_tokens[i] if max_new_tokens else 128),
+                        stop=[],
+                        stop_regex=[],
+                    ),
+                    vocab_size=self.model_config.vocab_size,
+                )
+            for matching_req in matching or [req]:
+                self._afd_apply_req_metadata(matching_req, row)
+            ordered.append(req)
 
-            origin_input_ids = (
-                afd_req.input_ids_per_req[i]
-                if afd_req.input_ids_per_req and i < len(afd_req.input_ids_per_req)
-                else []
+        if authoritative_waiting:
+            self.waiting_queue = ordered
+            self._afd_ffn_authoritative_waiting = True
+        else:
+            known_objects = {id(req) for req in self.waiting_queue}
+            self.waiting_queue.extend(
+                req for req in ordered if id(req) not in known_objects
             )
-            max_new_tokens = (
-                afd_req.max_new_tokens_per_req[i]
-                if afd_req.max_new_tokens_per_req and i < len(afd_req.max_new_tokens_per_req)
-                else 128
-            )
-
-            req = Req(
-                rid=rid,
-                origin_input_text="",
-                origin_input_ids=origin_input_ids,
-                sampling_params=SamplingParams(
-                    max_new_tokens=max_new_tokens,
-                    stop=[],
-                    stop_regex=[],
-                ),
-                vocab_size=self.model_config.vocab_size,
-            )
-            # Pre-populate output_ids so fill_ids is correct for the forward pass
-            if afd_req.output_ids_per_req and i < len(afd_req.output_ids_per_req):
-                req.output_ids = list(afd_req.output_ids_per_req[i])
-            req.fill_ids = list(origin_input_ids) + list(req.output_ids)
-            req.set_extend_input_len(len(req.fill_ids))
-            self.waiting_queue.append(req)
 
     def _afd_sync_output_ids(self, afd_req):
-        """Sync output_ids from Attn→FFN so fill_ids match for AF communication.
-
-        In PD+AF decode, Attn side has output_ids (from prefill's first token)
-        but FFN side doesn't. Without syncing, FFN's fill_ids is shorter by 1,
-        causing tensor shape mismatch in AF communication.
-        """
-        rid_to_oids = dict(zip(afd_req.req_ids, afd_req.output_ids_per_req))
-
-        # Sync to waiting_queue requests
+        """Sync output IDs without replacing PA-provided extend geometry."""
+        rows = {row[0]: row for row in self._afd_validate_req_metadata(afd_req)}
+        seen = set()
         for req in self.waiting_queue:
-            oids = rid_to_oids.get(req.rid)
-            if oids is not None and len(req.output_ids) < len(oids):
-                req.output_ids = list(oids)
-                req.fill_ids = req.origin_input_ids + req.output_ids
-                req.set_extend_input_len(len(req.fill_ids))
-
-        # Sync to running_batch requests
-        if self.running_batch is not None:
-            for req in self.running_batch.reqs:
-                oids = rid_to_oids.get(req.rid)
-                if oids is not None and len(req.output_ids) < len(oids):
-                    req.output_ids = list(oids)
-                    req.fill_ids = req.origin_input_ids + req.output_ids
+            if req.rid in rows and id(req) not in seen:
+                self._afd_apply_req_metadata(req, rows[req.rid])
+                seen.add(id(req))
+        for batch in (self.running_batch, self.last_batch):
+            if batch is not None:
+                for req in batch.reqs:
+                    if req.rid in rows and id(req) not in seen:
+                        self._afd_apply_req_metadata(req, rows[req.rid])
+                        seen.add(id(req))
 
     def _afd_ffn_cleanup_stale(self, active_req_ids: set, old_req_ids: set):
         """Release KV cache for FFN-side requests that Attn has stopped tracking.
@@ -4618,6 +5033,84 @@ class Scheduler(
             self.last_batch.reqs.clear()
             self.last_batch = None
 
+    def _afd_ffn_reset_idle_ledger(self):
+        """Reset the FFN batch ledger to idle in the AFD wait branch.
+
+        The FFN (PF) participant's ``event_loop_afd`` spins in the
+        ``_afd_batchsize_attn is None`` wait branch whenever Attn is not sending
+        batch info. FFN requests only ever live in ``last_batch`` (running_batch
+        stays empty), so ``_afd_ffn_cleanup_all`` — the only place that clears
+        ``last_batch`` — was previously gated behind a non-empty ``running_batch``
+        and thus never ran here. That left ``last_batch``/``cur_batch`` non-empty
+        forever, so ``is_fully_idle()`` stayed False and a component reshard
+        drain (quiesce) could never observe idle until it timed out.
+
+        We must NOT clean up on every idle-wait iteration: during normal
+        serving Attn briefly pauses between dispatches and the FFN's live decode
+        reqs legitimately sit in ``last_batch`` waiting for the next
+        ``AFDReqInput``. Destroying them there would break A→F→A serving and M=1
+        semantics. We therefore only reset the ledger when no more AFD work can
+        arrive:
+
+        * a component reshard drain has fenced admission (Attn has stopped
+          dispatching for good, so ``last_batch`` is terminal), or
+        * a stale ``running_batch`` lingers (legacy path — FFN's running_batch
+          is normally empty, so a non-empty one means orphaned reqs).
+
+        The caller's branch guard already guarantees ``_afd_batchsize_attn is
+        None`` and the pending batch-info queue was drained by
+        ``_afd_process_input_requests`` immediately before, so there is no
+        in-flight AFD work to clobber. We reuse ``_afd_ffn_cleanup_all`` so KV
+        pages and reqs are actually released instead of merely dropping
+        references (which would leak tokens), then clear ``cur_batch`` (which
+        aliases the previous forward's batch object).
+        """
+        from sglang.srt.layers.afd import afd_is_attn
+
+        if afd_is_attn():
+            return
+
+        pending = getattr(self, "_afd_pending_batch_infos", None)
+        if pending:
+            return
+        if getattr(self, "_afd_batchsize_attn", None) is not None:
+            return
+        try:
+            from sglang.srt.layers.afd import peek_async_communicator
+            comm = peek_async_communicator()
+            if comm is not None:
+                send_queue = getattr(comm, "_send_queue", None)
+                if send_queue is not None and int(
+                    getattr(send_queue, "unfinished_tasks", 0)
+                ):
+                    return
+                if any(
+                    getattr(item, "is_alive", lambda: False)()
+                    for item in (getattr(comm, "_pending_sends", None) or ())
+                ):
+                    return
+                if any(
+                    not getattr(item, "done", lambda: False)()
+                    for item in (getattr(comm, "_send_futures", None) or ())
+                ):
+                    return
+                if int(getattr(comm, "_pending_recv_count", 0)):
+                    return
+        except Exception:
+            pass
+
+        admission_fenced = bool(
+            getattr(self, "_afd_component_fence_installed", False)
+        )
+        running_nonempty = (
+            self.running_batch is not None and not self.running_batch.is_empty()
+        )
+        if not (admission_fenced or running_nonempty):
+            return
+
+        self._afd_ffn_cleanup_all()
+        self.cur_batch = None
+
     @DynamicGradMode()
     def event_loop_overlap(self):
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
@@ -4655,6 +5148,7 @@ class Scheduler(
             if batch:
                 self._unified_dvfs_before_batch(batch)
                 batch_result = self.run_batch(batch)
+                self._unified_log_prefill_observed(batch)
                 self.result_queue.append((batch.copy(), batch_result))
             else:
                 batch_result = None
@@ -4667,6 +5161,7 @@ class Scheduler(
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
                 self.self_check_during_idle()
+                self._maybe_grow_kv_pool_background()
 
             # Run sample of the current batch
             # It depends on the result of the last batch (e.g., grammar), so we run it after the last batch is processed.
@@ -4707,6 +5202,8 @@ class Scheduler(
                 new_tp_rank=int(data.get("new_tp_rank", 0)),
                 nccl_port=int(data.get("nccl_port", 29500)),
                 pre_drain_sec=float(data.get("pre_drain_sec", 0.0) or 0.0),
+                operation_id=data.get("operation_id"),
+                accepted_at=data.get("accepted_at"),
             )
             logger.info("Handling in-place reshard control file: TP%d", req.new_tp_size)
             self.handle_reshard(req)
@@ -5063,10 +5560,6 @@ class Scheduler(
             self.server_args.inplace_reshard_max_tp is not None
             and self._inplace_reshard_blocks_new_requests()
         ):
-            from http import HTTPStatus
-
-            from sglang.srt.disaggregation.utils import prepare_abort
-
             req = Req(
                 recv_req.rid,
                 recv_req.input_text,
@@ -5514,40 +6007,110 @@ class Scheduler(
     def stash_chunked_request(self, req: Req):
         self.tree_cache.cache_unfinished_req(req, chunked=True)
 
-    def _pack_inplace_reshard_centralized_plan(self) -> dict:
-        """Build the next centralized scheduling action for active TP ranks."""
+    def _inplace_reshard_should_defer_async_kv_grow_rank0(self) -> bool:
+        """Rank0-only preflight; centralized plan propagates the decision."""
+        from pathlib import Path
+
+        from sglang.srt.reshard.inplace_reshard_background import (
+            should_defer_async_kv_grow,
+        )
+
+        return should_defer_async_kv_grow(
+            control_file_pending=Path(
+                "/tmp/sglang_inplace_reshard_cmd.json"
+            ).exists(),
+            pending_reshard=getattr(
+                self, "_pending_inplace_reshard", None
+            ) is not None,
+            execute_pending=getattr(
+                self, "_inplace_reshard_execute_pending", None
+            ) is not None,
+            prep_pending=getattr(
+                self, "_inplace_reshard_prep_pending", None
+            ) is not None,
+        )
+
+    def _prepare_inplace_reshard_centralized_round(
+        self,
+    ) -> tuple[str, dict, Optional[ScheduleBatch]]:
+        """Return (kind, plan, batch) for one centralized scheduling round."""
+        if getattr(self, "_gang_restart_waiting", False):
+            return ("gang_restart_wait", {"__gang_restart_wait__": True}, None)
         pending_prep = getattr(self, "_inplace_reshard_prep_pending", None)
         if pending_prep is not None:
             old_tp, new_tp = pending_prep
             if not self.tp_worker.model_runner.inplace_reshard_prep_is_ready(new_tp):
-                return {
-                    "__inplace_reshard_prep__": True,
-                    "old_tp": int(old_tp),
-                    "new_tp": int(new_tp),
-                }
+                return (
+                    "prep",
+                    {
+                        "__inplace_reshard_prep__": True,
+                        "old_tp": int(old_tp),
+                        "new_tp": int(new_tp),
+                    },
+                    None,
+                )
         pending = getattr(self, "_inplace_reshard_execute_pending", None)
         if pending is not None:
             recv_req, _ = pending
             new_tp = int(recv_req.new_tp_size)
             old_tp = self.tp_size
-            return {
-                "__inplace_reshard__": True,
-                "new_tp": new_tp,
-                "old_tp": old_tp,
-                "activate_cmd": {
-                    "action": "activate_inplace_reshard",
-                    "old_tp_size": old_tp,
-                    "new_tp_size": new_tp,
+            return (
+                "execute",
+                {
+                    "__inplace_reshard__": True,
+                    "new_tp": new_tp,
+                    "old_tp": old_tp,
+                    "activate_cmd": {
+                        "action": "activate_inplace_reshard",
+                        "old_tp_size": old_tp,
+                        "new_tp_size": new_tp,
+                    },
                 },
-            }
+                None,
+            )
+        runner = self.tp_worker.model_runner
+        if getattr(runner, "_inplace_reshard_kv_grow_pending", False):
+            # Re-check the rank0-only control file inside the existing
+            # centralized scheduling round, after real prep/execute work has
+            # already won priority and before any rank enters grow collectives.
+            if self._inplace_reshard_should_defer_async_kv_grow_rank0():
+                return (
+                    "defer_kv_grow",
+                    {"__inplace_reshard_defer_kv_grow__": True},
+                    None,
+                )
+            if self.is_fully_idle():
+                return (
+                    "kv_grow",
+                    {"__inplace_reshard_kv_grow__": True},
+                    None,
+                )
         batch = self._get_next_batch_to_run_body()
-        return self._pack_inplace_reshard_batch_plan(batch)
+        return ("batch", self._pack_inplace_reshard_batch_plan(batch), batch)
 
     def _dispatch_inplace_reshard_centralized_plan(
-        self, plan: dict
+        self, kind: str, plan: dict, batch: Optional[ScheduleBatch]
     ) -> Optional[ScheduleBatch]:
         """Run prep/execute locally on rank0; batch plans return the batch."""
-        if plan.get("__inplace_reshard_prep__"):
+        if kind == "defer_kv_grow" or plan.get(
+            "__inplace_reshard_defer_kv_grow__"
+        ):
+            self._mark_inplace_reshard_kv_grow_deferred()
+            return None
+        if kind == "kv_grow" or plan.get("__inplace_reshard_kv_grow__"):
+            self._maybe_grow_kv_pool_background(coordinated=True)
+            return None
+        if kind == "gang_restart_wait" or plan.get("__gang_restart_wait__"):
+            status = getattr(self, "_inplace_reshard_status", None) or {}
+            self._publish_inplace_reshard_status(
+                phase="gang_restart_ready",
+                active_tp=self.tp_size,
+                target_tp=status.get("target_tp"),
+                old_tp=self.tp_size,
+                message="all active scheduler ranks are awaiting planned restart",
+            )
+            return None
+        if kind == "prep" or plan.get("__inplace_reshard_prep__"):
             old_tp = int(plan["old_tp"])
             new_tp = int(plan["new_tp"])
             logger.info(
@@ -5555,17 +6118,8 @@ class Scheduler(
                 old_tp,
                 new_tp,
             )
-            self._inplace_reshard_world_prep_body(old_tp, new_tp)
-            prep_cmd = {
-                "action": "prepare_inplace_reshard",
-                "old_tp_size": old_tp,
-                "new_tp_size": new_tp,
-            }
-            broadcast_pyobj(
-                prep_cmd,
-                self.world_group.rank,
-                self.world_group.cpu_group,
-                src=self.world_group.ranks[0],
+            self._broadcast_inplace_reshard_world_prep_cmd(
+                old_tp, new_tp, initiate=True
             )
             st = self.tp_worker.model_runner._inplace_reshard_prep_state_obj()
             st.joiners_prepared = True
@@ -5580,9 +6134,14 @@ class Scheduler(
                     target_tp=new_tp,
                     old_tp=old_tp,
                     message=f"background prep ready TP{old_tp}→TP{new_tp}",
+                    operation_id=(
+                        getattr(self, "_inplace_reshard_timing_context", None).operation_id
+                        if getattr(self, "_inplace_reshard_timing_context", None) is not None
+                        else None
+                    ),
                 )
             return None
-        if plan.get("__inplace_reshard__"):
+        if kind == "execute" or plan.get("__inplace_reshard__"):
             pending = getattr(self, "_inplace_reshard_execute_pending", None)
             if pending is None:
                 return None
@@ -5591,6 +6150,8 @@ class Scheduler(
             self._inplace_reshard_plan_sent = False
             self._live_reshard_tp_execute(recv_req, t0)
             return None
+        if batch is not None:
+            return batch
         return self._rebuild_inplace_reshard_batch(plan)
 
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
@@ -5599,14 +6160,16 @@ class Scheduler(
 
             dist.barrier(group=self.tp_cpu_group)
             if self.tp_rank == 0:
-                plan = self._pack_inplace_reshard_centralized_plan()
+                kind, plan, batch = self._prepare_inplace_reshard_centralized_round()
                 broadcast_pyobj(
                     [plan],
                     self.tp_group.rank,
                     self.tp_cpu_group,
                     src=self.tp_group.ranks[0],
                 )
-                return self._dispatch_inplace_reshard_centralized_plan(plan)
+                return self._dispatch_inplace_reshard_centralized_plan(
+                    kind, plan, batch
+                )
             plan_list = broadcast_pyobj(
                 None,
                 self.tp_group.rank,
@@ -5616,16 +6179,22 @@ class Scheduler(
             if not plan_list:
                 return None
             plan = plan_list[0]
+            if plan.get("__inplace_reshard_defer_kv_grow__"):
+                self._mark_inplace_reshard_kv_grow_deferred()
+                return None
+            if plan.get("__inplace_reshard_kv_grow__"):
+                self._maybe_grow_kv_pool_background(coordinated=True)
+                return None
+            if plan.get("__gang_restart_wait__"):
+                self._gang_restart_waiting = True
+                self._engine_paused = True
+                return None
             if plan.get("__inplace_reshard_prep__"):
                 old_tp = int(plan["old_tp"])
                 new_tp = int(plan["new_tp"])
                 self.tp_worker.model_runner.reset_inplace_reshard_prep()
-                self._inplace_reshard_world_prep_body(old_tp, new_tp)
-                broadcast_pyobj(
-                    None,
-                    self.world_group.rank,
-                    self.world_group.cpu_group,
-                    src=self.world_group.ranks[0],
+                self._broadcast_inplace_reshard_world_prep_cmd(
+                    old_tp, new_tp, initiate=False
                 )
                 return None
             if plan.get("__inplace_reshard__"):
@@ -5884,6 +6453,11 @@ class Scheduler(
                 )
 
             req.init_next_round_input(self.tree_cache)
+            if (
+                getattr(self.req_to_token_pool, "no_kv_bookkeeping", False)
+                and self._afd_current_metadata is not None
+            ):
+                SchedulerAFDMixin.afd_restore_req_geometry(self, req)
             res = adder.add_one_req(
                 req,
                 has_chunked_req=(self.chunked_req is not None),
@@ -6323,6 +6897,8 @@ class Scheduler(
 
             if self.disaggregation_mode == DisaggregationMode.DECODE:
                 idle &= len(self.disagg_decode_prealloc_queue.queue) == 0
+                idle &= len(self.disagg_decode_prealloc_queue.pending_reqs) == 0
+                idle &= len(self.disagg_decode_prealloc_queue.retracted_queue) == 0
                 idle &= len(self.disagg_decode_transfer_queue.queue) == 0
 
             # HiCache: in-flight async ops (GPU↔Host↔L3) must drain before
@@ -6889,6 +7465,16 @@ def _parse_gpu_indices_env(var_name: str) -> List[int]:
         return []
 
 
+def _nvml_index_for_tp_rank(server_args, tp_rank: int) -> int:
+    """Physical NVML GPU index owned by one TP scheduler rank."""
+    env_list = _parse_gpu_indices_env("AFD_NVML_DEVICE_INDICES")
+    if env_list and tp_rank < len(env_list):
+        return env_list[tp_rank]
+    step = max(1, getattr(server_args, "gpu_id_step", 1))
+    base = getattr(server_args, "base_gpu_id", 0)
+    return base + tp_rank * step
+
+
 class SenderWrapper:
     def __init__(self, socket: zmq.Socket):
         self.socket = socket
@@ -6913,6 +7499,9 @@ class SenderWrapper:
 
 
 def dispatch_event_loop(scheduler: Scheduler):
+    if getattr(scheduler, "is_afd_component_standby_rank", False):
+        scheduler.event_loop_afd_component_standby()
+        return
     if getattr(scheduler, "is_inplace_standby_rank", False):
         scheduler.event_loop_inplace_standby()
         return
@@ -6937,7 +7526,7 @@ def dispatch_event_loop(scheduler: Scheduler):
         if afd_is_attn():
             scheduler.event_loop_afd_disagg_prefill()
         elif afd_is_ffn():
-            scheduler.event_loop_afd()
+            scheduler.event_loop_afd_disagg_prefill()
         elif server_args.pp_size > 1:
             scheduler.event_loop_pp_disagg_prefill()
         elif scheduler.enable_overlap:

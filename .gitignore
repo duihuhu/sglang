@@ -328,3 +328,9 @@ benchmark/hicache/LooGLE/
 *.npy
 *.bak
 tmp*.txt
+# Versioned AFlex Tier-1 solver calibration and validation artifacts
+!benchmark/AFlex_bench/multi_node/node_scalibility_macro/more_trying/calibration/tier1_calibration_v1.json
+!benchmark/AFlex_bench/multi_node/node_scalibility_macro/more_trying/results/tier1_selected_solutions_v4_20260711.json
+!benchmark/AFlex_bench/multi_node/node_scalibility_macro/more_trying/results/tier1_selected_solutions_v4_20260711_validation.json
+!benchmark/AFlex_bench/multi_node/node_scalibility_macro/more_trying/results/tier1_megascale_solutions_v4_20260711.json
+!benchmark/AFlex_bench/multi_node/node_scalibility_macro/more_trying/results/tier1_megascale_solutions_v4_20260711_validation.json

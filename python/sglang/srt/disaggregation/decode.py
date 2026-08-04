@@ -20,6 +20,7 @@ Life cycle of a request in the decode server
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections import deque
@@ -215,6 +216,7 @@ class DecodeRequest:
     kv_receiver: CommonKVReceiver
     waiting_for_input: bool = False
     metadata_buffer_index: int = -1
+    transfer_started_at: float = 0.0
 
     @property
     def seqlen(self) -> int:
@@ -465,22 +467,74 @@ class DecodePreallocQueue:
 
         return resumed_reqs
 
+    def snapshot(self) -> Dict[str, object]:
+        """Return compact queue diagnostics safe to emit at reshard boundaries."""
+        def describe(entries, req_getter):
+            rids = [str(req_getter(entry).rid) for entry in entries]
+            digest = hashlib.sha256("\0".join(rids).encode()).hexdigest()[:16]
+            return {
+                "len": len(entries),
+                "rid_hash": digest,
+                "rids": rids,
+                "types": [type(entry).__name__ for entry in entries],
+            }
+
+        return {
+            "queue": describe(self.queue, lambda entry: entry.req),
+            "pending": describe(self.pending_reqs, lambda entry: entry),
+            "retracted": describe(self.retracted_queue, lambda entry: entry),
+        }
+
+    def _poll_authoritative_rids(
+        self, rids_to_check: Optional[List[str]] = None
+    ) -> Tuple[List[str], List[int]]:
+        """Poll a rank-0 RID order so every TP rank reduces equal-size tensors."""
+        from sglang.srt.utils.common import broadcast_pyobj
+
+        requested = set(rids_to_check) if rids_to_check is not None else None
+        local_rids = [
+            decode_req.req.rid
+            for decode_req in self.queue
+            if requested is None or decode_req.req.rid in requested
+        ]
+        tp_size = int(getattr(self, "tp_size", 1))
+        authoritative = (
+            local_rids
+            if tp_size == 1
+            else broadcast_pyobj(
+                [local_rids] if self.tp_rank == 0 else None,
+                self.tp_rank,
+                self.gloo_group,
+                src=0,
+            )[0]
+        )
+        local = {decode_req.req.rid: decode_req.kv_receiver for decode_req in self.queue}
+
+        class _MissingPoller:
+            @staticmethod
+            def poll():
+                return KVPoll.Failed
+
+        pollers = [local.get(rid, _MissingPoller()) for rid in authoritative]
+        polls = (
+            [int(poller.poll()) for poller in pollers]
+            if tp_size == 1
+            else poll_and_all_reduce(pollers, self.gloo_group)
+        )
+        return authoritative, polls
+
     def _update_handshake_waiters(
         self, rids_to_check: Optional[List[str]] = None
     ) -> None:
-        if not self.queue:
+        authoritative, polls = self._poll_authoritative_rids(rids_to_check)
+        if not authoritative:
             return
+        poll_by_rid = dict(zip(authoritative, polls))
 
-        if all(decode_req.waiting_for_input for decode_req in self.queue):
-            return
-
-        polls = poll_and_all_reduce(
-            [decode_req.kv_receiver for decode_req in self.queue], self.gloo_group
-        )
-
-        for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
-            if rids_to_check is not None and decode_req.req.rid not in rids_to_check:
+        for decode_req in self.queue:
+            if decode_req.req.rid not in poll_by_rid:
                 continue
+            poll = poll_by_rid[decode_req.req.rid]
 
             if poll == KVPoll.Bootstrapping:
                 pass
@@ -592,6 +646,41 @@ class DecodePreallocQueue:
 
         for req, prefill_dp_rank in resolved:
             self._create_receiver_and_enqueue(req, prefill_dp_rank)
+
+    def abort_and_reap(self, rids: List[str], reason: str) -> List[Req]:
+        """Abort preallocation state, including unresolved and retracted requests."""
+        rid_set = set(rids)
+        for decode_req in self.queue:
+            if decode_req.req.rid in rid_set:
+                logger.warning(
+                    "Aborting decode preallocation during AFD quiesce: rid=%s reason=%s",
+                    decode_req.req.rid, reason,
+                )
+                decode_req.kv_receiver.abort()
+        pending, self.pending_reqs = self.pending_reqs, []
+        for req in pending:
+            if req.rid not in rid_set:
+                self.pending_reqs.append(req)
+                continue
+            prepare_abort(req, reason, status_code=HTTPStatus.SERVICE_UNAVAILABLE)
+            self.scheduler.stream_output([req], req.return_logprob)
+
+        retained = []
+        for req in self.retracted_queue:
+            if req.rid not in rid_set:
+                retained.append(req)
+                continue
+            prepare_abort(req, reason, status_code=HTTPStatus.SERVICE_UNAVAILABLE)
+            if hasattr(req, "kv_cache_cpu"):
+                del req.kv_cache_cpu
+            self.scheduler.stream_output([req], req.return_logprob)
+        self.retracted_queue = retained
+
+        # The authoritative RID protocol turns receiver abort into a
+        # TP-consistent failure decision and normal queue removal. Resolve no
+        # stale pending request before this collective.
+        _, failed = self.pop_preallocated(rids_to_check=rids)
+        return [decode_req.req for decode_req in failed]
 
     def pop_preallocated(
         self, rids_to_check: Optional[List[str]] = None
@@ -725,6 +814,7 @@ class DecodePreallocQueue:
             )
             preallocated_reqs.append(decode_req)
             indices_to_remove.add(i)
+            decode_req.transfer_started_at = time.monotonic()
             decode_req.req.time_stats.set_decode_transfer_queue_entry_time()
 
         self.queue = [
@@ -845,6 +935,7 @@ class DecodeTransferQueue:
         self.gloo_group = gloo_group
         self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
         self.tp_rank = tp_rank
+        self.tp_size = int(getattr(scheduler, "tp_size", 1))
         self.metadata_buffers = metadata_buffers
         self.scheduler = scheduler
         self.tree_cache = tree_cache
@@ -942,18 +1033,134 @@ class DecodeTransferQueue:
         decode_req.req.time_stats.set_wait_queue_entry_time()
         return True
 
+    @staticmethod
+    def _async_state(obj) -> str:
+        """Best-effort diagnostics for backend future/task implementations."""
+        if obj is None:
+            return "none"
+        states = []
+        for name in ("done", "cancelled"):
+            value = getattr(obj, name, None)
+            if value is not None:
+                try:
+                    value = value() if callable(value) else value
+                except Exception as exc:
+                    value = f"error:{exc!r}"
+                states.append(f"{name}={value}")
+        exception = getattr(obj, "exception", None)
+        if exception is not None:
+            try:
+                done = getattr(obj, "done", lambda: True)()
+                value = exception() if callable(exception) and done else None
+            except Exception as exc:
+                value = f"error:{exc!r}"
+            states.append(f"error={value!r}")
+        return ",".join(states) or type(obj).__name__
+
+    def describe(self, now: Optional[float] = None) -> List[str]:
+        """Describe every transfer retained by the scheduler."""
+        now = time.monotonic() if now is None else now
+        descriptions = []
+        for decode_req in self.queue:
+            receiver = decode_req.kv_receiver
+            started = decode_req.transfer_started_at
+            age = max(0.0, now - started) if started else -1.0
+            async_parts = []
+            for owner_name, owner in (
+                ("receiver", receiver),
+                ("manager", getattr(receiver, "kv_mgr", None)),
+            ):
+                if owner is None:
+                    continue
+                for attr in (
+                    "task",
+                    "future",
+                    "_task",
+                    "_future",
+                    "transfer_task",
+                    "transfer_future",
+                ):
+                    value = getattr(owner, attr, None)
+                    if value is not None:
+                        async_parts.append(
+                            f"{owner_name}.{attr}({self._async_state(value)})"
+                        )
+            descriptions.append(
+                f"rid={decode_req.req.rid} "
+                f"bootstrap_room={decode_req.req.bootstrap_room} "
+                f"receiver={type(receiver).__name__ if receiver is not None else 'none'} "
+                f"receiver_state={getattr(receiver, 'conclude_state', None)} "
+                f"age={age:.3f}s async={';'.join(async_parts) or 'none'}"
+            )
+        return descriptions
+
+    def snapshot(self) -> Dict[str, object]:
+        rids = [str(entry.req.rid) for entry in self.queue]
+        return {
+            "len": len(self.queue),
+            "rid_hash": hashlib.sha256("\0".join(rids).encode()).hexdigest()[:16],
+            "rids": rids,
+            "types": [type(entry).__name__ for entry in self.queue],
+        }
+
+    def abort_and_reap(self, rids: List[str], reason: str) -> List[Req]:
+        """Abort selected transfers and reap them through normal cleanup."""
+        rid_set = set(rids)
+        for decode_req in self.queue:
+            if decode_req.req.rid in rid_set and decode_req.kv_receiver is not None:
+                logger.warning(
+                    "Aborting decode transfer during AFD quiesce: rid=%s "
+                    "bootstrap_room=%s reason=%s",
+                    decode_req.req.rid,
+                    decode_req.req.bootstrap_room,
+                    reason,
+                )
+                decode_req.kv_receiver.abort()
+        # pop_transferred performs the existing TP all-reduce. A failure observed
+        # or injected on any rank is therefore reaped on every active TP rank.
+        return self.pop_transferred(rids_to_check=rids)
+
     def pop_transferred(self, rids_to_check: Optional[List[str]] = None) -> List[Req]:
-        if not self.queue:
-            return []
-        polls = poll_and_all_reduce(
-            [decode_req.kv_receiver for decode_req in self.queue], self.gloo_group
+        from sglang.srt.utils.common import broadcast_pyobj
+
+        requested = set(rids_to_check) if rids_to_check is not None else None
+        local_rids = [
+            decode_req.req.rid
+            for decode_req in self.queue
+            if requested is None or decode_req.req.rid in requested
+        ]
+        tp_size = int(getattr(self, "tp_size", 1))
+        authoritative = (
+            local_rids
+            if tp_size == 1
+            else broadcast_pyobj(
+                [local_rids] if self.tp_rank == 0 else None,
+                self.tp_rank,
+                self.gloo_group,
+                src=0,
+            )[0]
         )
+        local = {decode_req.req.rid: decode_req.kv_receiver for decode_req in self.queue}
+
+        class _MissingPoller:
+            @staticmethod
+            def poll():
+                return KVPoll.Failed
+
+        pollers = [local.get(rid, _MissingPoller()) for rid in authoritative]
+        polls = (
+            [int(poller.poll()) for poller in pollers]
+            if tp_size == 1
+            else poll_and_all_reduce(pollers, self.gloo_group)
+        )
+        poll_by_rid = dict(zip(authoritative, polls))
 
         transferred_reqs = []
         indices_to_remove = set()
-        for i, (decode_req, poll) in enumerate(zip(self.queue, polls)):
-            if rids_to_check is not None and decode_req.req.rid not in rids_to_check:
+        for i, decode_req in enumerate(self.queue):
+            if decode_req.req.rid not in poll_by_rid:
                 continue
+            poll = poll_by_rid[decode_req.req.rid]
             if poll == KVPoll.Failed:
                 error_message = f"Decode transfer failed for request rank={self.tp_rank} {decode_req.req.rid=} {decode_req.req.bootstrap_room=}"
                 try:
@@ -1057,18 +1264,22 @@ class SchedulerDisaggregationDecodeMixin:
         # Both sides must init together: FFN listens, Attn connects.
         # NOTE: interleaved schedule (--afd-async-schedule) uses the same
         # single shared channel — no per-mb channels needed.
-        from sglang.srt.layers.afd import get_async_communicator
-        try:
-            get_async_communicator()
-            logger.info(
-                "event_loop_afd_disagg_decode: UCX communicator ready (async=%s)",
-                getattr(self.server_args, "afd_async_schedule", False),
-            )
-        except Exception as e:
-            logger.error("event_loop_afd_disagg_decode: AF communicator init failed: %s", e)
-            raise RuntimeError(
-                f"AF communicator init failed — cannot run AFD disagg decode without it: {e}"
-            ) from e
+        if SchedulerAFDMixin.afd_component_should_eager_init_data_plane(self):
+            from sglang.srt.layers.afd import get_async_communicator
+            try:
+                get_async_communicator()
+                logger.info(
+                    "event_loop_afd_disagg_decode: UCX communicator ready (async=%s)",
+                    getattr(self.server_args, "afd_async_schedule", False),
+                )
+            except Exception as e:
+                logger.error("event_loop_afd_disagg_decode: AF communicator init failed: %s", e)
+                raise RuntimeError(
+                    f"AF communicator init failed — cannot run AFD disagg decode without it: {e}"
+                ) from e
+        else:
+            logger.info("event_loop_afd_disagg_decode: deferring joining communicator init "
+                        "to post-activate readiness")
 
         _interleave_poll = getattr(
             self.server_args, "afd_disagg_interleave_poll", False
@@ -1077,6 +1288,18 @@ class SchedulerDisaggregationDecodeMixin:
             logger.info("event_loop_afd_disagg_decode: interleave poll enabled")
 
         while True:
+            SchedulerAFDMixin.afd_component_begin_active_iteration(self)
+            if SchedulerAFDMixin.afd_component_should_leave_active_loop(self):
+                return
+            if SchedulerAFDMixin.afd_component_should_restart_active_iteration(self):
+                continue
+            # Check control again immediately before entering a potentially
+            # blocking data-plane receive. All active ranks call this in order.
+            SchedulerAFDMixin.afd_component_post_receive_control_checkpoint(
+                self
+            )
+            if SchedulerAFDMixin.afd_component_should_restart_active_iteration(self):
+                continue
             recv_reqs = self.recv_requests()
             extra_reqs = SchedulerAFDMixin.afd_recv_messages(self)
             if extra_reqs:
@@ -1090,26 +1313,39 @@ class SchedulerDisaggregationDecodeMixin:
                     self.tp_cpu_group,
                     src=self.tp_group.ranks[0],
                 )
+            SchedulerAFDMixin.afd_component_post_receive_control_checkpoint(
+                self
+            )
+            # ACTIVATE may be consumed by the post-receive checkpoint,
+            # after the loop-top restart guard has already run. Old surviving
+            # ranks must skip this data-plane round and meet joining ranks at
+            # the next post-activation readiness preamble.
+            if SchedulerAFDMixin.afd_component_should_restart_active_iteration(self):
+                continue
+            recv_reqs = SchedulerAFDMixin.afd_gate_work_requests(self, recv_reqs)
             SchedulerAFDMixin.afd_forward_work_requests(self, recv_reqs)
 
-            # Filter out AFDReqInput before passing to process_input_requests
-            from sglang.srt.managers.io_struct import AFDReqInput as _AFDReqInput
-            for req in recv_reqs:
-                if isinstance(req, _AFDReqInput):
-                    pending = getattr(self, "_afd_pending_batch_infos", None)
-                    if pending is not None:
-                        pending.append(req)
-                    if self._afd_batchsize_attn is None:
-                        self._afd_batchsize_attn = req.batch_size
-                        self._afd_forward_mode = req.forward_mode
-                        self._afd_req_ids = req.req_ids
-                        if req.output_ids_per_req and req.req_ids:
-                            self._afd_sync_output_ids(req)
-            filtered_reqs = [r for r in recv_reqs if not isinstance(r, _AFDReqInput)]
-            self.process_input_requests(filtered_reqs)
+            # Share the prefill metadata path: queue every AFDReqInput, consume
+            # exactly one dispatch per loop, and construct missing FFN requests
+            # from that dispatch after ordinary input processing.  In particular,
+            # do not latch the last metadata object from a multi-message drain.
+            self._afd_process_input_requests(
+                recv_reqs, work_already_forwarded=True
+            )
+            # Progress PD queues after metadata-created FFN requests have entered
+            # the scheduler, matching the normal decode loop ordering.
             self.process_decode_queue()
+            # AbortReq is processed above and normal completion is polled by
+            # process_decode_queue(). During a reshard fence, also diagnose and
+            # bound transfers whose backend never publishes completion.
+            SchedulerAFDMixin.afd_component_progress_decode_transfers(self)
 
             if SchedulerAFDMixin.afd_ffn_should_wait(self):
+                # A fenced component reshard means no further AFDReqInput will
+                # arrive; reset the FFN batch ledger to idle so the quiesce/drain
+                # AFD-quiescent check can observe idle instead of spinning until
+                # the reshard timeout. See _afd_ffn_reset_idle_ledger.
+                self._afd_ffn_reset_idle_ledger()
                 continue
 
             batch = self.get_next_disagg_decode_batch_to_run()

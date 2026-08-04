@@ -99,6 +99,7 @@ class AFDVFSController:
         idle_lock_enabled: bool = False,
         idle_lock_freq: int = 210,
         decode_compositional: bool = False,
+        prefill_slack_factor: float = 1.0,
     ):
         self.predictor = predictor
         self.num_layers = num_layers
@@ -116,6 +117,9 @@ class AFDVFSController:
         self._baseline_f_f = baseline_f_f or F_MAX
         self._moe_freq_floor = moe_freq_floor
         self._headroom_aggressive_threshold = headroom_aggressive_threshold
+        # Conservative prefill DVFS margin: usable slack is scaled by this
+        # factor (<1.0 = leave safety headroom, pick higher freqs).
+        self._prefill_slack_factor = max(0.05, min(float(prefill_slack_factor), 1.0))
 
         # Compositional mode latency cache: {(bs, il, ol): {(f_a, f_f): layer_lat_us}}
         self._comp_lat_cache: dict = {}
@@ -142,6 +146,17 @@ class AFDVFSController:
         init_calib = 1.0
         self._calibration_factor = init_calib  # multiplier for M>1 (pipelined)
         self._calibration_factor_serial = init_calib  # multiplier for M=1 (serial)
+        # Separate calibration factor for PREFILL batch latency. The layer
+        # model systematically overestimates full-batch prefill latency
+        # (observed obs/pred ratios ~0.2-0.4 on Qwen3-32B TP4). Start from a
+        # conservative-ish 0.4 so cold-start batch caps aren't absurdly small,
+        # then converge toward the true ratio via EMA. This is always learned
+        # when prefill observations arrive (independent of decode calibration).
+        self._prefill_calib_factor = 0.4
+
+        # Cross-batch cache for prefill predictor lookups (lat/energy per op×freq).
+        self._prefill_predict_cache: dict[tuple, float] = {}
+        self._prefill_predict_cache_limit = 4096
 
         self._precompute_freq_pairs()
 
@@ -150,6 +165,107 @@ class AFDVFSController:
         self._freq_pairs = [
             (fa, ff) for fa in self.freqs for ff in self.freqs
         ]
+
+    def _prefill_cache_get(self, key: tuple) -> Optional[float]:
+        return self._prefill_predict_cache.get(key)
+
+    def _prefill_cache_put(self, key: tuple, value: float) -> float:
+        cache = self._prefill_predict_cache
+        if len(cache) >= self._prefill_predict_cache_limit:
+            # Simple bounded cache: drop oldest half when full.
+            for k in list(cache.keys())[: len(cache) // 2]:
+                cache.pop(k, None)
+        cache[key] = value
+        return value
+
+    def _cached_op_latency(
+        self, phase: str, op: str, tp: int, freq: int,
+        bs: int, il: int, ol: Optional[int], local: dict,
+    ) -> float:
+        key = (phase, "lat", op, tp, freq, bs, il, ol)
+        if key in local:
+            return local[key]
+        hit = self._prefill_cache_get(key)
+        if hit is not None:
+            local[key] = hit
+            return hit
+        val = self.predictor.predict_latency(
+            phase, op, tp, freq, bs, il, ol).value
+        local[key] = val
+        self._prefill_cache_put(key, val)
+        return val
+
+    def _cached_op_energy(
+        self, phase: str, op: str, tp: int, freq: int,
+        bs: int, il: int, ol: Optional[int], local: dict,
+    ) -> float:
+        key = (phase, "energy", op, tp, freq, bs, il, ol)
+        if key in local:
+            return local[key]
+        hit = self._prefill_cache_get(key)
+        if hit is not None:
+            local[key] = hit
+            return hit
+        val = self.predictor.predict_energy(
+            phase, op, tp, freq, bs, il, ol).value
+        local[key] = val
+        self._prefill_cache_put(key, val)
+        return val
+
+    def _prefill_layer_latency_cached(
+        self, f_a: int, f_f: int, bs: int, il: int,
+        ol: Optional[int], M: int, local: dict,
+    ) -> float:
+        lat_a = self._cached_op_latency(
+            "prefill", "A", self.tp_a, f_a, bs, il, ol, local)
+        lat_f = self._cached_op_latency(
+            "prefill", "F", self.tp_f, f_f, bs, il, ol, local)
+        if M > 1:
+            return max(lat_a, lat_f) + self.t_comm_us / M
+        return lat_a + lat_f + self.t_comm_us
+
+    def _prefill_layer_energy_detail_cached(
+        self, f_a: int, f_f: int, bs: int, il: int,
+        ol: Optional[int], M: int, local: dict,
+    ) -> tuple[float, float, float]:
+        lat_a = self._cached_op_latency(
+            "prefill", "A", self.tp_a, f_a, bs, il, ol, local)
+        lat_f = self._cached_op_latency(
+            "prefill", "F", self.tp_f, f_f, bs, il, ol, local)
+        e_a = self._cached_op_energy(
+            "prefill", "A", self.tp_a, f_a, bs, il, ol, local)
+        e_f = self._cached_op_energy(
+            "prefill", "F", self.tp_f, f_f, bs, il, ol, local)
+        e_compute = e_a + e_f
+        e_bubble = 0.0
+        if self._include_idle_energy:
+            e_bubble = layer_bubble_energy_mj(
+                lat_a, lat_f, f_a, f_f, self.tp_a, self.tp_f, M)
+        return e_compute + e_bubble, e_compute, e_bubble
+
+    def _prefill_fallback_decision(
+        self, bs: int, il: int, remaining_layers: int, M: int,
+        inter_arrival_us: float, local: dict,
+    ) -> DVFSDecision:
+        self._stats_fallback += 1
+        logger.warning("Prefill DVFS: no feasible combo, fallback to max freq")
+        t_layer = self._prefill_layer_latency_cached(
+            F_MAX, F_MAX, bs, il, None, M, local)
+        _, e_compute_layer, e_bubble_layer = self._prefill_layer_energy_detail_cached(
+            F_MAX, F_MAX, bs, il, None, M, local)
+        total_lat = t_layer * remaining_layers
+        e_compute = e_compute_layer * remaining_layers
+        e_bubble = e_bubble_layer * remaining_layers
+        e_idle = self._scheduler_idle_energy(
+            total_lat, inter_arrival_us, F_MAX, F_MAX)
+        return DVFSDecision(
+            f_a=F_MAX, f_f=F_MAX,
+            energy_mj=e_compute + e_bubble + e_idle,
+            latency_us=total_lat,
+            energy_compute_mj=e_compute,
+            energy_bubble_mj=e_bubble,
+            energy_idle_mj=e_idle,
+        )
 
     def _next_freq_up(self, current_freq: int) -> int:
         """Return the next higher frequency, or F_MAX if already at max."""
@@ -203,6 +319,48 @@ class AFDVFSController:
         if M > 1:
             return self._calibration_factor
         return self._calibration_factor_serial
+
+    def update_prefill_calibration(
+        self, observed_lat_us: float, predicted_lat_us: float,
+    ):
+        """Learn prefill latency bias from observed vs predicted full-batch time.
+
+        The layer model systematically overestimates prefill latency (observed
+        ratios ~0.2-0.4). This EMA-tracked factor rescales predictions for both
+        SLO-aware batch capping and freq selection so decisions match reality.
+        Always active (independent of decode online-calibration flag).
+        """
+        if predicted_lat_us <= 0 or observed_lat_us <= 0:
+            return
+        ratio = observed_lat_us / predicted_lat_us
+        ratio = max(0.1, min(ratio, 10.0))
+        alpha = max(self._calibration_ema, 0.2)
+        self._prefill_calib_factor = (
+            (1.0 - alpha) * self._prefill_calib_factor + alpha * ratio
+        )
+
+    def predict_prefill_latency(
+        self, bs: int, il: int, f_a: int, f_f: int, M: int = 1,
+        remaining_layers: Optional[int] = None, calibrated: bool = True,
+    ) -> float:
+        """Predict full-batch prefill latency (us) at given freq pair.
+
+        When calibrated=True, applies the learned prefill calibration factor so
+        the estimate tracks observed processing time rather than the raw (and
+        typically inflated) layer-model prediction.
+        """
+        if remaining_layers is None:
+            remaining_layers = self.num_layers
+        local: dict[tuple, float] = {}
+        try:
+            t_layer = self._prefill_layer_latency_cached(
+                f_a, f_f, bs, il, None, M, local)
+        except (RuntimeError, ValueError):
+            return float("inf")
+        lat = t_layer * remaining_layers
+        if calibrated:
+            lat *= self._prefill_calib_factor
+        return lat
 
     def _layer_latency(self, phase: str, f_a: int, f_f: int,
                        bs: int, il: int, ol: Optional[int], M: int) -> float:
@@ -299,11 +457,30 @@ class AFDVFSController:
         if remaining_layers is None:
             remaining_layers = self.num_layers
 
+        # Conservative margin: only allow the batch to consume a fraction of the
+        # real slack, so freq selection keeps headroom against prefill SLO
+        # violations (model prediction error, batch-length skew, etc.).
+        slack_us = slack_us * self._prefill_slack_factor
+
+        local: dict[tuple, float] = {}
         best: Optional[DVFSDecision] = None
+
+        # Early exit: if even max freq cannot meet slack, skip 36-pair search.
+        try:
+            t_layer_max = self._prefill_layer_latency_cached(
+                F_MAX, F_MAX, bs, il, None, M, local)
+            total_lat_max = t_layer_max * remaining_layers
+        except (RuntimeError, ValueError):
+            total_lat_max = float("inf")
+
+        if total_lat_max > slack_us:
+            return self._prefill_fallback_decision(
+                bs, il, remaining_layers, M, inter_arrival_us, local)
 
         for f_a, f_f in self._freq_pairs:
             try:
-                t_layer = self._layer_latency("prefill", f_a, f_f, bs, il, None, M)
+                t_layer = self._prefill_layer_latency_cached(
+                    f_a, f_f, bs, il, None, M, local)
             except (RuntimeError, ValueError):
                 continue
 
@@ -312,8 +489,9 @@ class AFDVFSController:
                 continue
 
             try:
-                e_layer, e_compute_layer, e_bubble_layer = self._layer_energy_detail(
-                    "prefill", f_a, f_f, bs, il, None, M)
+                e_layer, e_compute_layer, e_bubble_layer = (
+                    self._prefill_layer_energy_detail_cached(
+                        f_a, f_f, bs, il, None, M, local))
             except (RuntimeError, ValueError):
                 continue
 
@@ -331,23 +509,8 @@ class AFDVFSController:
                 )
 
         if best is None:
-            self._stats_fallback += 1
-            logger.warning("Prefill DVFS: no feasible combo, fallback to max freq")
-            t_layer = self._layer_latency("prefill", F_MAX, F_MAX, bs, il, None, M)
-            e_layer, e_compute_layer, e_bubble_layer = self._layer_energy_detail(
-                "prefill", F_MAX, F_MAX, bs, il, None, M)
-            total_lat = t_layer * remaining_layers
-            e_compute = e_compute_layer * remaining_layers
-            e_bubble = e_bubble_layer * remaining_layers
-            e_idle = self._scheduler_idle_energy(total_lat, inter_arrival_us, F_MAX, F_MAX)
-            best = DVFSDecision(
-                f_a=F_MAX, f_f=F_MAX,
-                energy_mj=e_compute + e_bubble + e_idle,
-                latency_us=total_lat,
-                energy_compute_mj=e_compute,
-                energy_bubble_mj=e_bubble,
-                energy_idle_mj=e_idle,
-            )
+            return self._prefill_fallback_decision(
+                bs, il, remaining_layers, M, inter_arrival_us, local)
 
         logger.debug(
             "Prefill DVFS: bs=%d il=%d → f_a=%d f_f=%d "
@@ -497,10 +660,6 @@ class AFDVFSController:
         # Sort candidates by energy (ascending) for early exit
         candidates = []
         freq_floor_v1 = self._moe_freq_floor
-        # In compositional mode, enforce a minimum frequency to limit TPOT increase.
-        # V1 models underestimate the scheduler overhead at very low frequencies.
-        if self._decode_compositional and freq_floor_v1 < 1050:
-            freq_floor_v1 = 1050
         for f_a, f_f in self._freq_pairs:
             if freq_floor_v1 > 0 and (f_a < freq_floor_v1 or f_f < freq_floor_v1):
                 continue

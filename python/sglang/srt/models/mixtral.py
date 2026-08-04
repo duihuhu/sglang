@@ -163,6 +163,7 @@ class MixtralAttention(nn.Module):
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
+            reduce_results=False,
             quant_config=quant_config,
             prefix=add_prefix("o_proj", prefix),
         )

@@ -293,7 +293,10 @@ class TpModelWorker(BaseTpWorker):
         self.is_inplace_standby_rank = bool(
             getattr(self.model_runner, "is_inplace_standby_rank", False)
         )
-        if self.is_inplace_standby_rank:
+        self.is_afd_component_standby_rank = bool(
+            getattr(self.model_runner, "is_afd_component_standby_rank", False)
+        )
+        if self.is_inplace_standby_rank or self.is_afd_component_standby_rank:
             self.max_total_num_tokens = 1
             self.max_prefill_tokens = 1
             self.max_running_requests = 1
@@ -427,6 +430,7 @@ class TpModelWorker(BaseTpWorker):
     def finalize_inplace_reshard_activation(self):
         """Recompute worker limits after a standby rank is activated into TP."""
         self.is_inplace_standby_rank = False
+        self.is_afd_component_standby_rank = False
         self.max_total_num_tokens = self.model_runner.max_total_num_tokens
         self.max_prefill_tokens = self.server_args.max_prefill_tokens
         self.max_running_requests = self.model_runner.max_running_requests
@@ -438,7 +442,9 @@ class TpModelWorker(BaseTpWorker):
         self.enable_overlap = not self.server_args.disable_overlap_schedule
 
     def get_worker_info(self):
-        if getattr(self, "is_inplace_standby_rank", False):
+        if getattr(self, "is_inplace_standby_rank", False) or getattr(
+            self, "is_afd_component_standby_rank", False
+        ):
             return (
                 self.max_total_num_tokens,
                 self.max_prefill_tokens,
@@ -453,6 +459,11 @@ class TpModelWorker(BaseTpWorker):
                 1,
                 1,
             )
+        token_pool_size = (
+            self.model_runner.token_to_kv_pool.size
+            if self.model_runner.token_to_kv_pool is not None
+            else self.model_runner.token_to_kv_pool_allocator.size
+        )
         return (
             self.max_total_num_tokens,
             self.max_prefill_tokens,
@@ -465,7 +476,7 @@ class TpModelWorker(BaseTpWorker):
             self.model_runner.forward_stream,
             self.model_runner.req_to_token_pool.size,
             self.model_runner.req_to_token_pool.max_context_len,
-            self.model_runner.token_to_kv_pool.size,
+            token_pool_size,
         )
 
     def is_dllm(self):

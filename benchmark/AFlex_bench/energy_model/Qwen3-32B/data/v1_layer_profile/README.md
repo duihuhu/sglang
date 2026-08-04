@@ -12,5 +12,14 @@
 拟合产出：Prefill/Decode 独立层模型（LUT + LinearReg + GBDT），特征为同构 TP、A/F 共用单一 `gpu_clock`。
 
 ```bash
-python energy_model_v1.py --data-dir data/v1_layer_profile --output-dir models_v1
+# From repo root
+bash benchmark/AFlex_bench/energy_model/Qwen3-32B/retrain_models_v1.sh
+
+# Or manually:
+python benchmark/test_motivation/energy_model.py \
+  --data-dir data/v1_layer_profile --output-dir models_v1
 ```
+
+Note: LUT must be trained on the full profile grid including `batch_size=256`.
+Older `models_v1` builds that omitted bs=256 caused Prefill energy GBDT fallback
+errors (MAPE >300%). Retrained LUT covers all 2418 prefill points exactly.

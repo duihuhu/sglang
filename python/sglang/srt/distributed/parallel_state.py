@@ -1802,7 +1802,15 @@ def initialize_model_parallel(
 
     inplace_max_tp = int(os.environ.get("SGLANG_INPLACE_RESHARD_MAX_TP", "0") or "0")
     inplace_active_tp = int(os.environ.get("SGLANG_INPLACE_RESHARD_ACTIVE_TP", "0") or "0")
+    afd_component_max_tp = int(os.environ.get("SGLANG_AFD_COMPONENT_MAX_TP", "0") or "0")
+    afd_component_active_tp = int(os.environ.get("SGLANG_AFD_COMPONENT_ACTIVE_TP", "0") or "0")
+    if inplace_max_tp and afd_component_max_tp:
+        raise RuntimeError("native and AFD component max-world modes are mutually exclusive")
     inplace_mode = inplace_max_tp > 0 and inplace_active_tp > 0
+    afd_component_mode = afd_component_max_tp > 0 and afd_component_active_tp > 0
+    if afd_component_mode:
+        inplace_max_tp, inplace_active_tp = afd_component_max_tp, afd_component_active_tp
+    inplace_mode = inplace_mode or afd_component_mode
     if not inplace_mode and world_size != tensor_model_parallel_size * pipeline_model_parallel_size:
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
@@ -1819,13 +1827,18 @@ def initialize_model_parallel(
     global _TP
     assert _TP is None, "tensor model parallel group is already initialized"
     group_ranks = []
-    if inplace_mode:
+    if afd_component_mode:
+        # All max-world ranks must execute the exact same new_group() sequence.
+        # Each coordinator retains the subgroup containing its own global rank.
+        group_ranks.append(list(range(inplace_active_tp)))
+        group_ranks.extend([[rank] for rank in range(inplace_active_tp, inplace_max_tp)])
+    elif inplace_mode:
         rank = torch.distributed.get_rank()
         if rank < inplace_active_tp:
             group_ranks.append(list(range(inplace_active_tp)))
         else:
-            # Standby ranks need valid group objects during initialization but
-            # must not participate in the active serving TP collectives yet.
+            # Preserve the native in-place initialization behavior. Component
+            # mode uses the collective subgroup definition above.
             group_ranks.append([rank])
     else:
         for tp_group_idx in range(num_tensor_model_parallel_groups):
@@ -1876,7 +1889,22 @@ def initialize_model_parallel(
     assert (
         _ATTN_CP is None
     ), "attention context model parallel group is already initialized"
-    if attn_cp_size == tensor_model_parallel_size:
+    if afd_component_mode and inplace_max_tp > inplace_active_tp:
+        # CP is independent from TP. In the common attn_cp_size=1 case every
+        # max-world rank needs a singleton CP coordinator, including active
+        # ranks and standby ranks. All processes create all groups in rank order.
+        if attn_cp_size != 1:
+            raise RuntimeError(
+                "AFD component max-world currently requires attention CP size 1"
+            )
+        group_ranks = [[rank] for rank in range(inplace_max_tp)]
+        _ATTN_CP = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="attn_cp",
+        )
+    elif attn_cp_size == tensor_model_parallel_size:
         _ATTN_CP = _TP
     else:
         group_ranks = []
@@ -1908,7 +1936,9 @@ def initialize_model_parallel(
     assert (
         _ATTN_TP is None
     ), "attention tensor model parallel group is already initialized"
-    if attn_tp_size == tensor_model_parallel_size:
+    if attn_tp_size == tensor_model_parallel_size or (
+        afd_component_mode and inplace_max_tp > inplace_active_tp
+    ):
         _ATTN_TP = _TP
     else:
         group_ranks = []
@@ -1942,7 +1972,19 @@ def initialize_model_parallel(
     global _MOE_DP
     assert _MOE_DP is None, "moe data parallel group is already initialized"
     # gpus_per_pp_stage = tensor_model_parallel_size * attention_context_model_parallel_size
-    if moe_dp_size == tensor_model_parallel_size:
+    if afd_component_mode and inplace_max_tp > inplace_active_tp:
+        if moe_dp_size != 1:
+            raise RuntimeError(
+                "AFD component max-world currently requires MoE DP size 1"
+            )
+        group_ranks = [[rank] for rank in range(inplace_max_tp)]
+        _MOE_DP = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="moe_dp",
+        )
+    elif moe_dp_size == tensor_model_parallel_size:
         _MOE_DP = _TP
     else:
         group_ranks = []
@@ -1963,7 +2005,19 @@ def initialize_model_parallel(
 
     global _MOE_EP
     assert _MOE_EP is None, "expert model parallel group is already initialized"
-    if moe_ep_size == tensor_model_parallel_size:
+    if afd_component_mode and inplace_max_tp > inplace_active_tp:
+        if moe_ep_size != 1:
+            raise RuntimeError(
+                "AFD component max-world currently requires MoE EP size 1"
+            )
+        group_ranks = [[rank] for rank in range(inplace_max_tp)]
+        _MOE_EP = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="moe_ep",
+        )
+    elif moe_ep_size == tensor_model_parallel_size:
         _MOE_EP = _TP
     else:
         # TODO(ch-wan): use split_group to save memory
@@ -1990,6 +2044,10 @@ def initialize_model_parallel(
     assert _MOE_TP is None, "expert model parallel group is already initialized"
     if moe_tp_size == tensor_model_parallel_size:
         _MOE_TP = _TP
+    elif afd_component_mode and inplace_max_tp > inplace_active_tp:
+        raise RuntimeError(
+            "AFD component max-world requires MoE TP to match active TP"
+        )
     else:
         # TODO(ch-wan): use split_group to save memory
         group_ranks = []
@@ -2232,6 +2290,50 @@ def get_moe_tensor_parallel_rank():
     return get_moe_tp_group().rank_in_group
 
 
+def rebuild_afd_component_parallel_state(
+    command,
+    *,
+    attention_data_parallel_size: int = 1,
+    pipeline_model_parallel_size: int = 1,
+    expert_model_parallel_size: int = 1,
+    attention_context_model_parallel_size: int = 1,
+    moe_data_model_parallel_size: int = 1,
+    duplicate_tp_group: bool = False,
+    backend: Optional[str] = None,
+) -> None:
+    """Rebuild component groups behind an AFD-specific command identity.
+
+    The low-level group construction is shared with the proven active-prefix
+    implementation, but callers cannot invoke it with native standby commands.
+    All max-world ranks must call this wrapper with the same command.
+    """
+    from sglang.srt.reshard.afd_component_standby import (
+        AFDComponentWorldAction,
+        AFDComponentWorldCommand,
+    )
+
+    parsed = (
+        command
+        if isinstance(command, AFDComponentWorldCommand)
+        else AFDComponentWorldCommand.parse(command)
+    )
+    if parsed.action not in (
+        AFDComponentWorldAction.ACTIVATE,
+        AFDComponentWorldAction.DEMOTE,
+    ):
+        raise ValueError("AFD component group rebuild requires activate or demote")
+    rebuild_inplace_reshard_parallel_state(
+        parsed.target_tp,
+        attention_data_parallel_size=attention_data_parallel_size,
+        pipeline_model_parallel_size=pipeline_model_parallel_size,
+        expert_model_parallel_size=expert_model_parallel_size,
+        attention_context_model_parallel_size=attention_context_model_parallel_size,
+        moe_data_model_parallel_size=moe_data_model_parallel_size,
+        duplicate_tp_group=duplicate_tp_group,
+        backend=backend,
+    )
+
+
 def rebuild_inplace_reshard_parallel_state(
     new_active_tp: int,
     attention_data_parallel_size: int = 1,
@@ -2252,13 +2354,22 @@ def rebuild_inplace_reshard_parallel_state(
 
     destroy_model_parallel()
     max_tp = int(os.environ.get("SGLANG_INPLACE_RESHARD_MAX_TP", "0") or "0")
+    component_max_tp = int(os.environ.get("SGLANG_AFD_COMPONENT_MAX_TP", "0") or "0")
+    if max_tp and component_max_tp:
+        raise RuntimeError("native and component reshard modes are mutually exclusive")
+    max_tp = max_tp or component_max_tp
     if max_tp <= 0:
-        raise RuntimeError("SGLANG_INPLACE_RESHARD_MAX_TP is not set")
+        raise RuntimeError("max-world reshard environment is not set")
     if new_active_tp > max_tp:
         raise RuntimeError(
             f"new_active_tp {new_active_tp} exceeds max_tp {max_tp}"
         )
-    os.environ["SGLANG_INPLACE_RESHARD_ACTIVE_TP"] = str(new_active_tp)
+    active_key = (
+        "SGLANG_AFD_COMPONENT_ACTIVE_TP"
+        if component_max_tp
+        else "SGLANG_INPLACE_RESHARD_ACTIVE_TP"
+    )
+    os.environ[active_key] = str(new_active_tp)
 
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()

@@ -1275,6 +1275,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     can_run_dp_cuda_graph: bool = False
     tbo_split_seq_index: Optional[int] = None
     afd_split_seq_index: Optional[List[int]] = None
+    afd_pf_group_ids: Optional[List[int]] = None
     global_forward_mode: Optional[ForwardMode] = None
 
     # For processing logprobs
@@ -2280,6 +2281,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             can_run_dp_cuda_graph=self.can_run_dp_cuda_graph,
             tbo_split_seq_index=self.tbo_split_seq_index,
             afd_split_seq_index=self.afd_split_seq_index,
+            afd_pf_group_ids=self.afd_pf_group_ids,
             global_forward_mode=self.global_forward_mode,
             extend_num_tokens=self.extend_num_tokens,
             extend_seq_lens=extend_seq_lens,
@@ -2447,6 +2449,7 @@ class ModelWorkerBatch:
     can_run_dp_cuda_graph: bool
     tbo_split_seq_index: Optional[int]
     afd_split_seq_index: Optional[List[int]]
+    afd_pf_group_ids: Optional[List[int]]
     global_forward_mode: Optional[ForwardMode]
 
     # For extend

@@ -1,229 +1,310 @@
-# Multi-Node 环境检查记录
+# 六方案部署配置总览
 
-检查时间：2026-07-01（从 node1 宿主机 `10.252.129.36` 发起）
-
-四节点概览：
-
-| 节点 | IP | 主机名 | 角色/备注 |
-|---|---|---|---|
-| node1 | 10.252.129.36 | d1n41a11g01 | 编排入口，Unison 同步源 |
-| node2 | 10.252.129.35 | d1n41a29g01 | Unison 同步目标，Decode 侧（16 卡基准） |
-| node3 | 10.252.129.34 | d1n41a16g02 | 新节点，共享机器，**未接入同步** |
-| node4 | 10.252.129.33 | d1n41a16g03 | 新节点，容器曾停止，**代码过期** |
+> 模型: Qwen3-32B | 硬件: 2×node (A100-80G ×8/node) | 总预算: 16 GPU
+> 节点: node3 (10.252.129.34) + node4 (10.252.129.33)
 
 ---
 
-## 1. 各节点状态摘要
+## 方案一览
 
-| 项 | node1 | node2 | node3 | node4 |
-|---|---|---|---|---|
-| 容器 `operator_test` | Up | Up | Up | Exited→已手动 start |
-| 容器镜像 | `cuda:12.2.0-devel` | `operator_test:latest` | `cuda:12.2.0-devel` | `operator_test:latest` |
-| 8× A800 | ✅ | ✅ | ✅（空闲） | ✅ |
-| `import sglang`（系统 python） | ✅ | ✅ | ✅ | ❌（仅 venv 可用） |
-| mooncake / pynvml | ✅ | ✅ | ✅ | venv 内 ✅ |
-| 容器内 docker | 无 | 无 | 无 | 无 |
-| 容器内 ssh | ✅ | ✅ | ❌ 未安装 | ✅（无密钥） |
-| Qwen3-32B | `/models/Qwen3-32B` | ✅ | ✅ | `/models/Qwen/Qwen3-32B` ⚠️ |
-| Mixtral-8x7B | ✅ | ✅ | ❌ | `/models/Mixtral/Mixtral-8x7B` |
-| Unison 同步 | 源 | 目标 | ❌ 未接入 | ❌ 未接入 |
-| git HEAD | `d6e3b5280` (v15) | `8ea5b10e5` (v14) | 无 `.git` | `8ea5b10e5` (v14) |
-| `multi_node/` 目录 | ✅ | ✅ | 过期快照 | ❌ 不存在 |
-| workspace 磁盘 | 2% | 1% | **97%** 🔴 | 1% |
-| dpser 目录 | 无 | 无 | **1.2T** | 无 |
+| # | 方案名 | 架构 | DVFS | GPU分配 | 论文对应 |
+|---|--------|------|------|---------|----------|
+| 1 | SGLang | Native DP (TP=1) | 无 (锁1410MHz) | 16×TP1 | 基线 |
+| 2 | DynamoLLM | Native DP (TP=1) | 有 (Unified) | 16×TP1 | DynamoLLM |
+| 3 | DistServe | PD 分离 | 无 (锁1410MHz) | 2P(TP4) + 4D(TP2) | DistServe |
+| 4 | BiScale | PD 分离 | 有 (BiScale policy) | 2P(TP4) + 4D(TP2) | BiScale |
+| 5 | MegaScale | AFD (TP_A+TP_F) | 无 (锁1410MHz) | Solver 决定, 用满16卡 | MegaScale |
+| 6 | AFlex | AFD (TP_A+TP_F) | 有 (Per-component) | Solver 决定, 按需分配 | AFlex (ours) |
 
 ---
 
-## 2. node1（10.252.129.36）
+## 1. SGLang（基线）
 
-### 正常项
-
-- 容器 host 网络，`/mnt/workspace/lt` → `/workspace`，`/mnt/data/models` → `/models`
-- 可免密 `ssh node2`；容器内可 `ssh node2`
-- 宿主机编排依赖齐全：`aiohttp numpy requests pynvml`
-- Unison 同步守护进程运行中（日志在 `/tmp/sync_sglang.log`）
-- 跨节点 RoCE：`mlx5_bond_0` / `bond0` Up
-
-### 问题
-
-- **根分区 `/dev/sda2` 92%→100% 满**（约剩 8.5G→0），可能导致本地写文件失败、Unison 存档失败
-  - `/root/.unison/unison.log` 约 195MB，可清理
-- git 比 node2 多 1 个 commit（`d6e3b5280` version15），`.git` 被 Unison 排除，node2 不会自动跟上
-
----
-
-## 3. node2（10.252.129.35）
-
-### 正常项
-
-- 容器、挂载、sglang/mooncake/GPU 均正常
-- Unison 目标端，node1 变更约 **2–5 秒**后可见
-- 可反向 SSH 到 node1
-- 当前有 Mixtral PDAF 实验进程在跑（`node_scalibility`）
-
-### 问题
-
-- 容器镜像标签与 node1 不同（`operator_test:latest` vs `cuda:12.2.0-devel`），功能上目前一致
-- git HEAD 落后 node1 一个 commit（Unison 不同步 `.git`）
-- 宿主机缺 `aiohttp`/`numpy`（编排只在 node1 跑则不影响；NVML 可用）
-- 曾出现 Unison `No space left on device`（保存 archive 失败），需关注
-
----
-
-## 4. node3（10.252.129.34）— 问题最多
-
-### 正常项
-
-- SSH 可达，容器 Up，8× GPU，bond0 Up
-- Qwen3-32B 模型存在
-- 系统 python 可 `import sglang` / mooncake
-
-### 磁盘布局（与 node1/node2 不同）
+**架构**: 16 个 TP=1 独立实例，round-robin 路由
 
 ```
-/dev/md0 (RAID10, 两块 3.5T NVMe) 挂载为三个入口：
-  /ssd           ← md0 根（可见全部数据）
-  /mnt/workspace ← md0[/mnt_workspace] 子目录挂载（只能看到 lt/）
-  /mnt/data      ← md0[/mnt_data] 子目录挂载（只能看到 models/）
+node3: GPU[0..7] → 8×TP1 实例 (port 53200, 53210, ..., 53270)
+node4: GPU[0..7] → 8×TP1 实例 (port 53280, 53290, ..., 53350)
+Router: round_robin, port 42000
 ```
 
-`du /mnt/workspace/lt` 只看到 **1.2T**，但 `df` 显示 **3.2T/3.5T（97%）**，因为其余空间在 `/ssd` 下：
-
-| 路径 | 大小 | 说明 |
-|---|---|---|
-| `/ssd/openpi/` | ~1.8T | 其他项目（机器人训练） |
-| `/mnt/workspace/lt/dpser/sglang_runs/` | ~1.2T | HiCache 多模型 benchmark 产物 |
-| `/ssd/Models/`、`LlamaFactory/` 等 | ~150G+ | 其他项目 |
-
-### dpser 为何在 `lt/` 下
-
-- **不是 mount**，是普通目录，**2026-06-29** 由他人实验创建
-- 实验脚本硬编码 `/mnt/workspace/lt/dpser/sglang_runs/...`，容器内对应 `/workspace/dpser/...`
-- 内容为 sglang HiCache file backend + multimodel elastic/static benchmark 日志与 cache
-- node1/node2 **没有** dpser；node3 是共享机器，多人共用
-
-### 其他问题
-
-- **未接入 Unison**：node1 写入后 node3 **不同步**（实测 SYNC_FAIL）
-- **无 `.git`**，sglang 代码停留在 **Jun 28** 左右
-- 容器内 **无 ssh**；node3 宿主机 **无法** SSH 到 node1/node2（publickey denied）
-- 无 Mixtral 模型
-- 容器内有 **60+ 僵尸 sglang 进程**（Jun 28 遗留），GPU 当前空闲，建议 `docker restart operator_test`
-- `/mnt/workspace/lt` 与 `/ssd/mnt_workspace/lt` 是**同一 inode**（同一份数据，非重复占用）
+**频率**: 所有 GPU 锁定 1410MHz
+**特点**: 无 PD 分离, 无 DVFS, 纯数据并行
 
 ---
 
-## 5. node4（10.252.129.33）
+## 2. DynamoLLM
 
-### 正常项
-
-- SSH 可达；node4 宿主机可 SSH 到 node1/node2
-- 磁盘充足：workspace 1%、data 8%，**无 dpser**
-- 磁盘布局与 node1/node2 类似（独立 nvme0/nvme1，非 RAID10）
-- bond0 Up，8× GPU
-- Qwen3-32B + Mixtral-8x7B 均存在
-
-### 问题
-
-- 容器 **`operator_test` 已 Exited(255) 5 天**（2026-06-26 停止），检查时已手动 `docker start`
-- **sglang 代码过期**（~Jun 19），git 在 `8ea5b10e5` (version14)，**缺少 `multi_node/`**（version15 才引入）
-- **系统 python 无 sglang/mooncake**；需用 venv：
-  ```bash
-  /workspace/env/sglang-test/bin/python -c "import sglang"
-  ```
-- **模型路径与 node1 不一致**：
-
-  | node1/node2 | node4 |
-  |---|---|
-  | `/models/Qwen3-32B` | `/models/Qwen/Qwen3-32B` |
-  | `/models/Mixtral-8x7B` | `/models/Mixtral/Mixtral-8x7B` |
-
-  benchmark 脚本写死路径会报错，需 symlink 或改参数。
-
-- 未接入 Unison；无 `sync_sglang.sh`
-- 容器内 ssh 无密钥，无法连 node1/node2
-- 宿主机缺 `aiohttp`/`numpy`
-
----
-
-## 6. 代码同步机制（Unison）
-
-配置文件：`/root/.unison/sglang.prf`（node1）
+**架构**: 与 SGLang 完全相同 (16×TP1, round-robin)
 
 ```
-root = /mnt/workspace/lt/sglang
-root = ssh://root@10.252.129.35//mnt/workspace/lt/sglang
+node3: GPU[0..7] → 8×TP1 实例
+node4: GPU[0..7] → 8×TP1 实例
+Router: round_robin, port 42000
 ```
 
-守护进程：`/mnt/workspace/lt/sync_sglang.sh`（inotify + 2s debounce + unison）
+**频率**: DVFS 动态调频 (Unified policy)
+- `--dvfs-enabled --dvfs-energy-model-dir <models_v1>`
+- `--dvfs-ttft-slo-ms 2000 --dvfs-tpot-slo-us 100000`
 
-- **仅 node1 → node2**，node3/node4 不在链路中
-- **排除 `.git`**，故 git HEAD 与 working tree 状态各节点可能分叉
-- 日志：**`/tmp/sync_sglang.log`**（不是 `/mnt/workspace/lt/sync_sglang.log`）
-
----
-
-## 7. 待办（纳入新节点前）
-
-### 紧急
-
-- [ ] **node1 根分区清理**（当前 100% 满，影响本地操作与 Unison）
-- [ ] **node3 磁盘**：确认 `/mnt/workspace/lt/dpser/sglang_runs`（1.2T）可否删除或迁走；`/ssd/openpi`（1.8T）属其他项目
-
-### node3 可用化
-
-- [ ] 将 node3 加入 Unison profile，或手动 rsync 一次完整 sglang
-- [ ] 补 `.git` 或定期从 node1 pull
-- [ ] 容器安装 `openssh-client`；配置 node3 宿主机 SSH 密钥
-- [ ] `docker restart operator_test` 清理僵尸进程
-- [ ] 如需 Mixtral：同步模型到 `/mnt/data/models/`
-
-### node4 可用化
-
-- [ ] `git pull` 到 version15+（含 `multi_node/`），或 rsync 最新 sglang
-- [ ] 统一 Python：容器内 `pip install -e python/.` 或脚本改用 venv python
-- [ ] 模型路径 symlink：
-  ```bash
-  ln -s /models/Qwen/Qwen3-32B /models/Qwen3-32B
-  ln -s /models/Mixtral/Mixtral-8x7B /models/Mixtral-8x7B
-  ```
-- [ ] 接入 Unison（可选）；确认容器 restart 后稳定运行
-- [ ] 容器内配置 SSH 密钥（若需容器内互访）
-
-### 长期
-
-- [ ] 统一四节点 Docker 镜像标签
-- [ ] 明确 node3 共享策略，避免他人实验写入 `lt/dpser`
-- [ ] 更新 `README.md` 环境变量：增加 `MN_NODE3_IP` / `MN_NODE4_IP`
+**特点**: 同 SGLang 架构 + 统一 DVFS 调频
 
 ---
 
-## 8. 快速自检命令
+## 3. DistServe
 
-在 node1 宿主机执行：
+**架构**: PD 分离, 2×Prefill(TP4) + 4×Decode(TP2) = 16 GPU
+
+```
+node3 (Prefill):
+  P0: GPU[0,1,2,3] TP=4, port 53100
+  P1: GPU[4,5,6,7] TP=4, port 53110
+
+node4 (Decode):
+  D0: GPU[0,1] TP=2, port 53150
+  D1: GPU[2,3] TP=2, port 53160
+  D2: GPU[4,5] TP=2, port 53170
+  D3: GPU[6,7] TP=2, port 53180
+
+Router: PD-disaggregation, port 42000
+  prefill → P0, P1
+  decode  → D0, D1, D2, D3
+Transfer: mooncake IPC
+```
+
+**频率**: 所有 GPU 锁定 1410MHz
+**特点**: 纯 PD 分离 (无 AFD), 无 DVFS
+
+---
+
+## 4. BiScale
+
+**架构**: 与 DistServe 完全相同 (2P(TP4) + 4D(TP2) = 16GPU)
+
+```
+(部署拓扑同 DistServe)
+```
+
+**频率**: DVFS 动态调频 (BiScale policy)
+- `--dvfs-enabled --dvfs-policy biscale`
+- `--dvfs-energy-model-dir <models_v1>`
+- `--dvfs-ttft-slo-ms 2000 --dvfs-tpot-slo-us 100000`
+
+**特点**: PD 分离 + BiScale 分频策略
+
+---
+
+## 5. MegaScale (新, Solver V2.4)
+
+**架构**: AFD 分离 (TP_A + TP_F), Tier1 Solver 求解最大吞吐配置
+
+**频率**: 所有 GPU 锁定 1410MHz, 不使用 DVFS
+**约束**: `used == G` (必须用满全部 16 GPU)
+
+### Conv 数据集配置
+
+| QPS | 部署 | GPU | 说明 |
+|-----|------|-----|------|
+| 2 | 1P(TP4+4) + 1D(TP4+4) | 16 | 1 组 Prefill, 1 组 Decode, 各占 8 卡 |
+| 4 | 2P(TP2+2) + 1D(TP4+4) | 16 | 2 组 Prefill 各 4 卡, Decode 8 卡 |
+| 8 | 4P(TP1+1) + 1D(TP4+4) | 16 | 4 组 Prefill 各 2 卡, Decode 8 卡 |
+| 16 | 6P(TP1+1) + 1D(TP2+2) | 16 | 6 组 Prefill 各 2 卡, Decode 4 卡 |
+
+### Code 数据集配置
+
+| QPS | 部署 | GPU | 说明 |
+|-----|------|-----|------|
+| 2 | 1P(TP4+4) + 1D(TP4+4) | 16 | 同 conv |
+| 4 | 2P(TP2+2) + 1D(TP4+4) | 16 | 同 conv |
+| 8 | 4P(TP1+1) + 1D(TP4+4) | 16 | 同 conv |
+| 16 | 6P(TP1+1) + 1D(TP2+2) | 16 | 同 conv |
+
+**部署方式**: AFD IPC (ipc_cpp backend), mooncake 跨节点传输, sub-router round-robin
+
+---
+
+## 6. AFlex (ours, Solver V2)
+
+**架构**: AFD 分离 (TP_A + TP_F), Tier1 Solver 求解最小能耗配置
+
+**频率**: Per-component DVFS (PA/PF/DA/DF 各自独立频率)
+- `--afd-dvfs-enabled --afd-dvfs-decode-compositional --afd-dvfs-idle-lock`
+
+### Conv 数据集配置 (il=1630, ol=42)
+
+| QPS | 部署 | GPU | PA freq | PF freq | DA freq | DF freq |
+|-----|------|-----|---------|---------|---------|---------|
+| 2 | 1P(TP2+1) + 1D(TP1+1) | 5 | 1170 | 1170 | 930 | 930 |
+| 4 | 2P(TP2+1) + 1D(TP1+1) | 8 | 1170 | 1170 | 930 | 930 |
+| 8 | 3P(TP2+2) + 1D(TP2+1) | 15 | 930 | 1170 | 930 | 930 |
+| 16 | 3P(TP1+2) + 1D(TP4+1) | 14 | 1410 | 1410 | 450 | 930 |
+
+### Code 数据集配置 (il=2040, ol=10)
+
+| QPS | 部署 | GPU | PA freq | PF freq | DA freq | DF freq |
+|-----|------|-----|---------|---------|---------|---------|
+| 2 | 1P(TP2+2) + 1D(TP1+1) | 6 | 1170 | 930 | 930 | 930 |
+| 4 | 2P(TP2+2) + 1D(TP1+1) | 10 | 1170 | 930 | 930 | 930 |
+| 8 | 3P(TP2+2) + 1D(TP1+1) | 14 | 1170 | 1410 | 930 | 930 |
+| 16 | 7P(TP1+1) + 1D(TP1+1) | 16 | 1410 | 1410 | 930 | 930 |
+
+**部署方式**: 同 MegaScale (AFD IPC + sub-router), 但频率按 Solver 输出逐 GPU 设置
+
+---
+
+## AFD 部署结构详解 (MegaScale / AFlex 共用)
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    Client Requests                        │
+│                         │                                │
+│              ┌──────────▼──────────┐                     │
+│              │  Sub-Router (RR)    │ × k_P 个            │
+│              │  每个 P pair 1 个    │                     │
+│              └────┬─────────┬─────┘                     │
+│                   │         │                            │
+│         ┌────────▼──┐  ┌──▼────────┐                   │
+│         │ Prefill   │  │  Decode    │                   │
+│         │ (PA + PF) │  │  (DA + DF) │                   │
+│         └───────────┘  └───────────┘                    │
+└──────────────────────────────────────────────────────────┘
+
+单个 AF Pair 内部:
+  ┌─────────────┐     IPC (cuda_ipc / ipc_event)     ┌─────────────┐
+  │   FFN (PF)  │ ◄──────────────────────────────────► │  Attn (PA)  │
+  │  TP = tp_F  │          hidden state 交换          │  TP = tp_A  │
+  │  GPU: [0..] │                                     │  GPU: [n..] │
+  └─────────────┘                                     └─────────────┘
+  CVD = ffn_gpus + attn_gpus (contiguous allocation)
+```
+
+**Sub-Router 分配策略**: 每个 P pair 分配一个 sub-router, sub-router 到 D instance 使用 round-robin:
+```
+sub_router[i] → decode_eps[i % k_d]
+```
+
+---
+
+## 公共参数
+
+| 参数 | 值 |
+|------|-----|
+| Model | `/models/Qwen3-32B/` |
+| mem-fraction-static | 0.85 |
+| disable-cuda-graph | ✓ |
+| disable-radix-cache | ✓ |
+| skip-server-warmup | ✓ |
+| watchdog-timeout | 600s |
+| max-running-requests | 512 |
+| TTFT SLO | 5000ms (AFlex/MegaScale) / 2000ms (其他4方案) |
+| TPOT SLO | 300ms (AFlex/MegaScale) / 100ms (其他4方案) |
+
+---
+
+## 数据集 (Azure LLM Inference Trace)
+
+| 数据集 | 输入长度 (il) | 输出长度 (ol) | 特征 |
+|--------|---------------|---------------|------|
+| conv (conversation) | ~1630 tokens | ~42 tokens | 长上下文, 短输出 (对话) |
+| code | ~2040 tokens | ~10 tokens | 超长上下文, 极短输出 (代码补全) |
+
+每个 QPS 对应一个 workload 文件: `macro_{dataset}_qps{N}.jsonl` (200 requests each)
+
+---
+
+## 测试脚本索引
+
+### 核心基础设施
+
+| 文件 | 作用 |
+|------|------|
+| `node_scalibility_macro/run_macro_benchmark.py` | **公共工具库**: cleanup_all, dexec_local/remote, wait_health, lock/unlock_freq, run_workload, test_generate, energy 读取等 |
+| `more_trying/other_tier1/bench_tier1_v2.py` | **AFD 部署引擎**: plan_allocation, deploy (异构 TP), _run_workload_rr (client-side round-robin) |
+| `more_trying/run_fixed_6scheme_7dataset.py` | 6 方案 × 7 数据集的原始一体化测试 (已弃用, 但 _workload_file 等工具函数仍被引用) |
+
+### 按方案分类的测试脚本
+
+#### AFlex + MegaScale (AFD 架构)
+
+| 脚本 | 数据集 | QPS | 说明 |
+|------|--------|-----|------|
+| `more_test/bench_conv_all_qps.py` | conv | 2,4,6,8,12,16 | AFlex(DVFS) + MegaScale(旧拓扑同AFlex, 锁频) |
+| `more_test/bench_code_all_qps.py` | code | 2,4,6,8,12,16 | 同上, code 数据集 |
+| `more_test/run_megascale_16g_sweep.py` | conv+code | 2,4,8,16 | **新版 MegaScale**: Solver 全卡全频 (solve_max_throughput, used==16) |
+| `more_test/bench_conv_v24.py` | conv | 8,12,16 | V2.4 solver 配置验证 (修正参数后) |
+| `other_tier1/bench_tier1_all_qps.py` | code | 2,4,6,8,12,16 | AFlex Tier1 最优配置全 QPS sweep |
+| `other_tier1/bench_megascale_all_qps.py` | code | 2,4,6,8,12,16 | MegaScale (旧: 同 AFlex 拓扑但锁频) |
+| `other_tier1/bench_tier1_v2.py` | code | 16 | 单 QPS 快速迭代测试 (开发调试用) |
+| `other_tier1/bench_tier1_configs.py` | - | - | 手动定义的探索性配置 |
+| `other_tier1/bench_tier1_kp1.py` | - | - | k_P=1 限制下的配置验证 |
+
+#### SGLang + DynamoLLM (Native DP)
+
+| 脚本 | 数据集 | QPS | 说明 |
+|------|--------|-----|------|
+| `more_test/run_sglang_dynamo_conv_sweep.py` | conv | 2,4,8,16 | SGLang + DynamoLLM, 16×TP1, 每 QPS 重启 |
+| `more_test/run_code_4schemes_sweep.py` | code | 2,4,8,16 | 4 方案合一 (SGLang/DynamoLLM/DistServe/BiScale) |
+
+#### DistServe + BiScale (PD 分离)
+
+| 脚本 | 数据集 | QPS | 说明 |
+|------|--------|-----|------|
+| `more_test/run_ds_bs_conv_sweep.py` | conv | 2,4,8,16 | DistServe + BiScale, 2P(TP4)+4D(TP2), 每 QPS 重启 |
+| `more_test/run_distserve_custom.py` | conv | 16 | DistServe 自定义配置 (3D vs 4D 对比) |
+| `more_test/run_code_4schemes_sweep.py` | code | 2,4,8,16 | (同上, 含 DistServe/BiScale) |
+| `other_tier1/run_biscale_distserve_perqps.py` | - | - | BiScale/DistServe 逐 QPS 测试 (旧版) |
+
+---
+
+### 测试执行方式
 
 ```bash
-# 同步守护
-pgrep -af sync_sglang && tail -3 /tmp/sync_sglang.log
+# 1. AFlex + MegaScale (新版, 全卡全频)
+cd more_test/
+python3 run_megascale_16g_sweep.py --dataset both --qps-list 2,4,8,16
 
-# 四节点 SSH
-for ip in 36 35 34 33; do echo -n "10.252.129.$ip: "; ssh -o BatchMode=yes 10.252.129.$ip hostname; done
+# 2. AFlex + MegaScale (旧版, 同拓扑)
+python3 bench_conv_all_qps.py --mode both --qps-list 2,4,8,16
+python3 bench_code_all_qps.py --mode both --qps-list 2,4,8,16
 
-# 容器健康
-for ip in 36 35 34 33; do
-  echo "=== $ip ==="
-  ssh 10.252.129.$ip 'docker ps --filter name=operator_test --format "{{.Status}}"; docker exec operator_test python3 -c "import sglang; print(sglang.__file__)" 2>&1'
-done
+# 3. SGLang + DynamoLLM (conv)
+python3 run_sglang_dynamo_conv_sweep.py
 
-# 代码一致性
-md5sum /mnt/workspace/lt/sglang/benchmark/AFlex_bench/multi_node/README.md
-for ip in 35 34 33; do
-  ssh 10.252.129.$ip "md5sum /mnt/workspace/lt/sglang/benchmark/AFlex_bench/multi_node/README.md 2>&1"
-done
+# 4. DistServe + BiScale (conv)
+python3 run_ds_bs_conv_sweep.py
 
-# 磁盘
-for ip in 36 35 34 33; do
-  echo "=== $ip ==="
-  ssh 10.252.129.$ip 'df -h /mnt/workspace /mnt/data / 2>/dev/null | grep -v Filesystem'
-done
+# 5. 四方案合一 (code)
+python3 run_code_4schemes_sweep.py
+```
+
+### 结果存储
+
+```
+more_test/results/
+├── megascale_16g_both_YYYYMMDD_HHMMSS.json   ← MegaScale 新版
+├── conv_allqps_both_YYYYMMDD_HHMMSS.json     ← AFlex+MegaScale conv
+├── code_allqps_both_YYYYMMDD_HHMMSS.json     ← AFlex+MegaScale code
+├── ds_bs_conv_sweep_YYYYMMDD_HHMMSS.json     ← DistServe+BiScale conv
+├── sglang_dynamo_conv_YYYYMMDD_HHMMSS.json   ← SGLang+DynamoLLM conv
+└── code_4schemes_YYYYMMDD_HHMMSS.json        ← 4方案 code
+
+more_trying/Evaluation/End-to-end/
+├── data/plan_dense_e2e.json                   ← 合并后的标准数据源
+└── charts/*.pdf                               ← Dashboard 图表
+```
+
+### 脚本依赖关系
+
+```
+run_macro_benchmark.py (公共工具)
+    ↑
+bench_tier1_v2.py (AFD 部署引擎: deploy, run_benchmark, plan_allocation)
+    ↑
+bench_conv_all_qps.py / bench_code_all_qps.py / run_megascale_16g_sweep.py
+    (引用 deploy + run_benchmark, 定义各 QPS 的 TestConfig)
+
+run_macro_benchmark.py
+    ↑
+run_code_4schemes_sweep.py / run_ds_bs_conv_sweep.py / run_sglang_dynamo_conv_sweep.py
+    (直接使用 RMB 工具函数, 自行实现 deploy 逻辑)
 ```

@@ -461,6 +461,11 @@ class APIServerReqTimeStats(ReqTimeStatsBase):
             _pbs = getattr(scheduler_time_stats, "prefill_run_batch_start_time", 0.0)
             if _pft > 0.0 and _pbs > 0.0 and _pft > _pbs:
                 meta_info["ttft_pure_processing"] = _pft - _pbs
+            else:
+                # PD+AF mode: use cached TTFT from PA via KV transfer metadata
+                _cached = getattr(scheduler_time_stats, "cached_ttft_processing", 0.0)
+                if _cached > 0.0:
+                    meta_info["ttft_pure_processing"] = _cached
             # Fallback 1: cached TTFT from PA via KV transfer metadata (PD+AF DA side).
             if "time_to_first_token_processing" not in meta_info:
                 _cached = getattr(scheduler_time_stats, "cached_ttft_processing", 0.0)

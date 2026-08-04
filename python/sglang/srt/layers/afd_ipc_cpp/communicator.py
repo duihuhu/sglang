@@ -29,6 +29,50 @@ from sglang.srt.layers.afd_type import AFDPerspective
 logger = logging.getLogger(__name__)
 
 
+def _resolve_peer_device(local_device: int, device_count: int) -> int:
+    peer_offset = os.environ.get("AFD_IPC_PEER_OFFSET")
+    peer_env = os.environ.get("AFD_IPC_PEER_DEVICE")
+    if peer_offset is not None:
+        peer_device = local_device + int(peer_offset)
+    elif peer_env is not None:
+        peer_device = int(peer_env)
+    else:
+        peer_device = 1 if local_device == 0 else 0
+    if not 0 <= peer_device < device_count:
+        raise ValueError(
+            "AFD IPC peer device is out of bounds: "
+            f"local_device={local_device}, peer_device={peer_device}, "
+            f"cuda_device_count={device_count}"
+        )
+    return peer_device
+
+
+def _resolve_channel_id(channel_rank: Optional[int]) -> int:
+    if channel_rank is not None:
+        base = int(
+            os.environ.get(
+                "AFD_IPC_CHANNEL_BASE", os.environ.get("AFD_SCHED_PORT", "0")
+            )
+        )
+        if "AFD_IPC_CHANNEL_BASE" not in os.environ:
+            base %= 1000
+        return base + channel_rank
+
+    # Preserve the legacy rank selection exactly when no override is supplied.
+    rank = 0
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            rank = dist.get_rank()
+    except Exception:
+        pass
+    if rank == 0:
+        sched_port = int(os.environ.get("AFD_SCHED_PORT", "0"))
+        if sched_port > 0:
+            rank = sched_port % 1000
+    return rank
+
+
 class CppIpcTensorCommunicator:
     """C++ IPC communicator — drop-in replacement for IpcTensorCommunicator.
 
@@ -46,7 +90,15 @@ class CppIpcTensorCommunicator:
 
     RING_SIZE = 4
 
-    def __init__(self, perspective: AFDPerspective, mb_id: Optional[int] = None):
+    def __init__(
+        self,
+        perspective: AFDPerspective,
+        mb_id: Optional[int] = None,
+        channel_rank: Optional[int] = None,
+        *,
+        peer_device: Optional[int] = None,
+        channel_id: Optional[int] = None,
+    ):
         self.is_ffn = perspective == AFDPerspective.AFD_PERSPECTIVE_FFN
         self.mb_id = mb_id
         tag = "FFN" if self.is_ffn else "ATTN"
@@ -56,29 +108,33 @@ class CppIpcTensorCommunicator:
 
         self._local_device = torch.cuda.current_device()
 
-        # Determine peer device (same logic as Python IPC)
-        _peer_offset = os.environ.get("AFD_IPC_PEER_OFFSET")
-        _peer_env = os.environ.get("AFD_IPC_PEER_DEVICE")
-        if _peer_offset is not None:
-            self._peer_device = self._local_device + int(_peer_offset)
-        elif _peer_env is not None:
-            self._peer_device = int(_peer_env)
-        else:
-            self._peer_device = 1 if self._local_device == 0 else 0
-
-        # Determine rank
-        rank = 0
-        try:
-            import torch.distributed as dist
-            if dist.is_initialized():
-                rank = dist.get_rank()
-        except Exception:
-            pass
-        if rank == 0:
-            sched_port = int(os.environ.get("AFD_SCHED_PORT", "0"))
-            if sched_port > 0:
-                rank = sched_port % 1000
-        self._rank = rank
+        device_count = torch.cuda.device_count()
+        self._peer_device = (
+            _resolve_peer_device(self._local_device, device_count)
+            if peer_device is None
+            else int(peer_device)
+        )
+        if not 0 <= self._peer_device < device_count:
+            raise ValueError(
+                "AFD IPC peer device is out of bounds: "
+                f"local_device={self._local_device}, "
+                f"peer_device={self._peer_device}, "
+                f"cuda_device_count={device_count}"
+            )
+        if self._peer_device == self._local_device:
+            raise ValueError(
+                "AFD IPC peer device must differ from the local device: "
+                f"device={self._local_device}"
+            )
+        if channel_id is not None and channel_rank is not None:
+            raise ValueError(
+                "Specify either channel_id or channel_rank, not both."
+            )
+        self._rank = (
+            int(channel_id)
+            if channel_id is not None
+            else _resolve_channel_id(channel_rank)
+        )
 
         # Sync mode from environment (default: ipc_event)
         sync_mode = os.environ.get("AFD_IPC_SYNC_MODE", "ipc_event")
@@ -107,10 +163,13 @@ class CppIpcTensorCommunicator:
 
         # For AsyncTensorCommunicator compatibility
         self._last_send_future = None
+        # Lock to serialize recv_tensor calls from concurrent threads
+        # (C++ recv uses non-atomic recv_slot_ counter)
+        self._recv_lock = threading.Lock()
 
         logger.info(
             "[CppIPC %s] rank=%d mb=%s local=cuda:%d peer=cuda:%d sync=%s",
-            tag, rank, mb_id, self._local_device, self._peer_device, sync_mode,
+            tag, self._rank, mb_id, self._local_device, self._peer_device, sync_mode,
         )
 
     def _handshake_background(self):
@@ -218,15 +277,16 @@ class CppIpcTensorCommunicator:
     def recv_tensor(self) -> torch.Tensor:
         """Receive tensor from peer. Hot path after first call."""
         self._wait_ready()
-        if not hasattr(self, '_recv_count'):
-            self._recv_count = 0
-        self._recv_count += 1
-        result = self._comm.recv_tensor()
-        if self._recv_count <= 3:
-            logger.info(
-                "[CppIPC] recv_tensor #%d: shape=%s dtype=%s device=%s",
-                self._recv_count, list(result.shape), result.dtype, result.device,
-            )
+        with self._recv_lock:
+            if not hasattr(self, '_recv_count'):
+                self._recv_count = 0
+            self._recv_count += 1
+            result = self._comm.recv_tensor()
+            if self._recv_count <= 3:
+                logger.info(
+                    "[CppIPC] recv_tensor #%d: shape=%s dtype=%s device=%s",
+                    self._recv_count, list(result.shape), result.dtype, result.device,
+                )
         return result
 
     # Aliases for compatibility

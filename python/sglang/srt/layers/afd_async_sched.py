@@ -121,7 +121,21 @@ class AsyncMbDriver:
             ]
             if ready:
                 ready.sort(key=lambda m: (m.next_layer, m.mb_id))
-                self._step(ready[0])
+                if self._is_attn and len(ready) > 1:
+                    # True wait-any interleave: execute ALL ready A-steps
+                    # back-to-back before blocking on any recv. This lets
+                    # multiple PF groups compute MoE in parallel while PA
+                    # only waits once for the first to return.
+                    a_ready = [
+                        mb for mb in ready if mb.next_stage == "A"
+                    ]
+                    if len(a_ready) > 1:
+                        for mb in a_ready:
+                            self._step(mb)
+                    else:
+                        self._step(ready[0])
+                else:
+                    self._step(ready[0])
             else:
                 mb_id = self._recv_done.get()
                 self.mbs[mb_id].state = _State.READY_TO_COMPUTE

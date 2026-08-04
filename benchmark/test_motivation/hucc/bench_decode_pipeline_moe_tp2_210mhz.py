@@ -523,8 +523,8 @@ def run_sweep(args):
 
 def main():
     default_output = str(Path(
-        "/workspace/sglang-tier/benchmark/AFlex_bench/06_others/more_model"
-        "/energy_model/data/decode_pipeline_moe_tp2_210mhz.txt"
+        "/workspace/sglang/benchmark/AFlex_bench/energy_model/Mixtral-8x7B"
+        "/data/v2_pipeline_profile/decode_pipeline_moe_tp2_210mhz.txt"
     ))
     default_log_dir = str(Path(
         "/workspace/sglang-tier/benchmark/test_motivation/hucc/logs"

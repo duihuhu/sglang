@@ -189,6 +189,31 @@ class TboAttnBackend(AttentionBackend):
         return self.primary.get_indexer_metadata(layer_id, forward_batch)
 
 
+class AFDFFNNoOpAttnBackend(AttentionBackend):
+    """Metadata-free backend for the AFD FFN perspective's proxy attention."""
+
+    def init_forward_metadata(self, forward_batch: "ForwardBatch"):
+        return
+
+    def init_cuda_graph_state(self, max_bs: int, max_num_tokens: int):
+        return
+
+    def init_forward_metadata_capture_cuda_graph(self, *args, **kwargs):
+        return
+
+    def init_forward_metadata_replay_cuda_graph(self, *args, **kwargs):
+        return
+
+    def get_cuda_graph_seq_len_fill_value(self):
+        return 1
+
+    def forward_extend(self, *args, **kwargs):
+        raise RuntimeError("AFD FFN proxy attention must not execute attention")
+
+    def forward_decode(self, *args, **kwargs):
+        raise RuntimeError("AFD FFN proxy attention must not execute attention")
+
+
 class AfdAttnBackend(AttentionBackend):
     """Attention backend wrapper for AFD with m micro-batch children."""
 

@@ -88,6 +88,8 @@ def write_cache_indices(
     prefix_tensors: list[torch.Tensor],
     req_to_token_pool: ReqToTokenPool,
 ):
+    if getattr(req_to_token_pool, "no_kv_bookkeeping", False):
+        return
     if support_triton(get_global_server_args().attention_backend):
         prefix_pointers = torch.tensor(
             [t.data_ptr() for t in prefix_tensors],

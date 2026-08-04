@@ -528,8 +528,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Decode pipeline coupled profiling — MoE DA-TP1 + DF-TP4")
     parser.add_argument("--output", default=str(
-        Path("/workspace/sglang-tier/benchmark/AFlex_bench/06_others/more_model/"
-             "energy_model/data/decode_pipeline_moe_1a4f.txt")))
+        Path("/workspace/sglang/benchmark/AFlex_bench/energy_model/Mixtral-8x7B/"
+             "data/v2_pipeline_profile/decode_pipeline_moe_1a4f.txt")))
     parser.add_argument("--log-dir", default=str(
         SCRIPT_DIR / "logs" / "decode_pipeline_moe_1a4f"))
     parser.add_argument("--freqs", type=int, nargs="+", default=DEFAULT_FREQS)

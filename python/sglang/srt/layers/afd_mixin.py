@@ -348,21 +348,49 @@ class AFDWeightFilter:
     ]
 
     @classmethod
-    def should_load(cls, param_name: str, perspective: AFDPerspective) -> bool:
-        name_lower = param_name.lower()
+    def classify(cls, param_name: str) -> str:
+        """Classify a named parameter as ``attn``, ``ffn``, or ``shared``.
 
+        Unknown and ambiguously matched names are shared. This mirrors the
+        historical selective-loading behavior, where both perspectives load
+        such parameters.
+        """
+        name_lower = param_name.lower()
         if any(p in name_lower for p in cls.SHARED_PATTERNS):
-            return True
+            return "shared"
 
         is_attn_weight = any(p in name_lower for p in cls.ATTN_PATTERNS)
         is_ffn_weight = any(p in name_lower for p in cls.FFN_PATTERNS)
+        if is_attn_weight and not is_ffn_weight:
+            return "attn"
+        if is_ffn_weight and not is_attn_weight:
+            return "ffn"
+        return "shared"
 
+    @classmethod
+    def classify_strict(cls, param_name: str) -> Optional[str]:
+        """Classify for mutation paths, rejecting unknown or ambiguous names."""
+        name_lower = param_name.lower()
+        if any(marker in name_lower for marker in ("q_norm", "k_norm")):
+            return "attn"
+
+        is_attn = any(pattern in name_lower for pattern in cls.ATTN_PATTERNS)
+        is_ffn = any(pattern in name_lower for pattern in cls.FFN_PATTERNS)
+        is_shared = any(pattern in name_lower for pattern in cls.SHARED_PATTERNS)
+        matches = sum((is_attn, is_ffn, is_shared))
+        if matches != 1:
+            return None
+        if is_attn:
+            return "attn"
+        if is_ffn:
+            return "ffn"
+        return "shared"
+
+    @classmethod
+    def should_load(cls, param_name: str, perspective: AFDPerspective) -> bool:
+        ownership = cls.classify(param_name)
         if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN:
-            if is_ffn_weight and not is_attn_weight:
-                return False
-            return True
-        elif perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
-            if is_attn_weight and not is_ffn_weight:
-                return False
-            return True
+            return ownership != "ffn"
+        if perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
+            return ownership != "attn"
         return True

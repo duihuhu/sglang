@@ -17,5 +17,8 @@ class DeviceConfig:
             self.device_type = device
         else:
             raise RuntimeError(f"Not supported device type: {device}")
-        self.device = torch.device(self.device_type)
+        if gpu_id >= 0:
+            self.device = torch.device(self.device_type, gpu_id)
+        else:
+            self.device = torch.device(self.device_type)
         self.gpu_id = gpu_id

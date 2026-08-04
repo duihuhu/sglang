@@ -114,6 +114,69 @@ class BaseTokenToKVPoolAllocator(abc.ABC):
         raise NotImplementedError()
 
 
+class AFDFFNNoKVPoolAllocator(BaseTokenToKVPoolAllocator):
+    """Logical token allocator for an AFD FFN worker.
+
+    FFN workers run :class:`AFDProxyAttention`, so cache locations are only
+    scheduler bookkeeping. Returning the padded location 0 avoids allocating
+    either KV storage or a free-page vector while preserving the allocator API.
+    """
+
+    def __init__(self, size: int, page_size: int, dtype: torch.dtype, device: str):
+        super().__init__(size, page_size, dtype, device, kvcache=None, need_sort=False)
+        self.clear()
+
+    def clear(self):
+        self._available_size = self.size
+        self.free_pages = torch.empty((0,), dtype=torch.int64, device=self.device)
+        self.release_pages = torch.empty((0,), dtype=torch.int64, device=self.device)
+        self.is_not_in_free_group = True
+        self.free_group = []
+
+    def available_size(self):
+        return self._available_size
+
+    def alloc(self, need_size: int):
+        if need_size > self._available_size:
+            return None
+        self._available_size -= need_size
+        return torch.zeros(need_size, dtype=torch.int64, device=self.device)
+
+    def alloc_extend(
+        self,
+        prefix_lens: torch.Tensor,
+        prefix_lens_cpu: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        last_loc: torch.Tensor,
+        extend_num_tokens: int,
+    ):
+        return self.alloc(extend_num_tokens)
+
+    def alloc_decode(
+        self,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        last_loc: torch.Tensor,
+    ):
+        return self.alloc(len(seq_lens))
+
+    def free(self, free_index: torch.Tensor):
+        if free_index.numel() == 0:
+            return
+        if self.is_not_in_free_group:
+            self._available_size = min(self.size, self._available_size + free_index.numel())
+        else:
+            self.free_group.append(free_index)
+
+    def free_group_end(self):
+        self.is_not_in_free_group = True
+        if self.free_group:
+            released = sum(index.numel() for index in self.free_group)
+            self._available_size = min(self.size, self._available_size + released)
+            self.free_group = []
+
+
 class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
     """An allocator managing the indices to kv cache data."""
 

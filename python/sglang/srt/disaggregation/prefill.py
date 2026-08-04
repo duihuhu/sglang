@@ -119,6 +119,10 @@ class PrefillBootstrapQueue:
         self.bootstrap_port = bootstrap_port
         self.queue: List[Req] = []
         self.gloo_group = gloo_group
+        attn_tp_group = scheduler.attn_tp_group
+        self.collective_rank = attn_tp_group.rank
+        self.collective_src_rank = attn_tp_group.first_rank
+        self.tp_size = attn_tp_group.world_size
         self.max_total_num_tokens = max_total_num_tokens
         self.scheduler = scheduler
         self.transfer_backend = transfer_backend
@@ -247,6 +251,50 @@ class PrefillBootstrapQueue:
         """
         req.sampling_params.max_new_tokens = 1
 
+    def _poll_authoritative_rids(
+        self, rids_to_check: Optional[List[str]] = None
+    ) -> tuple[List[str], List[int]]:
+        """Poll rank-0's RID order across the attention TP and CP groups."""
+        from sglang.srt.utils.common import broadcast_pyobj
+
+        requested = set(rids_to_check) if rids_to_check is not None else None
+        local_rids = [
+            req.rid
+            for req in self.queue
+            if requested is None or req.rid in requested
+        ]
+        tp_size = int(getattr(self, "tp_size", 1))
+        if tp_size == 1:
+            authoritative = local_rids
+        else:
+            collective_rank = int(getattr(self, "collective_rank", self.tp_rank))
+            collective_src_rank = int(getattr(self, "collective_src_rank", 0))
+            authoritative = broadcast_pyobj(
+                [local_rids] if collective_rank == collective_src_rank else None,
+                collective_rank,
+                self.gloo_group,
+                src=collective_src_rank,
+            )[0]
+
+        local = {req.rid: req.disagg_kv_sender for req in self.queue}
+
+        class _MissingPoller:
+            @staticmethod
+            def poll():
+                return KVPoll.Failed
+
+        pollers = [local.get(rid, _MissingPoller()) for rid in authoritative]
+        polls = (
+            [int(poller.poll()) for poller in pollers]
+            if tp_size == 1
+            else poll_and_all_reduce_attn_cp_tp_group(
+                pollers,
+                self.scheduler.attn_cp_cpu_group,
+                self.gloo_group,
+            )
+        )
+        return authoritative, polls
+
     def pop_bootstrapped(
         self,
         return_failed_reqs: bool = False,
@@ -263,23 +311,18 @@ class PrefillBootstrapQueue:
         failed_reqs = []
         indices_to_remove = set()
 
-        if len(self.queue) == 0:
+        if int(getattr(self, "tp_size", 1)) == 1 and len(self.queue) == 0:
             if return_failed_reqs is False:
                 return []
-            else:
-                return [], []
+            return [], []
 
-        polls = poll_and_all_reduce_attn_cp_tp_group(
-            [req.disagg_kv_sender for req in self.queue],
-            self.scheduler.attn_cp_cpu_group,
-            self.scheduler.attn_tp_cpu_group,
-        )
+        authoritative, polls = self._poll_authoritative_rids(rids_to_check)
+        poll_by_rid = dict(zip(authoritative, polls))
 
-        for i, (req, poll) in enumerate(zip(self.queue, polls)):
-            if rids_to_check is not None:
-                # if req not in reqs_info_to_check, skip
-                if req.rid not in rids_to_check:
-                    continue
+        for i, req in enumerate(self.queue):
+            if req.rid not in poll_by_rid:
+                continue
+            poll = poll_by_rid[req.rid]
 
             if poll == KVPoll.Bootstrapping:
                 continue
@@ -340,6 +383,16 @@ class SchedulerDisaggregationPrefillMixin:
     def get_next_disagg_prefill_batch_to_run(
         self: Scheduler,
     ) -> Optional[ScheduleBatch]:
+        from sglang.srt.layers.afd import afd_is_ffn
+
+        # PF FFN receives a batch that PA has already scheduled.  Running the
+        # ordinary PrefillAdder again would let rank-local request/token capacity
+        # and cache history select a different subset on each active TP rank.
+        if afd_is_ffn() and getattr(
+            self, "_afd_ffn_authoritative_waiting", False
+        ):
+            return self._afd_build_authoritative_prefill_batch()
+
         # HACK (byronhsu): reset the batch_is_full flag because we never enter update_running_batch which resets it
         # Otherwise, it hangs under high concurrency
         self.running_batch.batch_is_full = False
@@ -352,6 +405,118 @@ class SchedulerDisaggregationPrefillMixin:
         if batch:
             set_schedule_time_batch(batch)
 
+        return batch
+
+    def _afd_build_authoritative_prefill_batch(
+        self: Scheduler,
+    ) -> ScheduleBatch:
+        """Prepare exactly the PA-selected PF batch or fail before forwarding."""
+        from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
+
+        metadata = self._afd_current_metadata
+        dispatch_id = metadata["dispatch_id"] if metadata is not None else None
+        expected_rids = list(self._afd_req_ids or ())
+        local_rids = [req.rid for req in self.waiting_queue]
+        if (
+            metadata is None
+            or expected_rids != list(metadata["req_ids"])
+            or local_rids != expected_rids
+            or self._afd_batchsize_attn != len(expected_rids)
+        ):
+            raise RuntimeError(
+                f"Invalid authoritative AFD PF state dispatch={dispatch_id}: "
+                f"batch_size={self._afd_batchsize_attn}, "
+                f"expected_rids={expected_rids}, local_rids={local_rids}"
+            )
+
+        reqs = list(self.waiting_queue)
+        req_pool_available = self.req_to_token_pool.available_size()
+        req_pool_needed = sum(req.req_pool_idx is None for req in reqs)
+        token_available = self.token_to_kv_pool_allocator.available_size()
+        token_needed = sum(metadata["extend_lens"])
+        logger.info(
+            "AFD PF authoritative prepare dispatch=%s rank=%s flag=%s bs=%d "
+            "req_pool_needed=%d req_pool_available=%d token_needed=%d "
+            "token_available=%d rids=%s",
+            dispatch_id,
+            getattr(self, "tp_rank", -1),
+            self._afd_ffn_authoritative_waiting,
+            len(reqs),
+            req_pool_needed,
+            req_pool_available,
+            token_needed,
+            token_available,
+            expected_rids,
+        )
+
+        capacity = {
+            "dispatch_id": dispatch_id,
+            "rank": getattr(self, "tp_rank", -1),
+            "req_pool_needed": req_pool_needed,
+            "req_pool_available": req_pool_available,
+            "token_needed": token_needed,
+            "token_available": token_available,
+            "req_ids": expected_rids,
+        }
+        capacities = [capacity]
+        if getattr(self, "tp_size", 1) > 1:
+            import torch.distributed as dist
+
+            capacities = [None] * self.tp_size
+            dist.all_gather_object(
+                capacities, capacity, group=self.tp_cpu_group
+            )
+        failures = [
+            item
+            for item in capacities
+            if item["req_pool_needed"] > item["req_pool_available"]
+            or item["token_needed"] > item["token_available"]
+        ]
+        if failures:
+            raise RuntimeError(
+                f"AFD PF authoritative batch capacity failure "
+                f"dispatch={dispatch_id}: failures={failures}"
+            )
+
+        # init_next_round_input still initializes request/cache bookkeeping, but
+        # PA geometry is restored immediately so local cache history cannot alter
+        # the collective tensor shape.
+        for req in reqs:
+            req.init_next_round_input(self.tree_cache)
+            SchedulerAFDMixin.afd_restore_req_geometry(self, req)
+
+        batch = ScheduleBatch.init_new(
+            reqs,
+            self.req_to_token_pool,
+            self.token_to_kv_pool_allocator,
+            self.tree_cache,
+            self.model_config,
+            self.enable_overlap,
+            self.spec_algorithm,
+        )
+        try:
+            batch.prepare_for_extend()
+        except Exception as exc:
+            raise RuntimeError(
+                f"AFD PF authoritative batch allocation failed "
+                f"dispatch={dispatch_id} rank={getattr(self, 'tp_rank', -1)} "
+                f"req_ids={expected_rids}: {exc}"
+            ) from exc
+
+        from sglang.srt.observability.scheduler_metrics_mixin import PrefillStats
+
+        batch.prefill_stats = PrefillStats.from_authoritative(
+            reqs=reqs,
+            extend_lens=metadata["extend_lens"],
+            seq_lens=metadata["seq_lens"],
+            new_token_ratio=self.new_token_ratio,
+            running_reqs=self.running_batch.reqs,
+            enable_priority_scheduling=self.enable_priority_scheduling,
+        )
+        self.waiting_queue = []
+        batch = self.maybe_prepare_mlp_sync_batch(batch)
+        SchedulerAFDMixin.afd_validate_prefill_batch(self, batch)
+        set_schedule_time_batch(batch)
         return batch
 
     @torch.no_grad()
@@ -387,7 +552,7 @@ class SchedulerDisaggregationPrefillMixin:
     @torch.no_grad()
     def event_loop_afd_disagg_prefill(self: Scheduler) -> None:
         """Disagg prefill event loop with AFD (Attention-FFN Disaggregation)."""
-        from sglang.srt.layers.afd import afd_is_ffn, get_afd_perspective
+        from sglang.srt.layers.afd import afd_is_attn, afd_is_ffn, get_afd_perspective
         from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
 
         logger.info(
@@ -399,20 +564,36 @@ class SchedulerDisaggregationPrefillMixin:
         # Both sides must init together for the handshake to succeed.
         # NOTE: interleaved schedule (--afd-async-schedule) uses the same
         # single shared channel — no per-mb channels needed.
-        from sglang.srt.layers.afd import get_async_communicator
-        try:
-            get_async_communicator()
-            logger.info(
-                "event_loop_afd_disagg_prefill: UCX communicator ready (async=%s)",
-                getattr(self.server_args, "afd_async_schedule", False),
-            )
-        except Exception as e:
-            logger.error("event_loop_afd_disagg_prefill: AF communicator init failed: %s", e)
-            raise RuntimeError(
-                f"AF communicator init failed — cannot run AFD disagg prefill without it: {e}"
-            ) from e
+        if SchedulerAFDMixin.afd_component_should_eager_init_data_plane(self):
+            from sglang.srt.layers.afd import get_async_communicator
+            try:
+                get_async_communicator()
+                logger.info(
+                    "event_loop_afd_disagg_prefill: UCX communicator ready (async=%s)",
+                    getattr(self.server_args, "afd_async_schedule", False),
+                )
+            except Exception as e:
+                logger.error("event_loop_afd_disagg_prefill: AF communicator init failed: %s", e)
+                raise RuntimeError(
+                    f"AF communicator init failed — cannot run AFD disagg prefill without it: {e}"
+                ) from e
+        else:
+            logger.info("event_loop_afd_disagg_prefill: deferring joining communicator init "
+                        "to post-activate readiness")
 
         while True:
+            SchedulerAFDMixin.afd_component_begin_active_iteration(self)
+            if SchedulerAFDMixin.afd_component_should_leave_active_loop(self):
+                return
+            if SchedulerAFDMixin.afd_component_should_restart_active_iteration(self):
+                continue
+            # Check control again immediately before entering a potentially
+            # blocking data-plane receive. All active ranks call this in order.
+            SchedulerAFDMixin.afd_component_post_receive_control_checkpoint(
+                self
+            )
+            if SchedulerAFDMixin.afd_component_should_restart_active_iteration(self):
+                continue
             recv_reqs = self.recv_requests()
             extra_reqs = SchedulerAFDMixin.afd_recv_messages(self)
             if extra_reqs:
@@ -430,24 +611,24 @@ class SchedulerDisaggregationPrefillMixin:
                     self.tp_cpu_group,
                     src=self.tp_group.ranks[0],
                 )
+            SchedulerAFDMixin.afd_component_post_receive_control_checkpoint(
+                self
+            )
+            # ACTIVATE may be consumed by the post-receive checkpoint,
+            # after the loop-top restart guard has already run. Old surviving
+            # ranks must skip this data-plane round and meet joining ranks at
+            # the next post-activation readiness preamble.
+            if SchedulerAFDMixin.afd_component_should_restart_active_iteration(self):
+                continue
+            recv_reqs = SchedulerAFDMixin.afd_gate_work_requests(self, recv_reqs)
             SchedulerAFDMixin.afd_forward_work_requests(self, recv_reqs)
-
-            # Filter out AFDReqInput before passing to process_input_requests
-            # (FFN side receives these from Attn via afd_recv_messages)
-            from sglang.srt.managers.io_struct import AFDReqInput as _AFDReqInput
-            for req in recv_reqs:
-                if isinstance(req, _AFDReqInput):
-                    pending = getattr(self, "_afd_pending_batch_infos", None)
-                    if pending is not None:
-                        pending.append(req)
-                    if self._afd_batchsize_attn is None:
-                        self._afd_batchsize_attn = req.batch_size
-                        self._afd_forward_mode = req.forward_mode
-                        self._afd_req_ids = req.req_ids
-                        if req.output_ids_per_req and req.req_ids:
-                            self._afd_sync_output_ids(req)
-            filtered_reqs = [r for r in recv_reqs if not isinstance(r, _AFDReqInput)]
-            self.process_input_requests(filtered_reqs)
+            # Use the shared AFD metadata path on both PA and PF.  It queues
+            # AFDReqInput, restores the full prefill request metadata, and
+            # creates missing FFN-side Req objects without forwarding duplicate
+            # TokenizedGenerateReqInput objects into the PF scheduler.
+            self._afd_process_input_requests(
+                recv_reqs, work_already_forwarded=True
+            )
             if not afd_is_ffn():
                 bootstrapped = self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
                 if bootstrapped:
@@ -455,12 +636,19 @@ class SchedulerDisaggregationPrefillMixin:
                 self.waiting_queue.extend(bootstrapped)
 
             if SchedulerAFDMixin.afd_ffn_should_wait(self):
+                # When a component reshard has fenced admission, no more
+                # AFDReqInput will ever arrive on this FFN participant. Reset the
+                # batch ledger to idle so ``is_fully_idle()`` (and thus the
+                # quiesce/drain AFD-quiescent check) can actually observe idle.
+                # Without this the disagg prefill FFN loop keeps last_batch/
+                # cur_batch non-empty forever and the drain silently spins until
+                # the reshard timeout. See _afd_ffn_reset_idle_ledger.
+                self._afd_ffn_reset_idle_ledger()
                 # Idle freq lock for FFN (Prefill) side while waiting
                 if (self._idle_lock_enabled
                         and not self._idle_freq_locked
                         and self._dvfs_hw_list):
-                    for hw in self._dvfs_hw_list:
-                        hw.lock_sm_clock(self._idle_lock_freq)
+                    self._lock_all_sm_clocks(self._idle_lock_freq)
                     self._idle_freq_locked = True
                 continue
 
@@ -471,6 +659,8 @@ class SchedulerDisaggregationPrefillMixin:
             self.cur_batch = batch
 
             if batch:
+                if afd_is_attn():
+                    self._afd_dvfs_before_batch(batch)
                 SchedulerAFDMixin.afd_send_batch_info(self, batch)
                 # Record ZMQ-send wall-clock for cross-GPU latency breakdown
                 from sglang.srt.layers.afd_mixin import _afd_sched_ts
@@ -478,9 +668,31 @@ class SchedulerDisaggregationPrefillMixin:
                 SchedulerAFDMixin.afd_prepare_overlap(self, batch)
                 is_decode = batch.forward_mode.is_decode()
                 self._tier1_record_batch_start(is_prefill=not is_decode)
-                self._afd_dvfs_before_batch(batch)
-                result = self.run_batch(batch)
-                self.process_batch_result(batch, result)
+                if not afd_is_attn():
+                    self._afd_dvfs_before_batch(batch)
+                logger.info(
+                    "AFD prefill before run: role=%s bs=%d extend_lens=%s req_ids=%s",
+                    get_afd_perspective(), batch.batch_size(),
+                    getattr(batch, "extend_lens", None), [r.rid for r in batch.reqs],
+                )
+                try:
+                    if afd_is_ffn():
+                        SchedulerAFDMixin.afd_validate_prefill_batch(self, batch)
+                    result = self.run_batch(batch)
+                    logger.info(
+                        "AFD prefill after run: role=%s next_tokens_shape=%s",
+                        get_afd_perspective(),
+                        getattr(getattr(result, "next_token_ids", None), "shape", None),
+                    )
+                    self.process_batch_result(batch, result)
+                    logger.info("AFD prefill after result: role=%s", get_afd_perspective())
+                except BaseException:
+                    logger.exception(
+                        "AFD prefill batch failed: role=%s bs=%d extend_lens=%s",
+                        get_afd_perspective(), batch.batch_size(),
+                        getattr(batch, "extend_lens", None),
+                    )
+                    raise
                 t_iter = (time.perf_counter() - self._last_decode_batch_time) * 1e6 \
                     if is_decode and hasattr(self, "_last_decode_batch_time") and self._last_decode_batch_time is not None \
                     else 0.0
@@ -494,8 +706,7 @@ class SchedulerDisaggregationPrefillMixin:
                 if (self._idle_lock_enabled
                         and not self._idle_freq_locked
                         and self._dvfs_hw_list):
-                    for hw in self._dvfs_hw_list:
-                        hw.lock_sm_clock(self._idle_lock_freq)
+                    self._lock_all_sm_clocks(self._idle_lock_freq)
                     self._idle_freq_locked = True
 
             if not afd_is_ffn():

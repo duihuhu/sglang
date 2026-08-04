@@ -434,11 +434,13 @@ class Qwen3Model(Qwen2Model):
         if (
             get_global_server_args().inplace_reshard_max_tp is not None
             and get_tensor_model_parallel_world_size() > 1
+            and not torch.compiler.is_compiling()
         ):
-            from sglang.srt.distributed import get_tp_group as _gtp
+            if not torch.cuda.is_current_stream_capturing():
+                from sglang.srt.distributed import get_tp_group as _gtp
 
-            torch.cuda.current_stream().synchronize()
-            torch.distributed.barrier(group=_gtp().cpu_group)
+                torch.cuda.current_stream().synchronize()
+                torch.distributed.barrier(group=_gtp().cpu_group)
 
         if self.pp_group.is_first_rank:
             if input_embeds is None:

@@ -35,6 +35,17 @@ def start_disagg_service(
             host=server_args.host,
             port=server_args.disaggregation_bootstrap_port,
         )
+
+        # Update server_args with the actual port the bootstrap server bound to
+        # (may differ from requested port if it was already in use)
+        if hasattr(bootstrap_server, "actual_port") and bootstrap_server.actual_port is not None:
+            if bootstrap_server.actual_port != server_args.disaggregation_bootstrap_port:
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    f"Bootstrap server actual port updated: "
+                    f"{server_args.disaggregation_bootstrap_port} -> {bootstrap_server.actual_port}"
+                )
+            server_args.disaggregation_bootstrap_port = bootstrap_server.actual_port
         is_create_store = (
             server_args.node_rank == 0 and transfer_backend == TransferBackend.ASCEND
         )

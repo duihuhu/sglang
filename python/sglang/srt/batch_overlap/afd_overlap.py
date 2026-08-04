@@ -167,6 +167,8 @@ class AfdForwardBatchPreparer:
                 output_attn_backend=children_backends[i],
                 out_num_token_non_padded=num_token_non_padded_tensor[i],
             )
+            if batch.afd_pf_group_ids is not None:
+                child.afd_pf_group_id = batch.afd_pf_group_ids[i]
             children.append(child)
 
         if not children:
@@ -338,6 +340,8 @@ class AfdForwardBatchPreparer:
                 afd_parent_token_range=(start_token_index, end_token_index),
                 afd_children=None,
                 can_run_afd_overlap=False,
+                afd_pf_group_ids=None,
+                afd_pf_group_id=0,
                 original_global_num_tokens_cpu=None,
                 global_num_tokens_gpu=None,
                 global_num_tokens_cpu=None,

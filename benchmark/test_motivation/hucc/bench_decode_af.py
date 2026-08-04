@@ -55,6 +55,7 @@ from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+from profiling_gpu import nvml_gpu_id
 from sglang.srt.utils import (
     maybe_reindex_device_id,
     suppress_other_loggers,
@@ -231,7 +232,10 @@ def profiling_worker(server_args, port_args, bench_args, gpu_id, tp_rank):
     tp_size = server_args.tp_size
 
     model_runner = load_model(server_args, port_args, gpu_id, tp_rank)
-    ctrl = DVFSController(gpu_id)
+    phys_gpu = nvml_gpu_id(gpu_id)
+    ctrl = DVFSController(phys_gpu)
+    rank_print(f"  [DVFS] logical_gpu={gpu_id}, phys_gpu={phys_gpu}, "
+               f"CVD={os.environ.get('CUDA_VISIBLE_DEVICES', '')}")
     device = model_runner.device
     hidden_size = model_runner.model_config.hidden_size
 

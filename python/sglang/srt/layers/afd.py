@@ -19,8 +19,10 @@ import logging
 import multiprocessing
 import os
 import queue
+import subprocess
 import threading
 import time
+import traceback
 from abc import ABC, abstractmethod
 from collections import deque
 from enum import Enum, auto
@@ -43,6 +45,25 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.server_args import get_global_server_args
 
 logger = logging.getLogger(__name__)
+
+_zmq_bound_endpoints = set()
+_zmq_bound_endpoints_lock = threading.Lock()
+
+
+def _cross_node_experimental_enabled() -> bool:
+    return os.environ.get("AFD_CROSS_NODE_EXPERIMENTAL", "0") == "1"
+
+
+def _zmq_double_buffer_enabled() -> bool:
+    return _zmq_sharding_enabled() and os.environ.get("AFD_ZMQ_DOUBLE_BUFFER", "0") == "1"
+
+
+def _zmq_sharding_enabled() -> bool:
+    """Enable TP-sharded ZMQ only behind the cross-node master switch."""
+    return (
+        _cross_node_experimental_enabled()
+        and os.environ.get("AFD_ZMQ_SHARDING", "0") == "1"
+    )
 
 
 # --------------- Stage types and scheduling ---------------
@@ -186,6 +207,16 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
 
     def __init__(self, afd_perspective: AFDPerspective):
         super().__init__()
+        if _cross_node_experimental_enabled():
+            logger.warning(
+                "Constructing AFD ZMQ communicator pid=%d thread=%s perspective=%s "
+                "experimental_singletons_id=%s stack=%s",
+                os.getpid(),
+                threading.current_thread().name,
+                afd_perspective,
+                id(globals().get("_experimental_tensor_communicators")),
+                " | ".join(traceback.format_stack(limit=8)[:-1]).replace("\n", " "),
+            )
         self.zmq_context = zmq.Context()
 
         self.start_lport = (
@@ -199,6 +230,11 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
             else self._get_ffn_port()
         )
         self._cuda_device = None
+        self._afd_perspective = afd_perspective
+        self._diag_send_count = 0
+        self._diag_recv_count = 0
+        self._handshake_thread = None
+        self._handshake_rep = None
         # C1: pre-allocated pinned memory for staging
         self._pinned_send_buf: Optional[torch.Tensor] = None
         self._pinned_recv_buf: Optional[torch.Tensor] = None
@@ -207,6 +243,11 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
             self._comm_stream = torch.cuda.Stream()
         else:
             self._comm_stream = None
+
+        if _cross_node_experimental_enabled():
+            self._get_pull_socket()
+            self._get_push_socket()
+            self._perform_ready_handshake()
 
     @staticmethod
     def _get_ffn_port() -> int:
@@ -217,10 +258,152 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
         return int(os.getenv("AFD_ATTN_BASE_PORT", "50000"))
 
     def _get_lport(self) -> int:
-        return self.start_lport + 1 + dist.get_rank()
+        return self.start_lport + 1 + self._rank()
 
     def _get_dport(self) -> int:
-        return self.start_dport + 1 + dist.get_rank()
+        return self.start_dport + 1 + self._rank()
+
+    @staticmethod
+    def _get_ffn_handshake_port() -> int:
+        return int(os.getenv("AFD_ZMQ_FFN_HANDSHAKE_BASE_PORT", "60000"))
+
+    @staticmethod
+    def _get_attn_handshake_port() -> int:
+        return int(os.getenv("AFD_ZMQ_ATTN_HANDSHAKE_BASE_PORT", "61000"))
+
+    def _get_handshake_lport(self) -> int:
+        base = (self._get_ffn_handshake_port() if self._afd_perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN else self._get_attn_handshake_port())
+        return base + 1 + self._rank()
+
+    def _get_handshake_dport(self) -> int:
+        base = (self._get_attn_handshake_port() if self._afd_perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN else self._get_ffn_handshake_port())
+        return base + 1 + self._rank()
+
+    def _rank(self) -> int:
+        """Return the node-local TP rank used for peer/port pairing.
+
+        The scheduler's initialized distributed rank is authoritative. Some
+        launch paths do not export LOCAL_RANK to forked scheduler processes.
+        """
+        env_rank = os.environ.get("LOCAL_RANK")
+        if dist.is_initialized():
+            local_tp = int(os.environ.get("AFD_LOCAL_TP", "0"))
+            if local_tp <= 0:
+                local_tp = int(getattr(get_global_server_args(), "tp_size", 1))
+            rank = dist.get_rank() % local_tp
+            if env_rank is not None and int(env_rank) != rank:
+                logger.warning(
+                    "Ignoring mismatched LOCAL_RANK=%s; distributed local TP rank=%d "
+                    "(global_rank=%d local_tp=%d)",
+                    env_rank, rank, dist.get_rank(), local_tp,
+                )
+            return rank
+        if env_rank is not None:
+            return int(env_rank)
+        return 0
+
+    @staticmethod
+    def _port_owner_diagnostic(port: int) -> str:
+        commands = (["ss", "-H", "-ltnp", f"sport = :{port}"],
+                    ["fuser", "-v", "-n", "tcp", str(port)])
+        output = []
+        for command in commands:
+            try:
+                result = subprocess.run(command, text=True, capture_output=True,
+                                        timeout=2, check=False)
+                text = " ".join((result.stdout + result.stderr).split())
+                if text:
+                    output.append(f"{command[0]}: {text}")
+            except (FileNotFoundError, subprocess.SubprocessError):
+                pass
+        return "; ".join(output) or "owner unavailable"
+
+    def _bind_pull_socket(self, socket: zmq.Socket, endpoint: str) -> None:
+        retries = (int(os.getenv("AFD_ZMQ_BIND_RETRIES", "3"))
+                   if _cross_node_experimental_enabled() else 1)
+        delay = float(os.getenv("AFD_ZMQ_BIND_RETRY_DELAY_S", "0.25"))
+        with _zmq_bound_endpoints_lock:
+            if endpoint in _zmq_bound_endpoints:
+                raise RuntimeError(
+                    f"AFD ZMQ duplicate communicator in pid={os.getpid()}: "
+                    f"endpoint {endpoint} is already bound by this process"
+                )
+        for attempt in range(1, retries + 1):
+            try:
+                socket.bind(endpoint)
+                with _zmq_bound_endpoints_lock:
+                    if endpoint in _zmq_bound_endpoints:
+                        socket.unbind(endpoint)
+                        raise RuntimeError(
+                            f"AFD ZMQ duplicate communicator in pid={os.getpid()}: "
+                            f"endpoint {endpoint} was concurrently bound"
+                        )
+                    _zmq_bound_endpoints.add(endpoint)
+                return
+            except zmq.ZMQError as exc:
+                if exc.errno != zmq.EADDRINUSE:
+                    raise
+                owner = self._port_owner_diagnostic(self._get_lport())
+                logger.error(
+                    "AFD ZMQ bind EADDRINUSE: endpoint=%s perspective=%s "
+                    "rank=%d pid=%d attempt=%d/%d owner=%s",
+                    endpoint, self._afd_perspective, self._rank(), os.getpid(),
+                    attempt, retries, owner,
+                )
+                with _zmq_bound_endpoints_lock:
+                    duplicate = endpoint in _zmq_bound_endpoints
+                if duplicate or attempt == retries:
+                    raise
+                time.sleep(delay)
+
+    def _perform_ready_handshake(self) -> None:
+        peer_host = os.getenv("AFD_ZMQ_PEER_HOST", "127.0.0.1")
+        timeout_ms = int(os.getenv("AFD_ZMQ_HANDSHAKE_TIMEOUT_MS", str(self.SOCKET_TIMEOUT_MS)))
+        bound = threading.Event()
+        errors = []
+
+        def respond():
+            try:
+                rep = self.zmq_context.socket(zmq.REP)
+                self._handshake_rep = rep
+                rep.setsockopt(zmq.LINGER, 0)
+                rep.setsockopt(zmq.RCVTIMEO, timeout_ms)
+                rep.setsockopt(zmq.SNDTIMEO, timeout_ms)
+                rep.bind(f"tcp://*:{self._get_handshake_lport()}")
+                bound.set()
+                request = rep.recv_pyobj()
+                rep.send_pyobj({"ack": True, "rank": self._rank(), "request": request})
+            except Exception as exc:
+                errors.append(exc)
+                bound.set()
+
+        self._handshake_thread = threading.Thread(target=respond, name=f"afd-zmq-ready-{self._rank()}", daemon=True)
+        self._handshake_thread.start()
+        if not bound.wait(max(timeout_ms, 1) / 1000):
+            raise TimeoutError("AFD ZMQ handshake listener bind timed out")
+        if errors:
+            raise RuntimeError(f"AFD ZMQ handshake listener failed: {errors[0]}")
+        req = self.zmq_context.socket(zmq.REQ)
+        req.setsockopt(zmq.LINGER, 0); req.setsockopt(zmq.IMMEDIATE, 1)
+        req.setsockopt(zmq.SNDTIMEO, timeout_ms); req.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        endpoint = f"tcp://{peer_host}:{self._get_handshake_dport()}"
+        started = time.monotonic()
+        try:
+            req.connect(endpoint)
+            req.send_pyobj({"ready": True, "rank": self._rank()})
+            ack = req.recv_pyobj()
+            if not ack.get("ack"):
+                raise RuntimeError(f"invalid ACK: {ack!r}")
+            self._handshake_thread.join(max(timeout_ms, 1) / 1000)
+            if self._handshake_thread.is_alive():
+                raise TimeoutError("AFD ZMQ inbound handshake timed out")
+            if errors:
+                raise RuntimeError(f"AFD ZMQ inbound handshake failed: {errors[0]}")
+        except zmq.Again as exc:
+            raise TimeoutError(f"AFD ZMQ handshake timed out connecting {endpoint}") from exc
+        finally:
+            req.close(linger=0)
+        logger.info("AFD ZMQ handshake ready: perspective=%s rank=%d pull=%d push=%s:%d handshake=%d<->%s:%d elapsed_ms=%.1f", self._afd_perspective, self._rank(), self._get_lport(), peer_host, self._get_dport(), self._get_handshake_lport(), peer_host, self._get_handshake_dport(), (time.monotonic() - started) * 1000)
 
     def _get_cuda_device(self) -> torch.device:
         if self._cuda_device is None:
@@ -232,10 +415,17 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
     @cache
     def _get_push_socket(self) -> zmq.Socket:
         socket = self.zmq_context.socket(zmq.PUSH)
+        if _cross_node_experimental_enabled():
+            socket.setsockopt(zmq.IMMEDIATE, 1)
+            socket.setsockopt(zmq.LINGER, 0)
         # E5: set send timeout
         if self.SOCKET_TIMEOUT_MS > 0:
             socket.setsockopt(zmq.SNDTIMEO, self.SOCKET_TIMEOUT_MS)
-        socket.connect(f"tcp://localhost:{self._get_dport()}")
+        if _cross_node_experimental_enabled():
+            peer_host = os.getenv("AFD_ZMQ_PEER_HOST", "127.0.0.1")
+            socket.connect(f"tcp://{peer_host}:{self._get_dport()}")
+        else:
+            socket.connect(f"tcp://localhost:{self._get_dport()}")
         return socket
 
     @cache
@@ -244,7 +434,8 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
         # E5: set receive timeout
         if self.SOCKET_TIMEOUT_MS > 0:
             socket.setsockopt(zmq.RCVTIMEO, self.SOCKET_TIMEOUT_MS)
-        socket.bind(f"tcp://*:{self._get_lport()}")
+        endpoint = f"tcp://*:{self._get_lport()}"
+        self._bind_pull_socket(socket, endpoint)
         return socket
 
     def close(self):
@@ -253,6 +444,14 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
             try:
                 sock = getter()
                 sock.close(linger=0)
+            except Exception:
+                pass
+        endpoint = f"tcp://*:{self._get_lport()}"
+        with _zmq_bound_endpoints_lock:
+            _zmq_bound_endpoints.discard(endpoint)
+        if self._handshake_rep is not None:
+            try:
+                self._handshake_rep.close(linger=0)
             except Exception:
                 pass
         try:
@@ -274,6 +473,10 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
 
     def recv_tensor(self) -> torch.Tensor:
         socket = self._get_pull_socket()
+        started = time.monotonic()
+        seq = self._diag_recv_count
+        if _cross_node_experimental_enabled() and seq < 8:
+            logger.info("AFD ZMQ recv begin: direction=peer->local rank=%d port=%d seq=%d", self._rank(), self._get_lport(), seq)
         # C1: receive raw bytes then reconstruct tensor
         try:
             metadata = socket.recv_pyobj()
@@ -287,19 +490,36 @@ class ZMQSimpleTensorCommunicator(FifoTensorCommunicator):
             buf = torch.frombuffer(raw, dtype=metadata["dtype"]).reshape(
                 metadata["shape"]
             )
-        return buf.to(self._get_cuda_device(), non_blocking=True)
+        result = buf.to(self._get_cuda_device(), non_blocking=True)
+        self._diag_recv_count += 1
+        if _cross_node_experimental_enabled() and seq < 8:
+            logger.info("AFD ZMQ recv complete: direction=peer->local rank=%d port=%d seq=%d shape=%s nbytes=%d elapsed_ms=%.1f", self._rank(), self._get_lport(), seq, list(result.shape), len(raw), (time.monotonic() - started) * 1000)
+        return result
 
     def send_tensor(self, x: torch.Tensor):
         socket = self._get_push_socket()
+        started = time.monotonic()
+        seq = self._diag_send_count
         # C1: send metadata + raw bytes (avoid pickle)
         cpu_tensor = x.detach().contiguous().cpu()
         metadata = {"shape": list(cpu_tensor.shape), "dtype": cpu_tensor.dtype}
+        nbytes = cpu_tensor.nelement() * cpu_tensor.element_size()
+        if _cross_node_experimental_enabled() and seq < 8:
+            logger.info("AFD ZMQ send begin: direction=local->peer rank=%d port=%d seq=%d shape=%s nbytes=%d", self._rank(), self._get_dport(), seq, metadata["shape"], nbytes)
         try:
             socket.send_pyobj(metadata, zmq.SNDMORE)
-            # numpy doesn't support bfloat16; use raw storage bytes instead
-            socket.send(bytes(cpu_tensor.untyped_storage()))
+            if _cross_node_experimental_enabled():
+                # Send only the logical payload, excluding unused storage capacity.
+                raw_bytes = cpu_tensor.view(torch.uint8).reshape(-1).numpy().tobytes()
+                socket.send(raw_bytes)
+            else:
+                # Preserve the original AFD wire behavior for existing tests.
+                socket.send(bytes(cpu_tensor.untyped_storage()))
         except zmq.Again:
             raise TimeoutError("AFD ZMQ send timed out — peer may be dead")
+        self._diag_send_count += 1
+        if _cross_node_experimental_enabled() and seq < 8:
+            logger.info("AFD ZMQ send complete: direction=local->peer rank=%d port=%d seq=%d shape=%s nbytes=%d elapsed_ms=%.1f", self._rank(), self._get_dport(), seq, metadata["shape"], nbytes, (time.monotonic() - started) * 1000)
 
 
 class StepMeshTensorCache:
@@ -697,6 +917,186 @@ class StepMeshTensorCommunicator(FifoTensorCommunicator):
             self.ffn_send(x)
 
 
+# --------------- TP-aware sharded ZMQ communicator ---------------
+
+
+def _shard_tensor_for_rank(
+    x: torch.Tensor, rank: int, group_size: int
+) -> Tuple[torch.Tensor, int]:
+    """Split a replicated AFD boundary tensor on tokens and pad uniformly."""
+    if x.ndim < 1:
+        raise ValueError("AFD ZMQ sharding requires a tensor with a token dimension")
+    if group_size < 1 or not 0 <= rank < group_size:
+        raise ValueError(f"Invalid sharding rank/group: {rank}/{group_size}")
+    original_num_tokens = x.shape[0]
+    chunk = (original_num_tokens + group_size - 1) // group_size
+    start = rank * chunk
+    shard = x[start : min(start + chunk, original_num_tokens)].contiguous()
+    if shard.shape[0] < chunk:
+        pad = torch.zeros(
+            chunk - shard.shape[0], *x.shape[1:], dtype=x.dtype, device=x.device
+        )
+        shard = torch.cat((shard, pad), dim=0)
+    return shard, original_num_tokens
+
+
+def _reassemble_tensor_shards(
+    shards: List[torch.Tensor], original_num_tokens: int
+) -> torch.Tensor:
+    """Rank-order concatenate uniformly padded token shards and crop padding."""
+    if not shards:
+        raise ValueError("Cannot reassemble an empty shard list")
+    return torch.cat(shards, dim=0)[:original_num_tokens]
+
+
+class _ZMQBufferSlot:
+    def __init__(self):
+        self.buffer = None
+        self.capacity = 0
+        self.sequence = -1
+        self.event = None
+        self.metadata = None
+        self.error = None
+        self.free = threading.Event()
+        self.free.set()
+
+    def resize(self, nbytes):
+        if self.buffer is None or self.capacity < nbytes:
+            self.buffer = torch.empty(nbytes, dtype=torch.uint8, pin_memory=True)
+            self.capacity = nbytes
+        return self.buffer
+
+    def acquire(self, sequence):
+        self.free.wait()
+        if self.error:
+            error, self.error = self.error, None
+            raise error
+        self.free.clear()
+        self.sequence = sequence
+
+
+class ShardedZMQTensorCommunicator(FifoTensorCommunicator):
+    """Per-rank ZMQ sharding, optionally with two reusable pinned slots."""
+    SLOT_COUNT = 2
+
+    def __init__(self, afd_perspective, local_tp_size, local_tp_rank, inner_comm=None):
+        super().__init__()
+        self.local_tp_size, self.local_tp_rank = local_tp_size, local_tp_rank
+        self.inner_comm = inner_comm or ZMQSimpleTensorCommunicator(afd_perspective)
+        self._tp_group = None
+        self._double_buffer = _zmq_double_buffer_enabled()
+        self._send_seq = self._recv_seq = 0
+        self._stats = {k: 0.0 for k in ("d2h_ms", "network_send_ms", "network_recv_ms", "h2d_ms", "messages")}
+        self._stats_lock = threading.Lock()
+        if self._double_buffer:
+            self._stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+            self._send_slots = [_ZMQBufferSlot() for _ in range(2)]
+            self._recv_slots = [_ZMQBufferSlot() for _ in range(2)]
+            self._send_queue, self._recv_ready = queue.Queue(), queue.Queue(maxsize=2)
+            self._closing = False
+            self._sender = threading.Thread(target=self._send_worker, daemon=True)
+            self._receiver = threading.Thread(target=self._recv_worker, daemon=True)
+            self._sender.start(); self._receiver.start()
+        logger.info("ShardedZMQ ready rank=%d K=%d double_buffer=%s", local_tp_rank, local_tp_size, self._double_buffer)
+
+    def _get_tp_group(self):
+        if self._tp_group is None:
+            from sglang.srt.distributed import get_tp_group
+            self._tp_group = get_tp_group()
+        return self._tp_group
+
+    def _add_stats(self, **values):
+        with self._stats_lock:
+            for key, value in values.items(): self._stats[key] += value
+            if values.get("messages") and int(self._stats["messages"]) % 64 == 0:
+                logger.info("AFD ZMQ transfer timing rank=%d %s", self.local_tp_rank, self._stats)
+
+    def timing_stats(self):
+        with self._stats_lock: return dict(self._stats)
+
+    def _send_worker(self):
+        socket = self.inner_comm._get_push_socket()
+        while True:
+            slot = self._send_queue.get()
+            if slot is None: return
+            try:
+                t0 = time.perf_counter()
+                if slot.event: slot.event.synchronize()
+                t1 = time.perf_counter()
+                socket.send_pyobj(slot.metadata, zmq.SNDMORE)
+                socket.send(slot.buffer[:slot.metadata["nbytes"]].numpy(), copy=True)
+                t2 = time.perf_counter()
+                self._add_stats(d2h_ms=(t1-t0)*1000, network_send_ms=(t2-t1)*1000, messages=1)
+            except Exception as exc: slot.error = exc
+            finally: slot.free.set()
+
+    def _recv_worker(self):
+        socket = self.inner_comm._get_pull_socket(); expected = 0
+        while not self._closing:
+            slot = self._recv_slots[expected % 2]; slot.free.wait(); slot.free.clear()
+            try:
+                t0 = time.perf_counter(); metadata = socket.recv_pyobj(); data = socket.recv(copy=False); t1 = time.perf_counter()
+                if metadata.get("sequence") != expected: raise RuntimeError(f"AFD ZMQ sequence mismatch: {metadata.get('sequence')} != {expected}")
+                raw = bytearray(data); slot.resize(len(raw))[:len(raw)].copy_(torch.frombuffer(raw, dtype=torch.uint8))
+                slot.metadata, slot.sequence = metadata, expected
+                self._add_stats(network_recv_ms=(t1-t0)*1000)
+                self._recv_ready.put(slot); expected += 1
+            except Exception as exc:
+                slot.error = exc; self._recv_ready.put(slot); return
+
+    def send_tensor_nonblocking(self, x, compute_event=None):
+        self.send_tensor(x)
+
+    def send_tensor(self, x):
+        shard, tokens = _shard_tensor_for_rank(x, self.local_tp_rank, self.local_tp_size)
+        if not self._double_buffer:
+            cpu = shard.detach().contiguous().cpu(); socket = self.inner_comm._get_push_socket()
+            metadata = {"shape": list(cpu.shape), "dtype": cpu.dtype, "original_num_tokens": tokens, "group_size": self.local_tp_size, "shard_rank": self.local_tp_rank}
+            socket.send_pyobj(metadata, zmq.SNDMORE); socket.send(cpu.view(torch.uint8).reshape(-1).numpy().tobytes()); return
+        sequence = self._send_seq; slot = self._send_slots[sequence % 2]; slot.acquire(sequence)
+        shard = shard.detach().contiguous(); nbytes = shard.nelement() * shard.element_size(); host = slot.resize(nbytes)
+        slot.metadata = {"shape": list(shard.shape), "dtype": shard.dtype, "nbytes": nbytes, "original_num_tokens": tokens, "group_size": self.local_tp_size, "shard_rank": self.local_tp_rank, "sequence": sequence}
+        if self._stream:
+            self._stream.wait_stream(torch.cuda.current_stream(shard.device))
+            with torch.cuda.stream(self._stream):
+                host[:nbytes].copy_(shard.view(torch.uint8).reshape(-1), non_blocking=True)
+                slot.event = torch.cuda.Event(); slot.event.record(self._stream)
+        else:
+            host[:nbytes].copy_(shard.view(torch.uint8).reshape(-1)); slot.event = None
+        self._send_seq += 1; self._send_queue.put(slot)
+
+    def recv_tensor(self):
+        if not self._double_buffer:
+            socket = self.inner_comm._get_pull_socket(); metadata = socket.recv_pyobj(); raw = bytearray(socket.recv(copy=False))
+            shard = torch.frombuffer(raw, dtype=metadata["dtype"]).reshape(metadata["shape"]).to(self.inner_comm._get_cuda_device(), non_blocking=True)
+        else:
+            slot = self._recv_ready.get()
+            if slot.error: error, slot.error = slot.error, None; raise error
+            metadata = slot.metadata
+            if slot.sequence != self._recv_seq: raise RuntimeError("AFD ZMQ local slot ordering violation")
+            host = slot.buffer[:metadata["nbytes"]].view(metadata["dtype"]).reshape(metadata["shape"]); t0 = time.perf_counter()
+            if self._stream:
+                with torch.cuda.stream(self._stream):
+                    shard = host.to(self.inner_comm._get_cuda_device(), non_blocking=True); event = torch.cuda.Event(); event.record(self._stream)
+                event.synchronize()
+            else: shard = host.clone()
+            self._add_stats(h2d_ms=(time.perf_counter()-t0)*1000); self._recv_seq += 1; slot.free.set()
+        if metadata.get("group_size") != self.local_tp_size or metadata.get("shard_rank") != self.local_tp_rank: raise RuntimeError("AFD ZMQ shard metadata mismatch")
+        gathered = [torch.empty_like(shard) for _ in range(self.local_tp_size)]
+        dist.all_gather(gathered, shard, group=self._get_tp_group().device_group)
+        return _reassemble_tensor_shards(gathered, metadata["original_num_tokens"])
+
+    def close(self):
+        if self._double_buffer:
+            for slot in self._send_slots: slot.free.wait()
+            self._closing = True; self._send_queue.put(None); self._sender.join(timeout=5)
+            logger.info("AFD ZMQ final transfer timing rank=%d %s", self.local_tp_rank, self.timing_stats())
+        self.inner_comm.close()
+
+    send_stream_ordered = send_tensor
+    recv_stream_ordered = recv_tensor
+
+
 # --------------- TP-aware communicator (rank-0 ZMQ + NVLink broadcast) ---------------
 
 
@@ -822,8 +1222,14 @@ class AsyncTensorCommunicator:
 
     _RING_SIZE = 3  # 3BO: support up to 3 concurrent recvs
 
-    def __init__(self, inner: FifoTensorCommunicator):
+    def __init__(
+        self,
+        inner: FifoTensorCommunicator,
+        *,
+        allow_background_recv: bool = False,
+    ):
         self.inner = inner
+        self._allow_background_recv = allow_background_recv
         self.comm_stream = (
             torch.cuda.Stream() if torch.cuda.is_available() else None
         )
@@ -849,12 +1255,15 @@ class AsyncTensorCommunicator:
         # Pre-allocated CUDA event pool to avoid per-send object creation (~15μs)
         self._event_pool_size = 16
         self._event_pool: list = []
-        self._event_pool_idx: int = 0
+        self._event_pool_idx = 0
+        self._available_events: queue.SimpleQueue = queue.SimpleQueue()
         if torch.cuda.is_available():
             self._event_pool = [
                 torch.cuda.Event(enable_timing=False)
                 for _ in range(self._event_pool_size)
             ]
+            for event in self._event_pool:
+                self._available_events.put(event)
 
     # Backward-compat properties for code that checks single-recv state.
     # With async recv, the ring slot may still be None while the background
@@ -882,9 +1291,14 @@ class AsyncTensorCommunicator:
         No Python object creation, no profiling overhead in hot path.
         """
         if self.comm_stream is not None and hasattr(self.inner, "send_tensor_nonblocking"):
-            # Reuse event from pre-allocated pool (avoids ~15μs object creation)
-            ev = self._event_pool[self._event_pool_idx]
-            self._event_pool_idx = (self._event_pool_idx + 1) % self._event_pool_size
+            # Reuse only events released by the sender daemon. A modulo
+            # index is unsafe when the producer gets more than 16 sends ahead:
+            # re-recording an in-flight CUDA event changes what synchronize()
+            # waits for and can stall or corrupt stream ordering.
+            try:
+                ev = self._available_events.get_nowait()
+            except queue.Empty:
+                ev = torch.cuda.Event(enable_timing=False)
             ev.record()  # record on current compute stream
 
             # Ensure persistent sender daemon is running
@@ -935,7 +1349,12 @@ class AsyncTensorCommunicator:
                     self.inner.send_tensor_nonblocking(x)
                 future = getattr(self.inner, "_last_send_future", None)
                 if future is not None:
+                    # ctypes.from_address does not own the CUDA allocation.
+                    # Capture x until UCX reports completion so PyTorch cannot
+                    # recycle its storage while RDMA is still in flight.
+                    future.add_done_callback(lambda _future, _x=x: None)
                     self._send_futures.append(future)
+                self._available_events.put(compute_event)
                 self._send_queue.task_done()
 
         self._sender_daemon = threading.Thread(
@@ -953,6 +1372,9 @@ class AsyncTensorCommunicator:
         comm_stream, isolated from the compute stream.
 
         Can be called up to RING_SIZE times before recv_wait drains slots.
+
+        NOTE: For CppIPC backend, uses synchronous recv in the calling thread
+        to avoid race conditions on the C++ recv_slot_ counter.
         """
         from sglang.srt.layers.afd_mixin import _afd_host_events, _afd_ctx
 
@@ -960,13 +1382,40 @@ class AsyncTensorCommunicator:
         _prof_layer = _afd_ctx.get("layer", -1)
         _prof_mb = _afd_ctx.get("mb", -1)
 
+        def _do_recv_sync():
+            """Synchronous recv - used for CppIPC to avoid recv_slot_ races."""
+            t0 = time.time()
+            tensor = self.inner.recv_tensor()
+            t1 = time.time()
+            _afd_host_events.append({
+                "ts_ms": round(t0 * 1000, 3),
+                "role": "UCX_PROFILE", "layer": _prof_layer, "mb": _prof_mb,
+                "event": "recv_start_detail",
+                "recv_inner_us": round((t1 - t0) * 1e6, 1),
+                "phase": "sync_ipc",
+            })
+            self._recv_ring[idx] = tensor
+            self._recv_event_ring[idx] = None
+
+        # Backends can explicitly reject concurrent receives. Keep the legacy
+        # _recv_lock signal for communicators that have not declared capability.
+        supports_concurrent_recv = getattr(
+            self.inner,
+            "supports_concurrent_recv",
+            not hasattr(self.inner, "_recv_lock"),
+        )
+        _use_sync_recv = not supports_concurrent_recv and not self._allow_background_recv
+        if _use_sync_recv:
+            _do_recv_sync()
+            self._recv_threads[idx] = None
+            self._recv_idx_write = (self._recv_idx_write + 1) % self._RING_SIZE
+            self._pending_recv_count += 1
+            return
+
         def _deferred_recv(_l=_prof_layer, _m=_prof_mb):
             t0 = time.time()
             if hasattr(self.inner, "recv_poll"):
-                # 2-phase IPC: bg-thread flag polling only (no GPU ops).
-                # Avoids 10-40ms bg-thread event.synchronize() bottleneck.
-                # Main thread does GPU copy + sync in recv_wait via recv_complete.
-                slot_info = self.inner.recv_poll()  # (slot, total_bytes)
+                slot_info = self.inner.recv_poll()
                 event = None
                 t1 = time.time()
                 _afd_host_events.append({
@@ -977,6 +1426,29 @@ class AsyncTensorCommunicator:
                     "phase": "poll_only",
                 })
                 self._recv_ring[idx] = slot_info
+                self._recv_event_ring[idx] = None
+            elif (
+                hasattr(self.inner, "recv_rdma_only")
+                and getattr(self.inner, "_split_phase_recv", False)
+                and getattr(self.inner, "_local_tp", 1) > 1
+            ):
+                # K=1 + TP>1: only RDMA recv in the background. Keep the
+                # payload in this ring slot; all ranks enter NCCL broadcast
+                # together from recv_wait on their main threads.
+                try:
+                    tensor = self.inner.recv_rdma_only()
+                    result = ("rdma_done", tensor)
+                except BaseException as exc:
+                    result = ("rdma_error", exc)
+                t1 = time.time()
+                _afd_host_events.append({
+                    "ts_ms": round(t0 * 1000, 3),
+                    "role": "UCX_PROFILE", "layer": _l, "mb": _m,
+                    "event": "recv_start_detail",
+                    "recv_inner_us": round((t1 - t0) * 1e6, 1),
+                    "phase": "rdma_only",
+                })
+                self._recv_ring[idx] = result
                 self._recv_event_ring[idx] = None
             elif self.comm_stream is not None:
                 # Use per-slot stream so multiple recvs can have their
@@ -1016,6 +1488,13 @@ class AsyncTensorCommunicator:
         self._recv_idx_write = (self._recv_idx_write + 1) % self._RING_SIZE
         self._pending_recv_count += 1
 
+    def _release_recv_slot(self, idx: int):
+        self._recv_ring[idx] = None
+        self._recv_event_ring[idx] = None
+        self._recv_threads[idx] = None
+        self._recv_idx_read = (self._recv_idx_read + 1) % self._RING_SIZE
+        self._pending_recv_count -= 1
+
     @torch.compiler.disable()
     def recv_wait(self) -> torch.Tensor:
         """3BO: drain the oldest pending recv from the ring."""
@@ -1043,6 +1522,33 @@ class AsyncTensorCommunicator:
 
         ev = self._recv_event_ring[idx]
         data = self._recv_ring[idx]
+
+        # K=1 + TP>1 split phase: RDMA completed in the background;
+        # broadcast is deliberately issued here by every TP rank.
+        if isinstance(data, tuple) and data and data[0] == "rdma_error":
+            self._release_recv_slot(idx)
+            raise RuntimeError("background GPU-Direct receive failed") from data[1]
+        if isinstance(data, tuple) and data and data[0] == "rdma_done":
+            # A response cannot arrive before the peer consumed our request,
+            # but drain the local submit queue so its tensor/event lifetime is
+            # no longer owned by the sender daemon. The UCX future is already
+            # complete in the normal request/response path.
+            if self._send_queue is not None:
+                self._send_queue.join()
+            if hasattr(self.inner, "fence"):
+                self.inner.fence()
+            t_bcast = time.time()
+            tensor = self.inner.recv_broadcast(data[1], slot=idx)
+            t_bcast_end = time.time()
+            _afd_host_events.append({
+                "ts_ms": round(t_bcast * 1000, 3),
+                "role": "UCX_PROFILE", "layer": _prof_layer, "mb": _prof_mb,
+                "event": "recv_broadcast",
+                "thread_wait_us": round((t1 - t0) * 1e6, 1),
+                "broadcast_us": round((t_bcast_end - t_bcast) * 1e6, 1),
+            })
+            self._release_recv_slot(idx)
+            return tensor
 
         # 2-phase IPC: bg thread polled flag only, main thread does GPU copy
         if hasattr(self.inner, "recv_complete") and isinstance(data, tuple):
@@ -1087,10 +1593,7 @@ class AsyncTensorCommunicator:
             "cuda_sync_us": round((t4 - t3) * 1e6, 1),
         })
 
-        self._recv_ring[idx] = None
-        self._recv_event_ring[idx] = None
-        self._recv_idx_read = (self._recv_idx_read + 1) % self._RING_SIZE
-        self._pending_recv_count -= 1
+        self._release_recv_slot(idx)
         return tensor
 
     @torch.compiler.disable()
@@ -1177,6 +1680,14 @@ class AsyncTensorCommunicator:
 
 
 _async_communicator: Optional[AsyncTensorCommunicator] = None
+_async_communicator_lock = threading.Lock()
+# functools.cache is not single-flight: concurrent misses may both construct.
+# Preserve the legacy path and lock only the cross-node experiment.
+_experimental_tensor_communicators: Dict[AFDPerspective, FifoTensorCommunicator] = {}
+_experimental_async_communicators: Dict[AFDPerspective, AsyncTensorCommunicator] = {}
+_experimental_communicator_lock = threading.RLock()
+_afd_peer_channel_pool = None
+_afd_peer_channel_pool_lock = threading.Lock()
 
 # Per-mb override: when the data-driven AsyncMbDriver is running, it sets
 # this to the current mb's AsyncTensorCommunicator so prepare_mlp /
@@ -1197,17 +1708,172 @@ def get_afd_communicator():
         return None
 
 
-def get_async_communicator() -> AsyncTensorCommunicator:
+def peek_async_communicator() -> Optional[AsyncTensorCommunicator]:
+    """Return an already-created async communicator without building one.
+
+    This accessor is for status/idle observation paths that must remain safe
+    after ``reset_afd_communicators``. In particular, it never creates a tensor
+    communicator, peer-channel pool, or transport connection.
+    """
     if _per_mb_async_override is not None:
         return _per_mb_async_override
-    global _async_communicator
-    if _async_communicator is None:
-        _async_communicator = AsyncTensorCommunicator(get_tensor_communicator())
+
+    server_args = get_global_server_args()
+    if getattr(server_args, "afd_multi_pf_continuation", False):
+        pool = _afd_peer_channel_pool
+        if pool is None:
+            return None
+        perspective = get_afd_perspective()
+        group_id = (
+            0
+            if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN
+            else int(getattr(server_args, "afd_pf_group_id", 0))
+        )
+        try:
+            return pool[group_id].async_comm
+        except KeyError:
+            return None
+
+    if _cross_node_experimental_enabled():
+        perspective = get_afd_perspective()
+        if perspective is None:
+            return None
+        with _experimental_communicator_lock:
+            return _experimental_async_communicators.get(perspective)
+
     return _async_communicator
 
 
-@cache
-def get_tensor_communicator() -> FifoTensorCommunicator:
+def get_existing_async_communicator() -> Optional[AsyncTensorCommunicator]:
+    """Compatibility alias for the side-effect-free async communicator lookup."""
+    return peek_async_communicator()
+
+
+def get_async_communicator() -> AsyncTensorCommunicator:
+    if _per_mb_async_override is not None:
+        return _per_mb_async_override
+    server_args = get_global_server_args()
+    if getattr(server_args, "afd_multi_pf_continuation", False):
+        pool = get_afd_peer_channel_pool()
+        perspective = get_afd_perspective()
+        group_id = (
+            0
+            if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN
+            else int(getattr(server_args, "afd_pf_group_id", 0))
+        )
+        return pool[group_id].async_comm
+    if _cross_node_experimental_enabled():
+        perspective = get_afd_perspective()
+        if perspective is None:
+            raise RuntimeError("AFD perspective is not set.")
+        with _experimental_communicator_lock:
+            comm = _experimental_async_communicators.get(perspective)
+            if comm is None:
+                comm = AsyncTensorCommunicator(get_tensor_communicator())
+                _experimental_async_communicators[perspective] = comm
+                logger.warning(
+                    "Cached experimental AFD async communicator pid=%d thread=%s "
+                    "perspective=%s singleton_id=%d inner_id=%d",
+                    os.getpid(), threading.current_thread().name, perspective,
+                    id(comm), id(comm.inner),
+                )
+            return comm
+
+    global _async_communicator
+    if _async_communicator is None:
+        with _async_communicator_lock:
+            if _async_communicator is None:
+                _async_communicator = AsyncTensorCommunicator(
+                    get_tensor_communicator()
+                )
+    return _async_communicator
+
+
+def get_afd_peer_channel_pool():
+    """Build the fixed group→channel registry for shared-PA mode."""
+    global _afd_peer_channel_pool
+    if _afd_peer_channel_pool is not None:
+        return _afd_peer_channel_pool
+
+    with _afd_peer_channel_pool_lock:
+        if _afd_peer_channel_pool is not None:
+            return _afd_peer_channel_pool
+
+        from sglang.srt.layers.afd_multi_peer import (
+            AFDPeerChannelPool,
+            AFDPeerSpec,
+        )
+        from sglang.srt.layers.afd_ipc_cpp.communicator import (
+            CppIpcTensorCommunicator,
+        )
+
+        server_args = get_global_server_args()
+        perspective = get_afd_perspective()
+        group_count = int(server_args.afd_pf_group_count)
+        group_id = int(server_args.afd_pf_group_id)
+        channel_base = int(server_args.afd_pf_channel_base)
+        peer_devices = [
+            int(item.strip())
+            for item in server_args.afd_pf_peer_devices.split(",")
+            if item.strip()
+        ]
+
+        if perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN:
+            specs = [
+                AFDPeerSpec(
+                    group_id=i,
+                    channel_id=channel_base + i * 16,
+                    peer_device=peer_devices[i],
+                )
+                for i in range(group_count)
+            ]
+
+            def comm_factory(role, *, peer_device, channel_id):
+                return CppIpcTensorCommunicator(
+                    role,
+                    peer_device=peer_device,
+                    channel_id=channel_id,
+                )
+        else:
+            specs = [
+                AFDPeerSpec(
+                    group_id=group_id,
+                    channel_id=channel_base + group_id * 16,
+                    peer_device=peer_devices[0],
+                )
+            ]
+            local_tp = server_args.tp_size
+            local_tp_rank = (
+                dist.get_rank() % local_tp if dist.is_initialized() else 0
+            )
+
+            def comm_factory(role, *, peer_device, channel_id):
+                inner = (
+                    CppIpcTensorCommunicator(
+                        role,
+                        peer_device=peer_device,
+                        channel_id=channel_id,
+                    )
+                    if local_tp_rank == 0
+                    else None
+                )
+                if local_tp <= 1:
+                    return inner
+                return BroadcastTensorCommunicator(
+                    inner_comm=inner,
+                    local_tp_size=local_tp,
+                    local_tp_rank=local_tp_rank,
+                )
+
+        _afd_peer_channel_pool = AFDPeerChannelPool(
+            perspective,
+            specs,
+            comm_factory=comm_factory,
+        )
+        return _afd_peer_channel_pool
+
+
+def _create_tensor_communicator() -> FifoTensorCommunicator:
     perspective = get_afd_perspective()
     if perspective is None:
         raise RuntimeError("AFD perspective is not set.")
@@ -1232,6 +1898,17 @@ def get_tensor_communicator() -> FifoTensorCommunicator:
 
         local_tp = server_args.tp_size
         local_tp_rank = dist.get_rank() % local_tp if dist.is_initialized() else 0
+        if getattr(server_args, "afd_ipc_per_rank", False):
+            attn_tp = server_args.afd_attn_tp or local_tp
+            ffn_tp = server_args.afd_ffn_tp or local_tp
+            if attn_tp != local_tp or ffn_tp != local_tp:
+                raise ValueError(
+                    "--afd-ipc-per-rank requires homogeneous A/F TP: "
+                    f"afd_attn_tp={attn_tp}, afd_ffn_tp={ffn_tp}, local_tp={local_tp}"
+                )
+            return CppIpcTensorCommunicator(
+                perspective, channel_rank=local_tp_rank
+            )
         if local_tp > 1:
             base_comm = CppIpcTensorCommunicator(perspective) if local_tp_rank == 0 else None
             return BroadcastTensorCommunicator(
@@ -1240,6 +1917,26 @@ def get_tensor_communicator() -> FifoTensorCommunicator:
                 local_tp_rank=local_tp_rank,
             )
         return CppIpcTensorCommunicator(perspective)
+
+    if comm_backend == "afd_reshard_loopback":
+        from sglang.srt.layers.afd_reshard_loopback import (
+            AFDReshardLoopbackTensorCommunicator,
+        )
+
+        local_tp = server_args.tp_size
+        local_tp_rank = dist.get_rank() % local_tp if dist.is_initialized() else 0
+        base_comm = (
+            AFDReshardLoopbackTensorCommunicator(perspective)
+            if local_tp_rank == 0
+            else None
+        )
+        if local_tp > 1:
+            return BroadcastTensorCommunicator(
+                inner_comm=base_comm,
+                local_tp_size=local_tp,
+                local_tp_rank=local_tp_rank,
+            )
+        return base_comm
 
     if comm_backend == "nccl_p2p":
         from sglang.srt.layers.nccl_p2p_comm import NcclP2pTensorCommunicator
@@ -1262,9 +1959,14 @@ def get_tensor_communicator() -> FifoTensorCommunicator:
     ):
         return StepMeshTensorCommunicator(perspective)
 
-    # ZMQ path: only rank 0 does ZMQ, others get data via NVLink broadcast.
+    # ZMQ baseline remains rank-0 + TP broadcast. Experimental sharding is
+    # strictly double-gated and gives every local TP rank its own peer socket.
     local_tp = server_args.tp_size
-    local_tp_rank = dist.get_rank() % local_tp if dist.is_initialized() else 0
+    local_tp_rank = ZMQSimpleTensorCommunicator._rank(None)
+    if local_tp > 1 and _zmq_sharding_enabled():
+        return ShardedZMQTensorCommunicator(
+            perspective, local_tp_size=local_tp, local_tp_rank=local_tp_rank
+        )
     if local_tp > 1:
         base_comm = ZMQSimpleTensorCommunicator(perspective) if local_tp_rank == 0 else None
         return BroadcastTensorCommunicator(
@@ -1273,6 +1975,66 @@ def get_tensor_communicator() -> FifoTensorCommunicator:
             local_tp_rank=local_tp_rank,
         )
     return ZMQSimpleTensorCommunicator(perspective)
+
+
+@cache
+def _get_legacy_tensor_communicator() -> FifoTensorCommunicator:
+    return _create_tensor_communicator()
+
+
+def get_tensor_communicator() -> FifoTensorCommunicator:
+    """Return one communicator per process/perspective in experimental mode."""
+    if not _cross_node_experimental_enabled():
+        return _get_legacy_tensor_communicator()
+    perspective = get_afd_perspective()
+    if perspective is None:
+        raise RuntimeError("AFD perspective is not set.")
+    with _experimental_communicator_lock:
+        comm = _experimental_tensor_communicators.get(perspective)
+        if comm is None:
+            comm = _create_tensor_communicator()
+            _experimental_tensor_communicators[perspective] = comm
+            logger.warning(
+                "Cached experimental AFD tensor communicator pid=%d thread=%s "
+                "perspective=%s singleton_id=%d cache_id=%d",
+                os.getpid(), threading.current_thread().name, perspective,
+                id(comm), id(_experimental_tensor_communicators),
+            )
+        return comm
+
+
+def reset_afd_communicators() -> None:
+    """Close and clear process-local communicators for lazy TP-aware rebuild."""
+    global _async_communicator, _afd_peer_channel_pool, _per_mb_async_override
+    with _experimental_communicator_lock:
+        communicators = list(_experimental_tensor_communicators.values())
+        _experimental_async_communicators.clear()
+        _experimental_tensor_communicators.clear()
+    legacy_comm = None
+    if _get_legacy_tensor_communicator.cache_info().currsize:
+        legacy_comm = _get_legacy_tensor_communicator()
+    _get_legacy_tensor_communicator.cache_clear()
+    with _async_communicator_lock:
+        _async_communicator = None
+        _per_mb_async_override = None
+    with _afd_peer_channel_pool_lock:
+        peer_pool = _afd_peer_channel_pool
+        _afd_peer_channel_pool = None
+    if peer_pool is not None:
+        try:
+            peer_pool.drain()
+        except Exception:
+            logger.exception("Failed to drain shared-PA channel pool")
+    if legacy_comm is not None:
+        communicators.append(legacy_comm)
+    seen = set()
+    for comm in communicators:
+        if id(comm) in seen:
+            continue
+        seen.add(id(comm))
+        close = getattr(comm, "close", None)
+        if close is not None:
+            close()
 
 
 def get_afd_micro_batch() -> int:
@@ -1492,18 +2254,34 @@ def model_forward_afd(
         m_stage = len(forward_batch.afd_children)
     else:
         m_stage = 1
+    _afd_ctx["m_stage"] = m_stage
 
     _async_sched_enabled = bool(
         getattr(get_global_server_args(), "afd_async_schedule", False)
     )
+    _multi_pf_enabled = bool(
+        getattr(
+            get_global_server_args(),
+            "afd_multi_pf_continuation",
+            False,
+        )
+        and afd_is_attn()
+        and m_stage > 1
+    )
 
-    # Clean up any stale pre-issue recv state from a previous pass
-    if not _async_sched_enabled:
-        try:
-            comm = get_async_communicator()
-            comm.drain_recvs()
-        except Exception:
-            pass
+    # Drain pending sends from previous forward is done at scheduler level
+    # (before entering model_forward_afd) to maximize overlap.
+    # Here we only drain recvs to clean up stale pre-issue state.
+    try:
+        comm = get_async_communicator()
+        comm.drain_recvs()
+        # Reset UCX metadata cache so both peers re-exchange shape/dtype
+        # at the start of each forward pass (tensor shape changes between
+        # requests with different batch sizes or sequence lengths).
+        if hasattr(comm.inner, "reset_metadata_cache"):
+            comm.inner.reset_metadata_cache()
+    except Exception:
+        pass
 
     # Reset timing records for this forward pass
     if _afd_timing_enabled:
@@ -1530,11 +2308,18 @@ def model_forward_afd(
     # the AsyncMbDriver.  The interleaved schedule is selected above and
     # executed by the same pipeline loop below.  This branch is kept as
     # dead code for reference but disabled.
-    if False and _async_sched_enabled:
+    if _multi_pf_enabled:
         from sglang.srt.layers.afd_async_sched import AsyncMbDriver
-        from sglang.srt.layers.afd_per_mb_channel import get_per_mb_channel_set
 
-        channels = get_per_mb_channel_set(m_stage)
+        channels = get_afd_peer_channel_pool()
+        expected_groups = [
+            child.afd_pf_group_id for child in forward_batch.afd_children
+        ]
+        if expected_groups != list(range(m_stage)):
+            raise RuntimeError(
+                "Shared-PA MVP requires contiguous lane/group mapping: "
+                f"got groups={expected_groups}, m_stage={m_stage}"
+            )
         driver = AsyncMbDriver(
             perspective=get_afd_perspective(),
             layers=layers,
@@ -1576,7 +2361,8 @@ def model_forward_afd(
                     f"model_forward_afd (async): mb {i} hidden_states empty"
                 )
 
-        if torch.cuda.is_available():
+        # Only sync in profiling mode; merge copies are stream-ordered.
+        if _detailed_timing_enabled and torch.cuda.is_available():
             torch.cuda.synchronize()
 
         total_tokens = sum(m.hidden_states.shape[0] for m in mbs_final)
@@ -1722,7 +2508,20 @@ def model_forward_afd(
     # IPC backend: uses per-slot SHM flags (RING_SIZE=4) and 2-phase recv
     # (bg-thread flag polling only, main-thread GPU copy) to avoid both
     # flag races and bg-thread event.synchronize() overhead.
-    _async_recv_enabled = m_stage > 1
+    # Pre-issue is only valid when recv_start() is actually non-blocking.
+    # CppIPC serializes recv_tensor() with _recv_lock, so recv_start() runs the
+    # receive synchronously in the scheduler thread. Pre-issuing another receive
+    # after A(L, mb1) would then wait for F(L, mb1) before the scheduler can
+    # consume the already-ready F(L, mb0) and launch A(L+1, mb0), creating an
+    # implicit layer barrier. For such backends, receive on demand in the
+    # interleaved F stage instead.
+    _recv_comm = get_async_communicator()
+    _supports_nonblocking_recv = getattr(
+        _recv_comm.inner,
+        "supports_concurrent_recv",
+        not hasattr(_recv_comm.inner, "_recv_lock"),
+    )
+    _async_recv_enabled = m_stage > 1 and _supports_nonblocking_recv
     _afd_pipe_logger = logging.getLogger("afd_pipeline")
 
     # === Precompute preissue schedule (eliminates O(n) sum() per iteration) ===
@@ -1767,6 +2566,8 @@ def model_forward_afd(
     # ═══ FAST PATH: M=1, no timing, no async recv ═══════════════════════
     # Eliminates ~36ms of Python overhead (128 iterations of dict lookups,
     # context updates, conditional checks, deque operations).
+    # With batch-level round-robin, each batch targets a single PF group,
+    # so we can safely use the fast path with channel override.
     _use_fast_path = (
         m_stage == 1
         and not _async_recv_enabled
@@ -1774,138 +2575,77 @@ def model_forward_afd(
     )
 
     if _use_fast_path:
+        # M=1 uses the proven per-layer AFD communicator path.  This preserves
+        # model-specific residual/normalization semantics and keeps IPC protocol
+        # ownership in AFDCommunicator instead of duplicating it here.
         hs = input_arrs[0]["hidden_states"]
         res = input_arrs[0]["residual"]
         pos = input_arrs[0]["positions"]
         fb = input_arrs[0]["forward_batch"]
-        _lp = os.environ.get("SGLANG_LAYER_PROFILE", "0") == "2"
-        if _lp:
-            _lp_a_times = []
-            _lp_f_times = []
-            torch.cuda.synchronize()
+
+        # NOTE: For multi-PF continuation (batch-level RR), route through
+        # the correct channel for the target PF group.
+        global _per_mb_async_override
+        _fast_path_override = None
+        if getattr(get_global_server_args(), "afd_multi_pf_continuation", False) and afd_is_attn():
+            _target_group = getattr(fb, "afd_pf_group_id", 0)
+            if _target_group != 0:
+                pool = get_afd_peer_channel_pool()
+                _fast_path_override = pool[_target_group].async_comm
+                _per_mb_async_override = _fast_path_override
+        try:
+            _lp = os.environ.get("SGLANG_LAYER_PROFILE", "0") == "2"
+            if _lp:
+                _lp_a_times = []
+                _lp_f_times = []
+                torch.cuda.synchronize()
             for layer in layers:
-                _t0 = time.time()
+                if _lp:
+                    _t0 = time.time()
                 hs, res = layer.forward_afd_A(pos, hs, fb, res)
-                torch.cuda.synchronize()
-                _t1 = time.time()
+                if _lp:
+                    torch.cuda.synchronize()
+                    _t1 = time.time()
                 hs, res = layer.forward_afd_F(hs, fb, res)
-                torch.cuda.synchronize()
-                _t2 = time.time()
-                _lp_a_times.append(_t1 - _t0)
-                _lp_f_times.append(_t2 - _t1)
-            _a_total = sum(_lp_a_times) * 1000
-            _f_total = sum(_lp_f_times) * 1000
-            _n = len(_lp_a_times)
-            logger.info(
-                f"[AFD_FASTPATH_PROFILE] layers={_n} bs={hs.shape[0]} "
-                f"A_total={_a_total:.1f}ms F_total={_f_total:.1f}ms "
-                f"total={_a_total+_f_total:.1f}ms "
-                f"A_mean={_a_total/_n:.3f}ms F_mean={_f_total/_n:.3f}ms"
-            )
-        elif afd_is_attn():
-            _comm = get_async_communicator()
-            _ipc = _comm.inner
-            _use_gpu_ipc = (
-                os.environ.get("AFD_GPU_ONLY_IPC", "0") == "1"
-                and hasattr(_ipc, "send_tensor_gpu_only")
-            )
-            _use_fused = (
-                os.environ.get("AFD_FUSED_PIPELINE", "0") == "1"
-                and hasattr(_ipc, "get_fused_pipeline")
-            )
-            if _use_fused:
-                # C++ fused pipeline: send_recv in one C++ call per layer
-                _fp = _ipc.get_fused_pipeline()
-                # First layer: use full recv to cache metadata
-                layer = layers[0]
-                _inner_lc = layer.layer_communicator.layer_communicator
-                hs, res = _inner_lc.prepare_attn(hs, res, fb)
-                if hs.shape[0] != 0:
-                    hs = layer._run_attn(pos, hs, fb)
-                hs, res = _inner_lc.prepare_mlp(hs, res, fb)
-                _fp.send_only(hs)
-                hs = _fp.recv_only()
-                if not hs.is_contiguous():
-                    hs = hs.contiguous()
-                hs, res = _inner_lc.postprocess_layer(hs, res, fb)
-                # Remaining layers: fused send_recv (1 C++ call instead of 2)
-                for layer in layers[1:]:
-                    _inner_lc = layer.layer_communicator.layer_communicator
-                    hs, res = _inner_lc.prepare_attn(hs, res, fb)
-                    if hs.shape[0] != 0:
-                        hs = layer._run_attn(pos, hs, fb)
-                    hs, res = _inner_lc.prepare_mlp(hs, res, fb)
-                    hs = _fp.send_recv(hs)
-                    if not hs.is_contiguous():
-                        hs = hs.contiguous()
-                    hs, res = _inner_lc.postprocess_layer(hs, res, fb)
-            elif _use_gpu_ipc:
-                for layer in layers[1:]:
-                    _inner_lc = layer.layer_communicator.layer_communicator
-                    hs, res = _inner_lc.prepare_attn(hs, res, fb)
-                    if hs.shape[0] != 0:
-                        hs = layer._run_attn(pos, hs, fb)
-                    hs, res = _inner_lc.prepare_mlp(hs, res, fb)
-                    _ipc.send_tensor_gpu_only(hs)
-                    hs = _ipc.recv_tensor_gpu_only()
-                    if not hs.is_contiguous():
-                        hs = hs.contiguous()
-                    hs, res = _inner_lc.postprocess_layer(hs, res, fb)
-            else:
-                for layer in layers[1:]:
-                    _inner_lc = layer.layer_communicator.layer_communicator
-                    hs, res = _inner_lc.prepare_attn(hs, res, fb)
-                    if hs.shape[0] != 0:
-                        hs = layer._run_attn(pos, hs, fb)
-                    hs, res = _inner_lc.prepare_mlp(hs, res, fb)
-                    _ipc.send_tensor(hs)
-                    hs = _ipc.recv_tensor()
-                    if not hs.is_contiguous():
-                        hs = hs.contiguous()
-                    hs, res = _inner_lc.postprocess_layer(hs, res, fb)
-        else:
-            _comm = get_async_communicator()
-            _ipc = _comm.inner
-            _use_gpu_ipc = (
-                os.environ.get("AFD_GPU_ONLY_IPC", "0") == "1"
-                and hasattr(_ipc, "send_tensor_gpu_only")
-            )
-            _use_fused = (
-                os.environ.get("AFD_FUSED_PIPELINE", "0") == "1"
-                and hasattr(_ipc, "get_fused_pipeline")
-            )
-            if _use_fused:
-                _fp = _ipc.get_fused_pipeline()
-                # First layer: full recv to cache metadata
-                layer = layers[0]
-                hs = _fp.recv_only()
-                if not hs.is_contiguous():
-                    hs = hs.contiguous()
-                hs = layer._run_mlp(hs, fb)
-                _fp.send_only(hs)
-                # Remaining layers: fused recv + compute + send
-                for layer in layers[1:]:
-                    hs = _fp.recv_only()
-                    if not hs.is_contiguous():
-                        hs = hs.contiguous()
-                    hs = layer._run_mlp(hs, fb)
-                    _fp.send_only(hs)
-            elif _use_gpu_ipc:
-                for layer in layers[1:]:
-                    hs = _ipc.recv_tensor_gpu_only()
-                    if not hs.is_contiguous():
-                        hs = hs.contiguous()
-                    hs = layer._run_mlp(hs, fb)
-                    _ipc.send_tensor_gpu_only(hs)
-            else:
-                for layer in layers[1:]:
-                    hs = _ipc.recv_tensor()
-                    if not hs.is_contiguous():
-                        hs = hs.contiguous()
-                    hs = layer._run_mlp(hs, fb)
-                    _ipc.send_tensor(hs)
+                if _lp:
+                    torch.cuda.synchronize()
+                    _t2 = time.time()
+                    _lp_a_times.append(_t1 - _t0)
+                    _lp_f_times.append(_t2 - _t1)
+            if _lp and _lp_a_times:
+                _a_total = sum(_lp_a_times) * 1000
+                _f_total = sum(_lp_f_times) * 1000
+                _n = len(_lp_a_times)
+                logger.info(
+                    f"[AFD_FASTPATH_PROFILE] layers={_n} bs={hs.shape[0]} "
+                    f"A_total={_a_total:.1f}ms F_total={_f_total:.1f}ms "
+                    f"total={_a_total+_f_total:.1f}ms "
+                    f"A_mean={_a_total/_n:.3f}ms F_mean={_f_total/_n:.3f}ms"
+                )
+        finally:
+            if _fast_path_override is not None:
+                _per_mb_async_override = None
         results = [StageIO(hs, res)]
     else:
+        # In shared-PA multi-PF mode (batch-level RR), all requests in a batch
+        # go to a single PF group. Route IPC through that group's channel.
+        _pipeline_override = None
+        if (
+            getattr(get_global_server_args(), "afd_multi_pf_continuation", False)
+            and afd_is_attn()
+            and m_stage == 1
+        ):
+            _target_group = getattr(forward_batch, "afd_pf_group_id", 0)
+            if _target_group != 0:
+                pool = get_afd_peer_channel_pool()
+                _pipeline_override = pool[_target_group].async_comm
+                _per_mb_async_override = _pipeline_override
+
+        # Reset CppIPC metadata cache since tensor shapes may differ from
+        # previous iteration (which may have used a different channel).
+        _reset_comm = get_async_communicator().inner
+        if hasattr(_reset_comm, "reset_cache"):
+            _reset_comm.reset_cache()
         for i, (stage_type, *args) in enumerate(pipeline):
             stage_name = stage_type.name
             layer_id = args[0] if args else -1
@@ -1951,14 +2691,20 @@ def model_forward_afd(
                 "model_forward_afd: unexpected empty queue — potential implementation bug"
             )
 
+        # Clear per-mb override set for multi-PF channel routing
+        if _pipeline_override is not None:
+            _per_mb_async_override = None
+
     _t_pipeline_end = time.time()
 
-    # ── 3BO: drain all pending sends + recvs before returning ──────
+    # ── 3BO: drain pending recvs before returning ──────────────────────
     # drain_recvs prevents stale pre-issue state from leaking into
     # the next forward pass when m_stage changes (e.g. M=3 → M=1).
+    # drain_sends is DEFERRED to the start of the next forward pass
+    # so that the scheduler can overlap CPU work (process_batch_result,
+    # recv_requests, get_next_batch) with the GPU finishing sends.
     try:
         comm = get_async_communicator()
-        comm.drain_sends()
         comm.drain_recvs()
     except Exception:
         pass
@@ -2042,8 +2788,13 @@ def model_forward_afd(
                 f"(shape={r.hidden_states.shape}) — likely a communication or split mismatch"
             )
 
-    # Sync CUDA to catch async errors from upstream kernels before merge
-    if torch.cuda.is_available():
+    # Detailed merge wall timing is benchmark-only and env-gated.  Keep the
+    # default path free of synchronization/event overhead.
+    _t_merge_start = time.perf_counter() if _detailed_timing_enabled else 0.0
+
+    # Sync CUDA only in timing/profiling mode.  In production the merge
+    # copies are stream-ordered and will execute after upstream kernels.
+    if _detailed_timing_enabled and torch.cuda.is_available():
         torch.cuda.synchronize()
 
     total_tokens = sum(r.hidden_states.shape[0] for r in results)
@@ -2072,6 +2823,16 @@ def model_forward_afd(
         if need_residual:
             merged_residual[offset : offset + n] = r.residual
         offset += n
+
+    if _detailed_timing_enabled:
+        # Synchronize only in profiling mode so host wall includes completion
+        # of the output slice copies rather than launch time alone.
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        logger.error(
+            f"[AFD_MERGE] perspective={'attn' if afd_is_attn() else 'ffn'} "
+            f"M={m_stage} merge_ms={(time.perf_counter() - _t_merge_start) * 1000:.3f}"
+        )
 
     return merged_hidden, merged_residual
 
@@ -2167,8 +2928,15 @@ class AFDCommunicator:
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch, **kwargs
         )
-        # C2: send to FFN — pre-launch cached send (stable)
-        comm.inner.send_stream_ordered(hidden_states)
+        # Queue A→F only when split-phase GPU-Direct is enabled. Other
+        # backends retain their established stream-ordered behavior.
+        if (
+            getattr(comm.inner, "_split_phase_recv", False)
+            and _afd_ctx.get("m_stage", 1) > 1
+        ):
+            comm.send_async(hidden_states)
+        else:
+            comm.inner.send_stream_ordered(hidden_states)
         return hidden_states, residual
 
     @torch.compiler.disable()
@@ -2182,8 +2950,15 @@ class AFDCommunicator:
 
         comm = get_async_communicator()
         if self.perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
-            # C2: send result back to Attn — pre-launch cached send (stable)
-            comm.inner.send_stream_ordered(hidden_states)
+            # Queue F→A without blocking the FFN compute thread when the
+            # matching split receive is enabled.
+            if (
+                getattr(comm.inner, "_split_phase_recv", False)
+                and _afd_ctx.get("m_stage", 1) > 1
+            ):
+                comm.send_async(hidden_states)
+            else:
+                comm.inner.send_stream_ordered(hidden_states)
             return hidden_states, residual
 
         # R4: true overlap — recv_start was already issued by

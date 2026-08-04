@@ -96,7 +96,7 @@ from sglang.srt.utils import (
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
-from sglang.srt.utils.network import get_zmq_socket
+from sglang.srt.utils.network import get_free_port, get_zmq_socket
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.version import __version__
 
@@ -106,6 +106,159 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 _is_cuda = is_cuda()
 
 
+class SchedulerGangSupervisor:
+    """Own the lifecycle of a local scheduler gang and support planned restarts."""
+
+    def __init__(
+        self,
+        server_args: ServerArgs,
+        port_args: PortArgs,
+        run_scheduler_process_func: Callable,
+    ):
+        self.server_args = server_args
+        self.port_args = port_args
+        self.run_scheduler_process_func = run_scheduler_process_func
+        self.processes: List[mp.Process] = []
+        self.readers: List[Any] = []
+        self.scheduler_infos: List[Dict[str, Any]] = []
+        self.lock = threading.Lock()
+        self.generation = 0
+        self._spawn(server_args, port_args)
+
+    def _spawn(self, server_args: ServerArgs, port_args: PortArgs) -> None:
+        processes: List[mp.Process] = []
+        readers: List[Any] = []
+        if server_args.dp_size != 1:
+            reader, writer = mp.Pipe(duplex=False)
+            proc = mp.Process(
+                target=run_data_parallel_controller_process,
+                kwargs=dict(
+                    server_args=server_args,
+                    port_args=port_args,
+                    pipe_writer=writer,
+                    run_scheduler_process_func=self.run_scheduler_process_func,
+                ),
+            )
+            proc.start()
+            processes.append(proc)
+            readers.append(reader)
+        else:
+            memory_saver_adapter = TorchMemorySaverAdapter.create(
+                enable=server_args.enable_memory_saver
+            )
+            pp_rank_range, tp_rank_range, pp_size_per_node, tp_size_per_node = (
+                _calculate_rank_ranges(
+                    server_args.nnodes,
+                    server_args.pp_size,
+                    server_args.inplace_reshard_max_tp or (server_args.afd_component_max_tp if server_args.enable_afd_component_reshard_participant else None) or server_args.tp_size,
+                    server_args.node_rank,
+                )
+            )
+            for pp_rank in pp_rank_range:
+                for tp_rank in tp_rank_range:
+                    reader, writer = mp.Pipe(duplex=False)
+                    gpu_id = (
+                        server_args.base_gpu_id
+                        + ((pp_rank % pp_size_per_node) * tp_size_per_node)
+                        + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
+                    )
+                    if server_args.inplace_reshard_max_tp is not None or server_args.enable_afd_component_reshard_participant:
+                        attn_cp_rank, moe_dp_rank, moe_ep_rank = 0, 0, tp_rank
+                    else:
+                        attn_cp_rank, moe_dp_rank, moe_ep_rank = _compute_parallelism_ranks(
+                            server_args, tp_rank
+                        )
+                    with maybe_reindex_device_id(gpu_id) as gpu_id:
+                        proc = mp.Process(
+                            target=self.run_scheduler_process_func,
+                            args=(
+                                server_args,
+                                port_args,
+                                gpu_id,
+                                tp_rank,
+                                attn_cp_rank,
+                                moe_dp_rank,
+                                moe_ep_rank,
+                                pp_rank,
+                                None,
+                                writer,
+                            ),
+                        )
+                        with (
+                            memory_saver_adapter.configure_subprocess(),
+                            numa_utils.configure_subprocess(server_args, gpu_id),
+                        ):
+                            proc.start()
+                    processes.append(proc)
+                    readers.append(reader)
+        self.server_args = server_args
+        self.port_args = port_args
+        self.processes = processes
+        self.readers = readers
+        self.scheduler_infos.clear()
+
+    def wait_for_ready(self) -> None:
+        infos = _wait_for_scheduler_ready(self.readers, self.processes)
+        self.scheduler_infos[:] = infos
+
+    def wait_for_completion(self) -> None:
+        for proc in self.processes:
+            proc.join()
+            logger.error(
+                "Scheduler or DataParallelController %s terminated with %s",
+                proc.pid,
+                proc.exitcode,
+            )
+
+    def restart_scheduler_gang(self, target_tp: int) -> List[Dict[str, Any]]:
+        """Planned stop of the old local gang followed by a clean max-TP launch."""
+        with self.lock:
+            if (
+                self.server_args.dp_size != 1
+                or self.server_args.pp_size != 1
+                or self.server_args.nnodes != 1
+            ):
+                raise RuntimeError(
+                    "In-place scheduler gang restart requires dp_size=pp_size=nnodes=1"
+                )
+            max_tp = self.server_args.inplace_reshard_max_tp
+            if max_tp is None:
+                raise RuntimeError("Scheduler gang restart requires inplace_reshard_max_tp")
+            if target_tp < 1 or target_tp > max_tp:
+                raise ValueError(f"target_tp must be in [1, {max_tp}], got {target_tp}")
+
+            for proc in self.processes:
+                if proc.is_alive():
+                    proc.terminate()
+            for proc in self.processes:
+                proc.join(timeout=30)
+            for proc in self.processes:
+                if proc.is_alive():
+                    logger.warning("Killing scheduler %s after terminate timeout", proc.pid)
+                    proc.kill()
+                    proc.join()
+            for reader in self.readers:
+                reader.close()
+
+            nccl_port = get_free_port()
+            new_server_args = dataclasses.replace(
+                self.server_args, tp_size=target_tp, nccl_port=nccl_port
+            )
+            new_port_args = dataclasses.replace(self.port_args, nccl_port=nccl_port)
+            self.generation += 1
+            self._spawn(new_server_args, new_port_args)
+            try:
+                self.wait_for_ready()
+            except Exception:
+                for proc in self.processes:
+                    if proc.is_alive():
+                        proc.terminate()
+                for proc in self.processes:
+                    proc.join(timeout=30)
+                raise
+            return self.scheduler_infos
+
+
 @dataclasses.dataclass
 class SchedulerInitResult:
     """Result from launching schedulers."""
@@ -113,6 +266,12 @@ class SchedulerInitResult:
     scheduler_infos: List[Dict[str, Any]]
     wait_for_ready: Callable[[], None] = lambda: None
     wait_for_completion: Callable[[], None] = lambda: None
+    supervisor: Optional[SchedulerGangSupervisor] = None
+
+    def restart_scheduler_gang(self, target_tp: int) -> List[Dict[str, Any]]:
+        if self.supervisor is None:
+            raise RuntimeError("This scheduler backend does not support gang restart")
+        return self.supervisor.restart_scheduler_gang(target_tp)
 
 
 def init_tokenizer_manager(
@@ -506,103 +665,15 @@ class Engine(EngineBase):
         port_args: PortArgs,
         run_scheduler_process_func: Callable,
     ) -> SchedulerInitResult:
-        """Launch scheduler processes using multiprocessing.
-        Override in subclasses for different backends (e.g. Ray).
-        """
-        scheduler_procs = []
-
-        if server_args.dp_size == 1:
-            # Launch tensor parallel scheduler processes
-            memory_saver_adapter = TorchMemorySaverAdapter.create(
-                enable=server_args.enable_memory_saver
-            )
-            scheduler_pipe_readers = []
-
-            pp_rank_range, tp_rank_range, pp_size_per_node, tp_size_per_node = (
-                _calculate_rank_ranges(
-                    server_args.nnodes,
-                    server_args.pp_size,
-                    server_args.inplace_reshard_max_tp or server_args.tp_size,
-                    server_args.node_rank,
-                )
-            )
-
-            for pp_rank in pp_rank_range:
-                for tp_rank in tp_rank_range:
-                    reader, writer = mp.Pipe(duplex=False)
-                    gpu_id = (
-                        server_args.base_gpu_id
-                        + ((pp_rank % pp_size_per_node) * tp_size_per_node)
-                        + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
-                    )
-                    if server_args.inplace_reshard_max_tp is not None:
-                        # Standby ranks are launched as full scheduler processes but
-                        # initially live outside the active TP group. Keep the rank
-                        # id equal to the physical launch rank so they can be
-                        # activated later without replacing old ranks.
-                        attn_cp_rank, moe_dp_rank, moe_ep_rank = 0, 0, tp_rank
-                    else:
-                        attn_cp_rank, moe_dp_rank, moe_ep_rank = _compute_parallelism_ranks(
-                            server_args, tp_rank
-                        )
-
-                    with maybe_reindex_device_id(gpu_id) as gpu_id:
-                        proc = mp.Process(
-                            target=run_scheduler_process_func,
-                            args=(
-                                server_args,
-                                port_args,
-                                gpu_id,
-                                tp_rank,
-                                attn_cp_rank,
-                                moe_dp_rank,
-                                moe_ep_rank,
-                                pp_rank,
-                                None,
-                                writer,
-                            ),
-                        )
-                        with memory_saver_adapter.configure_subprocess(), numa_utils.configure_subprocess(
-                            server_args, gpu_id
-                        ):
-                            proc.start()
-
-                    scheduler_procs.append(proc)
-                    scheduler_pipe_readers.append(reader)
-        else:
-            # Launch the data parallel controller
-            reader, writer = mp.Pipe(duplex=False)
-            scheduler_pipe_readers = [reader]
-            proc = mp.Process(
-                target=run_data_parallel_controller_process,
-                kwargs=dict(
-                    server_args=server_args,
-                    port_args=port_args,
-                    pipe_writer=writer,
-                    run_scheduler_process_func=run_scheduler_process_func,
-                ),
-            )
-            proc.start()
-            scheduler_procs.append(proc)
-
-        scheduler_infos = []
-
-        def wait_for_ready():
-            infos = _wait_for_scheduler_ready(scheduler_pipe_readers, scheduler_procs)
-            scheduler_infos.extend(infos)
-
-        def wait_for_completion():
-            for proc in scheduler_procs:
-                proc.join()
-                logger.error(
-                    f"Scheduler or DataParallelController {proc.pid} "
-                    f"terminated with {proc.exitcode}"
-                )
-
+        """Launch scheduler processes and retain their lifecycle supervisor."""
+        supervisor = SchedulerGangSupervisor(
+            server_args, port_args, run_scheduler_process_func
+        )
         return SchedulerInitResult(
-            scheduler_infos=scheduler_infos,
-            wait_for_ready=wait_for_ready,
-            wait_for_completion=wait_for_completion,
+            scheduler_infos=supervisor.scheduler_infos,
+            wait_for_ready=supervisor.wait_for_ready,
+            wait_for_completion=supervisor.wait_for_completion,
+            supervisor=supervisor,
         )
 
     @classmethod

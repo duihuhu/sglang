@@ -639,10 +639,26 @@ class ServerArgs:
     afd_ffn_tp: Optional[int] = None
     afd_grouped_stepmesh: bool = False
     afd_comm_backend: Optional[str] = None
+    afd_ipc_per_rank: bool = False
     afd_enable_overlap_schedule: bool = False
     afd_async_schedule: bool = False
     afd_async_pipeline: bool = False
     afd_disagg_interleave_poll: bool = False
+    afd_multi_pf_continuation: bool = False
+    afd_pf_group_count: int = 1
+    afd_pf_group_id: int = 0
+    afd_pf_peer_devices: Optional[str] = None
+    afd_pf_channel_base: int = 700
+    afd_pf_scheduler_endpoints: Optional[str] = None
+    enable_afd_component_reshard: bool = False
+    enable_afd_component_reshard_participant: bool = False
+    afd_component_max_tp: Optional[int] = None
+    afd_reshard_stage_id: Optional[str] = None
+    afd_reshard_pair_id: str = "default"
+    afd_reshard_channel_base: int = 1700
+    afd_reshard_control_base: int = 1800
+    afd_reshard_timeout: float = 600.0
+    afd_reshard_transfer_abort_grace: float = 2.0
 
     # Energy-aware DVFS (Tier 2)
     afd_energy_model_dir: Optional[str] = None
@@ -657,6 +673,8 @@ class ServerArgs:
     afd_dvfs_calibration_ema: float = 0.2  # EMA weight for calibration factor update
     afd_dvfs_idle_lock: bool = False  # Lock GPU to min freq when scheduler is idle (no pending batch)
     afd_dvfs_idle_lock_freq: int = 210  # Frequency (MHz) to lock during idle periods
+    afd_dvfs_prefill_fixed_max: bool = False  # Keep prefill at F_MAX (skip prefill DVFS downclock)
+    afd_dvfs_prefill_slack_factor: float = 1.0  # Conservative prefill DVFS: shrink usable TTFT slack by this factor (e.g. 0.7 = only use 70% of slack) so freq selection keeps a safety margin. 1.0 = disabled.
     afd_dvfs_decode_compositional: bool = False  # Use V1 compositional model + comm for decode (instead of V2 coupled pipeline)
     afd_dvfs_comm_us: float = 2900.0  # Initial AF IPC overhead per layer (us), adaptively learned via online calibration
     afd_dvfs_headroom_aggressive: float = 0.0  # If >0, when predicted decode latency < this fraction of TPOT SLO, aggressively lower attn freq to save DA idle energy (SLO-safe). E.g. 0.6 = engage when latency below 60% of SLO.
@@ -752,7 +770,7 @@ class ServerArgs:
     # PD disaggregation: can be "null" (not disaggregated), "prefill" (prefill-only), or "decode" (decode-only)
     disaggregation_mode: Literal["null", "prefill", "decode"] = "null"
     disaggregation_transfer_backend: str = "mooncake"
-    disaggregation_bootstrap_port: int = 8998
+    disaggregation_bootstrap_port: Optional[int] = None
     disaggregation_ib_device: Optional[str] = None
     disaggregation_decode_enable_offload_kvcache: bool = False
     num_reserved_decode_tokens: int = 512  # used for decode kv cache offload in PD
@@ -1003,6 +1021,11 @@ class ServerArgs:
             self.random_seed = random.randint(0, 1 << 30)
         if self.mm_process_config is None:
             self.mm_process_config = {}
+
+        # Auto-derive bootstrap port from server port to avoid conflicts
+        # when multiple prefill instances run on the same node.
+        if self.disaggregation_bootstrap_port is None:
+            self.disaggregation_bootstrap_port = self.port + 1
 
         # Handle ModelScope model downloads
         if get_bool_env_var("SGLANG_USE_MODELSCOPE"):
@@ -3208,6 +3231,46 @@ class ServerArgs:
     def _handle_afd(self):
         from sglang.srt.layers.afd_type import AFDPerspective
 
+        if self.enable_afd_component_reshard:
+            self.enable_afd_component_reshard_participant = True
+            if self.afd_perspective not in ("attn", AFDPerspective.AFD_PERSPECTIVE_ATTN):
+                raise ValueError("--enable-afd-component-reshard is only valid on the Attention HTTP coordinator")
+
+        if self.enable_afd_component_reshard_participant:
+            if self.inplace_reshard_max_tp is not None:
+                raise ValueError(
+                    "--enable-afd-component-reshard cannot be combined with "
+                    "--inplace-reshard-max-tp"
+                )
+            if self.afd_perspective not in (
+                "attn", "ffn", AFDPerspective.AFD_PERSPECTIVE_ATTN,
+                AFDPerspective.AFD_PERSPECTIVE_FFN,
+            ):
+                raise ValueError(
+                    "AFD component reshard participants require an Attention or FFN perspective"
+                )
+            if self.afd_component_max_tp is None or self.afd_component_max_tp < 1:
+                raise ValueError(
+                    "--afd-component-max-tp must be a positive integer when enabled"
+                )
+            if self.afd_reshard_stage_id not in ("prefill", "decode"):
+                raise ValueError(
+                    "--afd-reshard-stage-id must be prefill or decode when enabled"
+                )
+            if self.afd_component_max_tp < max(
+                self.tp_size, self.afd_attn_tp or self.tp_size,
+                self.afd_ffn_tp or self.tp_size,
+            ):
+                raise ValueError("--afd-component-max-tp is below the configured A/F TP")
+            if self.afd_reshard_channel_base < 0 or self.afd_reshard_control_base < 0:
+                raise ValueError("AFD reshard channel/control bases must be non-negative")
+            if self.afd_reshard_timeout <= 0:
+                raise ValueError("--afd-reshard-timeout must be positive")
+            if self.afd_reshard_transfer_abort_grace <= 0:
+                raise ValueError(
+                    "--afd-reshard-transfer-abort-grace must be positive"
+                )
+
         if self.afd_perspective is not None:
             if self.afd_perspective == "attn":
                 self.afd_perspective = AFDPerspective.AFD_PERSPECTIVE_ATTN
@@ -3219,6 +3282,54 @@ class ServerArgs:
                 )
             if self.afd_micro_batch < 1:
                 raise ValueError("--afd-micro-batch must be >= 1.")
+
+            if self.afd_multi_pf_continuation:
+                if self.afd_comm_backend != "ipc_cpp":
+                    raise ValueError(
+                        "--afd-multi-pf-continuation currently requires "
+                        "--afd-comm-backend ipc_cpp."
+                    )
+                if self.afd_pf_group_count < 2:
+                    raise ValueError(
+                        "--afd-pf-group-count must be >= 2 in shared-PA mode."
+                    )
+                if not 0 <= self.afd_pf_group_id < self.afd_pf_group_count:
+                    raise ValueError(
+                        "--afd-pf-group-id must be within "
+                        "[0, --afd-pf-group-count)."
+                    )
+                peer_devices = [
+                    item.strip()
+                    for item in (self.afd_pf_peer_devices or "").split(",")
+                    if item.strip()
+                ]
+                if self.afd_perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN:
+                    if self.tp_size != 1:
+                        raise ValueError(
+                            "Shared PA MVP requires Attention TP=1."
+                        )
+                    if len(peer_devices) != self.afd_pf_group_count:
+                        raise ValueError(
+                            "Shared PA requires one --afd-pf-peer-devices entry "
+                            "per PF group."
+                        )
+                    endpoints = [
+                        item.strip()
+                        for item in (
+                            self.afd_pf_scheduler_endpoints or ""
+                        ).split(",")
+                        if item.strip()
+                    ]
+                    if len(endpoints) != self.afd_pf_group_count:
+                        raise ValueError(
+                            "Shared PA requires one "
+                            "--afd-pf-scheduler-endpoints entry per PF group."
+                        )
+                elif len(peer_devices) != 1:
+                    raise ValueError(
+                        "Each PF process requires exactly one PA device in "
+                        "--afd-pf-peer-devices."
+                    )
 
             if self.afd_grouped_stepmesh:
                 from math import gcd
@@ -5508,6 +5619,62 @@ class ServerArgs:
         )
         # AF disaggregation args
         parser.add_argument(
+            "--enable-afd-component-reshard",
+            action="store_true",
+            default=ServerArgs.enable_afd_component_reshard,
+            help="Enable the isolated AFD component reshard control plane.",
+        )
+        parser.add_argument(
+            "--enable-afd-component-reshard-participant",
+            action="store_true",
+            default=ServerArgs.enable_afd_component_reshard_participant,
+            help="Join the isolated AFD component max-world control plane without exposing HTTP control.",
+        )
+        parser.add_argument(
+            "--afd-component-max-tp", type=int,
+            default=ServerArgs.afd_component_max_tp,
+            help="Maximum A/F TP accepted by the component reshard control plane.",
+        )
+        parser.add_argument(
+            "--afd-reshard-stage-id", choices=["prefill", "decode"],
+            default=ServerArgs.afd_reshard_stage_id,
+            help="PD stage controlled by this Attention endpoint.",
+        )
+        parser.add_argument(
+            "--afd-reshard-pair-id", default=ServerArgs.afd_reshard_pair_id,
+            help="Stable identity of the paired A/F component deployment.",
+        )
+        parser.add_argument(
+            "--afd-reshard-channel-base", type=int,
+            default=ServerArgs.afd_reshard_channel_base,
+            help="Reserved runtime channel-number base; no filesystem semantics.",
+        )
+        parser.add_argument(
+            "--afd-reshard-control-base", type=int,
+            default=ServerArgs.afd_reshard_control_base,
+            help="Reserved runtime control-channel base; no filesystem semantics.",
+        )
+        parser.add_argument(
+            "--afd-reshard-timeout", type=float,
+            default=float(os.getenv("SGLANG_AFD_RESHARD_TIMEOUT", os.getenv("AFD_RESHARD_TIMEOUT", ServerArgs.afd_reshard_timeout))),
+            help="Timeout in seconds for AFD reshard scheduler, pair-peer, and max-world commands (env: SGLANG_AFD_RESHARD_TIMEOUT).",
+        )
+        parser.add_argument(
+            "--afd-reshard-transfer-abort-grace",
+            type=float,
+            default=float(
+                os.getenv(
+                    "SGLANG_AFD_RESHARD_TRANSFER_ABORT_GRACE",
+                    ServerArgs.afd_reshard_transfer_abort_grace,
+                )
+            ),
+            help=(
+                "Grace in seconds before a fenced AFD reshard aborts residual "
+                "PD decode KV transfers (env: "
+                "SGLANG_AFD_RESHARD_TRANSFER_ABORT_GRACE)."
+            ),
+        )
+        parser.add_argument(
             "--afd-perspective",
             type=str,
             choices=["attn", "ffn"],
@@ -5562,15 +5729,23 @@ class ServerArgs:
         parser.add_argument(
             "--afd-comm-backend",
             type=str,
-            choices=["auto", "ucx", "ipc", "ipc_cpp", "nccl_p2p", "stepmesh", "zmq"],
+            choices=["auto", "ucx", "ipc", "ipc_cpp", "nccl_p2p", "afd_reshard_loopback", "stepmesh", "zmq"],
             default=ServerArgs.afd_comm_backend,
             help="Communication backend for AFD Attn-FFN tensor transfer. "
             "'ucx': UCX-Py RDMA (requires ucp). "
             "'ipc': CUDA IPC + SHM flags (single-node NVLink). "
+            "'afd_reshard_loopback': same-GPU cross-process pinned-host/SHM fallback for colocated reshard. "
             "'stepmesh': StepMesh via fserver_lib (requires MLC_INTERFACE). "
             "'zmq': ZMQ + optional NVLink broadcast. "
             "'auto': select based on available env vars (AFD_UCX_TLS -> ucx, MLC_INTERFACE -> stepmesh, else zmq). "
             "Default: auto.",
+        )
+        parser.add_argument(
+            "--afd-ipc-per-rank",
+            action="store_true",
+            default=ServerArgs.afd_ipc_per_rank,
+            help="Use one ipc_cpp channel per local TP rank. Only supported for "
+            "homogeneous A/F tensor parallelism with --afd-comm-backend ipc_cpp.",
         )
         parser.add_argument(
             "--afd-enable-overlap-schedule",
@@ -5605,6 +5780,44 @@ class ServerArgs:
             default=ServerArgs.afd_disagg_interleave_poll,
             help="In PD+AF mode, poll Mooncake KV transfer after each decode "
             "forward pass to reduce bootstrap/transfer latency under M>1.",
+        )
+        parser.add_argument(
+            "--afd-multi-pf-continuation",
+            action="store_true",
+            default=ServerArgs.afd_multi_pf_continuation,
+            help="Experimental: let one TP1 prefill Attention process drive "
+            "multiple same-node PF groups through independent ipc_cpp channels.",
+        )
+        parser.add_argument(
+            "--afd-pf-group-count",
+            type=int,
+            default=ServerArgs.afd_pf_group_count,
+            help="Number of PF groups attached to a shared PA process.",
+        )
+        parser.add_argument(
+            "--afd-pf-group-id",
+            type=int,
+            default=ServerArgs.afd_pf_group_id,
+            help="PF group ID for an FFN process in shared-PA mode.",
+        )
+        parser.add_argument(
+            "--afd-pf-peer-devices",
+            type=str,
+            default=ServerArgs.afd_pf_peer_devices,
+            help="Comma-separated CUDA device IDs. PA supplies one PF rank-0 "
+            "device per group; each PF supplies the shared PA device.",
+        )
+        parser.add_argument(
+            "--afd-pf-channel-base",
+            type=int,
+            default=ServerArgs.afd_pf_channel_base,
+            help="Absolute ipc_cpp channel ID base for shared-PA PF groups.",
+        )
+        parser.add_argument(
+            "--afd-pf-scheduler-endpoints",
+            type=str,
+            default=ServerArgs.afd_pf_scheduler_endpoints,
+            help="Comma-separated host:port control endpoints, one per PF group.",
         )
         parser.add_argument(
             "--afd-energy-model-dir",
@@ -5727,6 +5940,23 @@ class ServerArgs:
             type=int,
             default=ServerArgs.afd_dvfs_idle_lock_freq,
             help="SM clock frequency (MHz) to lock during idle periods. Default: 210.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-prefill-fixed-max",
+            action="store_true",
+            default=ServerArgs.afd_dvfs_prefill_fixed_max,
+            help="Keep prefill at maximum SM frequency (skip prefill DVFS downclock). "
+            "Decode DVFS remains active.",
+        )
+        parser.add_argument(
+            "--afd-dvfs-prefill-slack-factor",
+            type=float,
+            default=ServerArgs.afd_dvfs_prefill_slack_factor,
+            help="Conservative prefill DVFS margin: multiply the usable TTFT "
+            "slack by this factor before frequency selection (e.g. 0.7 uses "
+            "only 70%% of the slack). Lower values pick higher frequencies and "
+            "leave a safety margin against prefill SLO violations. Default 1.0 "
+            "(no margin).",
         )
         parser.add_argument(
             "--afd-dvfs-decode-compositional",
@@ -6159,8 +6389,10 @@ class ServerArgs:
         parser.add_argument(
             "--disaggregation-bootstrap-port",
             type=int,
-            default=ServerArgs.disaggregation_bootstrap_port,
-            help="Bootstrap server port on the prefill server. Default is 8998.",
+            default=None,
+            help="Bootstrap server port on the prefill server. "
+            "If not set, defaults to (server port + 1) to ensure uniqueness "
+            "when multiple prefill instances run on the same node.",
         )
         parser.add_argument(
             "--disaggregation-ib-device",
@@ -6464,10 +6696,17 @@ class ServerArgs:
 
     def check_server_args(self):
         # Check parallel size constraints
-        launch_tp_size = self.inplace_reshard_max_tp or self.tp_size
+        launch_tp_size = self.inplace_reshard_max_tp or (self.afd_component_max_tp if self.enable_afd_component_reshard_participant else None) or self.tp_size
         assert (
             launch_tp_size * self.pp_size
         ) % self.nnodes == 0, "launch TP size must be divisible by number of nodes"
+        if self.enable_afd_component_reshard_participant:
+            assert self.nnodes == 1, "AFD component reshard MVP is single-node only"
+            assert self.pp_size == 1 and self.dp_size == 1, "AFD component reshard MVP requires PP=DP=1"
+            assert self.afd_micro_batch == 1, "AFD component reshard MVP requires M=1"
+            assert self.disable_cuda_graph, "AFD component reshard MVP requires --disable-cuda-graph"
+            assert self.afd_component_max_tp >= self.tp_size
+
         if self.inplace_reshard_max_tp is not None:
             assert self.nnodes == 1, "in-place TP reshard is currently single-node only"
             assert self.pp_size == 1, "in-place TP reshard currently supports pp_size=1 only"

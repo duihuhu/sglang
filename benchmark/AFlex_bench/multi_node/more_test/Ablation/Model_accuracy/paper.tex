@@ -1,0 +1,31 @@
+
+\begin{table}[!t]
+    \centering
+    \caption{Performance Prediction Model Evaluation.}
+    \label{tab:aflex-predictor}
+    \scriptsize
+    \setlength{\tabcolsep}{2.5pt}
+    \renewcommand{\arraystretch}{1.05}
+    \begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}} l c c c c c c c c @{}}
+    \toprule
+    & \multicolumn{4}{c}{Prefill}
+    & \multicolumn{4}{c}{Decode} \\
+    \cmidrule(lr){2-5} \cmidrule(lr){6-9}
+    & \multicolumn{2}{c}{\textit{train = 90\%}}
+    & \multicolumn{2}{c}{\textit{train = 10\%}}
+    & \multicolumn{2}{c}{\textit{train = 90\%}}
+    & \multicolumn{2}{c}{\textit{train = 10\%}} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+    \cmidrule(lr){6-7} \cmidrule(lr){8-9}
+    & $R^2$ & MAPE
+    & $R^2$ & MAPE
+    & $R^2$ & MAPE
+    & $R^2$ & MAPE \\
+    \midrule
+    Energy
+    & 0.97 & 8.1  & 0.97 & 10.5 & 0.98 & 1.8 & 0.98 & 2.0 \\
+    Latency
+    & 0.98 & 8.0  & 0.97 & 7.8  & 0.99 & 1.6 & 0.99 & 1.7 \\
+    \bottomrule
+    \end{tabular*}
+    \end{table}

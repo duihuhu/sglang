@@ -516,17 +516,34 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             and self.tp_rank >= self.server_args.tp_size
             and not self.is_draft_worker
         )
-        if self.is_inplace_standby_rank:
+        self.is_afd_component_standby_rank = (
+            self.server_args.enable_afd_component_reshard_participant
+            and self.tp_rank >= self.server_args.tp_size
+            and not self.is_draft_worker
+        )
+        if self.is_inplace_standby_rank and self.is_afd_component_standby_rank:
+            raise RuntimeError("native and AFD component standby lifecycles are mutually exclusive")
+        if self.is_inplace_standby_rank or self.is_afd_component_standby_rank:
             logger.info(
-                "In-place reshard standby rank initialized: rank=%d active_tp=%d max_tp=%d",
+                "%s standby rank initialized: rank=%d active_tp=%d max_tp=%d",
+                "AFD component" if self.is_afd_component_standby_rank else "In-place reshard",
                 self.tp_rank,
                 self.server_args.tp_size,
-                self.server_args.inplace_reshard_max_tp,
+                self.server_args.inplace_reshard_max_tp or self.server_args.afd_component_max_tp,
             )
             # Match cold-start TP: record pre-weight baseline for KV re-profile after
             # activation (standby skips initialize() where active ranks set this).
             self._pre_model_load_memory_gb = pre_model_load_memory
             self.model = None
+            # A standby rank skips initialize()/_init_pools(), so the KV runtime
+            # attributes are never created. Activation (real path) rebuilds them,
+            # but code that runs *before* the rebuild (e.g. _free_* teardown or
+            # get_worker_info) must still find the attributes present. Seed the
+            # full trio to None here so the AttributeError never fires; the real
+            # activation path replaces them with correctly-sized pools.
+            self.req_to_token_pool = None
+            self.token_to_kv_pool = None
+            self.token_to_kv_pool_allocator = None
             self.max_total_num_tokens = 1
             self.max_running_requests = 1
             self.is_hybrid_swa = False
@@ -724,7 +741,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # Deduce KV cache dtype
         self.configure_kv_cache_dtype()
 
-        # Init memory pool and attention backends
+        # Init memory pool and attention backends. AFD FFN resolves a logical
+        # scheduler pool here without profiling or allocating physical KV.
         self.init_memory_pool(pre_model_load_memory)
 
         # Init ngram embedding token table
@@ -991,7 +1009,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     )
 
             # Only initialize the distributed environment on the target model worker.
-            launch_tp_size = self.server_args.inplace_reshard_max_tp or self.tp_size
+            launch_tp_size = self.server_args.inplace_reshard_max_tp or (self.server_args.afd_component_max_tp if self.server_args.enable_afd_component_reshard_participant else None) or self.tp_size
             init_distributed_environment(
                 backend=backend,
                 world_size=launch_tp_size * self.pp_size,
@@ -1004,6 +1022,11 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             if self.server_args.inplace_reshard_max_tp is not None:
                 os.environ["SGLANG_INPLACE_RESHARD_ACTIVE_TP"] = str(self.tp_size)
                 os.environ["SGLANG_INPLACE_RESHARD_MAX_TP"] = str(self.server_args.inplace_reshard_max_tp)
+            elif self.server_args.enable_afd_component_reshard_participant:
+                # Reuse only the proven max-world group bootstrap. Native reshard
+                # control remains disabled and component commit has its own gate.
+                os.environ["SGLANG_AFD_COMPONENT_ACTIVE_TP"] = str(self.tp_size)
+                os.environ["SGLANG_AFD_COMPONENT_MAX_TP"] = str(self.server_args.afd_component_max_tp)
             initialize_model_parallel(
                 tensor_model_parallel_size=self.tp_size,
                 attention_data_parallel_size=self.dp_size,
@@ -1904,6 +1927,33 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             return active
         return int(self.server_args.tp_size)
 
+    def _inplace_reshard_detailed_timing_enabled(self) -> bool:
+        return bool(envs.SGLANG_INPLACE_RESHARD_DETAILED_TIMING.get())
+
+    def _inplace_reshard_timing_sync(self) -> None:
+        if self._inplace_reshard_detailed_timing_enabled() and self.device == "cuda":
+            torch.cuda.synchronize()
+
+    def _inplace_reshard_measure(self, name: str, fn):
+        import time as _time
+
+        self._inplace_reshard_timing_sync()
+        start = _time.perf_counter()
+        result = fn()
+        self._inplace_reshard_timing_sync()
+        elapsed_ms = (_time.perf_counter() - start) * 1000.0
+        target = getattr(self, "_inplace_reshard_current_timings_ms", None)
+        if target is not None:
+            target[name] = target.get(name, 0.0) + elapsed_ms
+        return result
+
+    def get_last_inplace_reshard_breakdown(self) -> Dict[str, Any]:
+        out = dict(getattr(self, "_last_inplace_reshard_breakdown_ms", {}) or {})
+        out["async_kv_grow"] = dict(
+            getattr(self, "_inplace_reshard_kv_grow_timing", {}) or {}
+        )
+        return out
+
     def _inplace_reshard_world_barrier(self) -> None:
         dist.barrier(group=get_world_group().cpu_group)
 
@@ -1943,15 +1993,45 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             del self.piecewise_cuda_graph_runner
             self.piecewise_cuda_graph_runner = None
 
+    def _free_inplace_reshard_kv_pools_only(self) -> None:
+        """Drop KV / req pools but keep attention backend alive.
+
+        The attention backend only needs updated TP metadata (num_heads etc.),
+        not full re-initialization. Keeping it alive saves ~0.3-0.5s of
+        init_attention_backend + kernel_warmup time in the blocking ACTIVATE.
+        """
+        import gc as _gc
+
+        stale = (
+            getattr(self, "token_to_kv_pool", None),
+            getattr(self, "token_to_kv_pool_allocator", None),
+            getattr(self, "req_to_token_pool", None),
+        )
+        self.token_to_kv_pool = None
+        self.token_to_kv_pool_allocator = None
+        self.req_to_token_pool = None
+        self.max_total_num_tokens = 0
+        self.memory_pool_config = None
+        del stale
+        for _ in range(3):
+            _gc.collect()
+            if self.device == "cuda":
+                torch.cuda.synchronize()
+                if hasattr(torch.cuda, "ipc_collect"):
+                    torch.cuda.ipc_collect()
+                torch.cuda.empty_cache()
+
     def _free_inplace_reshard_kv_pools(self) -> None:
         """Drop KV / req pools before in-place weight transfer to lower peak memory."""
         self._release_inplace_reshard_attention_state()
         import gc as _gc
 
+        # A joining rank promoted from standby has no KV runtime yet; tolerate
+        # missing pool attributes so teardown never crashes before the rebuild.
         stale = (
-            self.token_to_kv_pool,
-            self.token_to_kv_pool_allocator,
-            self.req_to_token_pool,
+            getattr(self, "token_to_kv_pool", None),
+            getattr(self, "token_to_kv_pool_allocator", None),
+            getattr(self, "req_to_token_pool", None),
         )
         self.token_to_kv_pool = None
         self.token_to_kv_pool_allocator = None
@@ -2129,10 +2209,21 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         caching allocator; recloning matches the clean allocation path of
         joining ranks and improves post-reshard memory symmetry vs cold --tp N.
         """
+        import time as _time
+
+        start = _time.perf_counter()
+        self._inplace_reshard_timing_sync()
         for param in self.model.parameters():
             if param.data.is_cuda and param.data.numel() > 0:
                 param.data = param.data.detach().contiguous()
         self._compact_inplace_reshard_cuda_memory()
+        self._inplace_reshard_timing_sync()
+        target = getattr(self, "_inplace_reshard_current_timings_ms", None)
+        if target is not None:
+            target["local_narrow_storage_finalize_ms"] = (
+                target.get("local_narrow_storage_finalize_ms", 0.0)
+                + (_time.perf_counter() - start) * 1000.0
+            )
 
     def _inplace_reshard_rank0_cold_reload_enabled(self) -> bool:
         return os.environ.get("SGLANG_INPLACE_RESHARD_RANK0_COLD_RELOAD", "1") == "1"
@@ -2155,6 +2246,10 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             return False
         max_tp = int(self.server_args.inplace_reshard_max_tp or new_tp)
         return new_tp >= max_tp
+
+    def _inplace_reshard_is_intermediate_hop(self, new_tp: int) -> bool:
+        max_tp = self.server_args.inplace_reshard_max_tp
+        return max_tp is not None and int(new_tp) < int(max_tp)
 
     def _inplace_reshard_rank0_subprocess_reload_enabled(self) -> bool:
         return (
@@ -2326,6 +2421,28 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if analytic <= 0 or local >= min_ratio * analytic:
             return False
 
+        if self._inplace_reshard_is_intermediate_hop(new_tp):
+            logger.warning(
+                "In-place reshard rank0 intermediate hop TP%d: avail=%.2fGB < %.0f%% "
+                "of analytic=%.2fGB; staging+compact only (skip disk reload)",
+                new_tp,
+                local,
+                min_ratio * 100,
+                analytic,
+            )
+            self._defragment_inplace_reshard_gpu_via_cpu_staging()
+            self._finalize_inplace_reshard_weight_storage()
+            for _ in range(3):
+                self._compact_inplace_reshard_cuda_memory()
+            after = self._inplace_reshard_effective_avail_gb()
+            logger.info(
+                "In-place reshard rank0 intermediate reclaim: avail=%.2fGB "
+                "(analytic=%.2fGB)",
+                after,
+                analytic,
+            )
+            return True
+
         logger.warning(
             "In-place reshard rank0 reclaim: avail=%.2fGB < %.0f%% of analytic=%.2fGB; "
             "reloading weights from disk for TP%d",
@@ -2477,8 +2594,10 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 and self.tp_rank < new_tp
             )
             if old_tp > 1:
+                # Multihop prep only stages a dummy shell on joining ranks; they
+                # must still recv real shards during commit xfer.
                 self._inplace_reshard_transfer_weights_multihop(
-                    old_tp, new_tp, skip_joining_receivers=True
+                    old_tp, new_tp, skip_joining_receivers=False
                 )
                 if self.tp_rank < new_tp and not (
                     self.tp_rank == 0
@@ -2764,18 +2883,55 @@ class ModelRunner(ModelRunnerKVCacheMixin):
     def reset_inplace_reshard_prep(self) -> None:
         self._inplace_reshard_prep_state_obj().reset()
 
-    def _ensure_inplace_reshard_dummy_model_loaded(self) -> None:
+    def _ensure_inplace_reshard_dummy_model_loaded(
+        self, shard_tp: Optional[int] = None
+    ) -> None:
         from sglang.srt.model_loader.loader import LoadFormat
 
         if self.model is not None:
             return
+        saved_tp = self.tp_size
+        saved_server_tp = self.server_args.tp_size
+        if shard_tp is not None:
+            self.tp_size = int(shard_tp)
+            self.server_args.tp_size = int(shard_tp)
+        # Temporarily patch parallel_state._TP.world_size and rank so that
+        # load_model() creates correctly TP-sharded weight tensors.  The
+        # underlying process groups are unchanged (safe during PREPARE).
+        _saved_ws = None
+        _saved_rank = None
+        _ps = None
+        if shard_tp is not None and int(shard_tp) != int(saved_tp):
+            try:
+                import sglang.srt.distributed.parallel_state as _ps
+                _tp = getattr(_ps, "_TP", None)
+                if _tp is not None:
+                    _saved_ws = _tp.world_size
+                    _saved_rank = _tp.rank_in_group
+                    _tp.world_size = int(shard_tp)
+                    _tp.rank_in_group = self.tp_rank
+            except Exception:
+                _saved_ws = None
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=self.server_args.enable_memory_saver
         )
         original_load_format = self.server_args.load_format
         self.server_args.load_format = LoadFormat.DUMMY
         self._skip_load_model_barrier_once = True
-        self.load_model()
+        try:
+            self.load_model()
+        finally:
+            if _saved_ws is not None and _ps is not None:
+                try:
+                    _tp = getattr(_ps, "_TP", None)
+                    if _tp is not None:
+                        _tp.world_size = _saved_ws
+                        _tp.rank_in_group = _saved_rank
+                except Exception:
+                    pass
+            if shard_tp is not None:
+                self.tp_size = saved_tp
+                self.server_args.tp_size = saved_server_tp
         self.server_args.load_format = original_load_format
         model_num_layers = max(
             self.model_config.num_hidden_layers,
@@ -2831,25 +2987,55 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self._finalize_inplace_reshard_weight_storage()
         self._release_inplace_reshard_ipc_imports()
 
-    def _finalize_inplace_reshard_runtime_stack(self, new_tp: int) -> None:
-        """Allocate KV and warm attention backends for the target TP degree."""
-        self.rebuild_memory_pool_after_inplace_reshard()
-        dist.barrier(group=get_tp_group().cpu_group)
-        self.maybe_init_ngram_embedding()
-        self.init_routed_experts_capturer()
+    def _init_inplace_reshard_attention_stack(self) -> None:
+        """Warm attention / sampler after in-place reshard (idempotent)."""
+        self._inplace_reshard_measure(
+            "ngram_embedding_ms", self.maybe_init_ngram_embedding
+        )
+        self._inplace_reshard_measure(
+            "routed_experts_capturer_ms", self.init_routed_experts_capturer
+        )
+        defer_graphs = bool(
+            os.getenv("AFD_RESHARD_DEFER_CUDA_GRAPHS", "1") == "1"
+        )
         if self.device == "cuda" or self.device == "musa":
-            self.init_cublas()
-            self.init_attention_backend()
-            self.kernel_warmup()
-            self.init_device_graphs()
+            self._inplace_reshard_measure("cublas_init_ms", self.init_cublas)
+            self._inplace_reshard_measure(
+                "attention_backend_init_ms", self.init_attention_backend
+            )
+            self._inplace_reshard_measure("kernel_warmup_ms", self.kernel_warmup)
+            if defer_graphs:
+                self.graph_runner = None
+                self.graph_mem_usage = 0
+                self._afd_deferred_graph_capture = True
+            else:
+                self._inplace_reshard_measure(
+                    "cuda_graph_capture_ms", self.init_device_graphs
+                )
         elif self.device in ["npu", "cpu"]:
-            self.init_attention_backend()
-            self.init_device_graphs()
+            self._inplace_reshard_measure(
+                "attention_backend_init_ms", self.init_attention_backend
+            )
+            if defer_graphs:
+                self.graph_runner = None
+                self.graph_mem_usage = 0
+                self._afd_deferred_graph_capture = True
+            else:
+                self._inplace_reshard_measure(
+                    "device_graph_capture_ms", self.init_device_graphs
+                )
         else:
             self.graph_runner = None
             self.graph_mem_usage = 0
-            self.init_attention_backend()
-        self.init_piecewise_cuda_graphs()
+            self._inplace_reshard_measure(
+                "attention_backend_init_ms", self.init_attention_backend
+            )
+        if defer_graphs:
+            self.piecewise_cuda_graph_runner = None
+        else:
+            self._inplace_reshard_measure(
+                "piecewise_graph_capture_ms", self.init_piecewise_cuda_graphs
+            )
         if not self.eagle_use_aux_hidden_state:
             if hasattr(self.model, "capture_aux_hidden_states"):
                 self.model.capture_aux_hidden_states = False
@@ -2858,11 +3044,127 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             ):
                 self.model.model.layers_to_capture = []
         if not hasattr(self, "sampler"):
-            self.sampler = create_sampler()
+            self._inplace_reshard_measure(
+                "sampler_finalize_ms", lambda: setattr(self, "sampler", create_sampler())
+            )
         if not hasattr(self, "eplb_manager"):
             self.eplb_manager = None
         if not hasattr(self, "expert_location_updater"):
             self.expert_location_updater = None
+
+    @torch.no_grad()
+    def _prepare_inplace_reshard_runtime_local(
+        self, old_tp: int, new_tp: int
+    ) -> bool:
+        """Standby joining rank: profile KV capacity before commit (hint only)."""
+        from sglang.srt.reshard.inplace_reshard_background import runtime_prep_enabled
+
+        if not runtime_prep_enabled():
+            return False
+        if not getattr(self, "is_inplace_standby_rank", False):
+            return False
+        if self.tp_rank < old_tp or self.tp_rank >= new_tp:
+            return False
+        if old_tp > 1:
+            # Multihop joining ranks load dummy only at commit; hint prep can OOM.
+            return False
+
+        import time as _time
+
+        t0 = _time.time()
+        try:
+            if self.model is None:
+                return False
+
+            self.tp_size = new_tp
+            self.server_args.tp_size = new_tp
+            self._pre_reshard_tp = old_tp
+            self._update_model_tp_metadata(new_tp)
+
+            self.configure_kv_cache_dtype()
+            self._compact_inplace_reshard_cuda_memory()
+            local_cfg = self._resolve_memory_pool_config_fill_inplace_reshard(
+                distributed=False
+            )
+            probed = self._probe_inplace_reshard_kv_tokens(
+                int(local_cfg.max_total_num_tokens),
+                max_running_requests=int(local_cfg.max_running_requests),
+            )
+            cfg = MemoryPoolConfig(
+                max_total_num_tokens=int(probed),
+                max_running_requests=self._resolve_max_num_reqs(int(probed)),
+                full_max_total_num_tokens=local_cfg.full_max_total_num_tokens,
+                swa_max_total_num_tokens=local_cfg.swa_max_total_num_tokens,
+                mem_fraction_static=local_cfg.mem_fraction_static,
+            )
+
+            st = self._inplace_reshard_prep_state_obj()
+            st.kv_cfg_hint = cfg
+            logger.info(
+                "In-place reshard KV hint prep rank %d TP%d->TP%d: %d tokens in %.2fs",
+                self.tp_rank,
+                old_tp,
+                new_tp,
+                cfg.max_total_num_tokens,
+                _time.time() - t0,
+            )
+            return True
+        except RuntimeError as exc:
+            logger.warning(
+                "In-place reshard KV hint prep rank %d TP%d->TP%d failed: %s",
+                self.tp_rank,
+                old_tp,
+                new_tp,
+                exc,
+            )
+            return False
+
+    def _commit_inplace_reshard_runtime_post_xfer(
+        self, new_tp: int, *, runtime_prepped: bool
+    ) -> float:
+        """Finalize KV/attention after weight transfer."""
+        import time as _time
+
+        t0 = _time.time()
+        self._finalize_inplace_reshard_runtime_stack(new_tp)
+        return _time.time() - t0
+
+    def _finalize_inplace_reshard_runtime_stack(self, new_tp: int) -> None:
+        """Allocate KV and warm attention backends for the target TP degree.
+
+        Uses the fast two-phase rebuild: allocate a conservative KV pool from the
+        pre-computed hint, warm attention backends, then schedule background grow.
+        """
+        self._inplace_reshard_measure(
+            "kv_fast_rebuild_total_ms", self.rebuild_memory_pool_fast_inplace_reshard
+        )
+        self._inplace_reshard_measure(
+            "kv_fast_rebuild_post_barrier_ms",
+            lambda: dist.barrier(group=get_tp_group().cpu_group),
+        )
+        self._inplace_reshard_measure(
+            "attention_runtime_total_ms", self._init_inplace_reshard_attention_stack
+        )
+        async_grow_enabled = bool(
+            envs.SGLANG_INPLACE_RESHARD_ASYNC_KV_GROW.get()
+        )
+        self._inplace_reshard_kv_grow_pending = async_grow_enabled
+        self._inplace_reshard_kv_grow_timing = {
+            "enabled": async_grow_enabled,
+            "disabled": not async_grow_enabled,
+            "disabled_reason": (
+                None if async_grow_enabled
+                else "SGLANG_INPLACE_RESHARD_ASYNC_KV_GROW=0"
+            ),
+            "pending": async_grow_enabled,
+            "pending_at": time.time() if async_grow_enabled else None,
+            "deferred_for_reshard_count": 0,
+            "last_deferred_at": None,
+            "start_at": None, "done_at": None, "profile_ms": 0.0,
+            "probe_ms": 0.0, "grow_ms": 0.0,
+            "tokens_before": int(self.max_total_num_tokens or 0),
+            "tokens_after": None,
+        }
 
     @torch.no_grad()
     def prepare_inplace_reshard_tp(
@@ -2890,23 +3192,26 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         st.old_tp = old_tp
         st.new_tp = new_tp
+        st.kv_cfg_hint = None
+        st.started_at_s = t0
+        st.done_at_s = None
         is_joining = self.tp_rank >= old_tp and self.tp_rank < new_tp
         is_active = self.tp_rank < old_tp
 
         if is_joining:
-            self._ensure_inplace_reshard_dummy_model_loaded()
-            if handles_by_src is not None and old_tp == 1:
-                self._apply_inplace_reshard_ipc_handles(handles_by_src, old_tp, new_tp)
-                st.weights_ready = True
-            elif old_tp > 1:
-                # Multihop: background prep only loads dummy shell; shards at commit.
-                st.weights_ready = True
-                st.runtime_ready = False
+            if old_tp == 1:
+                shard_tp = None
+                if handles_by_src is not None:
+                    self._ensure_inplace_reshard_dummy_model_loaded(shard_tp=shard_tp)
+                    self._apply_inplace_reshard_ipc_handles(handles_by_src, old_tp, new_tp)
+                    st.weights_ready = True
+                else:
+                    st.weights_ready = False
             else:
-                st.weights_ready = handles_by_src is not None
+                # Multihop: defer real weights until commit; runtime prep may load dummy.
+                st.weights_ready = True
             if st.weights_ready:
                 self._pre_reshard_tp = old_tp
-                # KV / attention init needs the new TP process group; defer to commit.
                 st.runtime_ready = False
             logger.info(
                 "In-place reshard prep joining rank %d TP%d->TP%d weights=%s runtime=%s",
@@ -2922,6 +3227,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 st.joiners_prepared = True
             st.weights_ready = True
             st.runtime_ready = False
+            try:
+                st.kv_cfg_hint = self._resolve_memory_pool_config_fill_inplace_reshard(
+                    distributed=False
+                )
+            except Exception:
+                pass
             logger.info(
                 "In-place reshard prep rank0 TP%d->TP%d (joiners_prepared=%s)",
                 old_tp,
@@ -2930,7 +3241,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
         elif is_active:
             st.weights_ready = True
-            st.runtime_ready = True
+            # Multihop commits rebuild KV/attention on every rank; do not skip finalize.
+            st.runtime_ready = old_tp == 1
             logger.info(
                 "In-place reshard prep active follower rank %d TP%d->TP%d",
                 self.tp_rank,
@@ -2941,7 +3253,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             st.weights_ready = True
             st.runtime_ready = True
 
-        st.timings_s["prepare_s"] = _time.time() - t0
+        st.done_at_s = _time.time()
+        st.timings_s["prepare_s"] = st.done_at_s - t0
         return True, f"prepared rank {self.tp_rank} for TP{new_tp}", st.timings_s["prepare_s"]
 
     @torch.no_grad()
@@ -2958,12 +3271,29 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         new_tp = int(new_tp)
         st = self._inplace_reshard_prep_state_obj()
         prep_ready = self.inplace_reshard_prep_is_ready(new_tp)
+        prep_snapshot = {
+            "background_prep_ms": float(st.timings_s.get("prepare_s", 0.0)) * 1000.0,
+            "background_prep_started_at": st.started_at_s,
+            "background_prep_done_at": st.done_at_s,
+        }
         timings: Dict[str, float] = {}
+        detailed: Dict[str, float] = dict(
+            getattr(self, "_inplace_reshard_precommit_timings_ms", {}) or {}
+        )
+        detailed.update(prep_snapshot)
+        detailed["timing_mode_detailed"] = self._inplace_reshard_detailed_timing_enabled()
+        detailed["rank"] = int(self.tp_rank)
+        detailed["clock"] = "rank_local_wall"
+        self._inplace_reshard_current_timings_ms = detailed
 
         t_comm = _time.time()
-        self._inplace_reshard_world_barrier()
-        self._sync_inplace_reshard_parallel_groups(new_tp)
+        self._inplace_reshard_measure("world_sync_ms", self._inplace_reshard_world_barrier)
+        self._inplace_reshard_measure(
+            "parallel_group_rebuild_ms",
+            lambda: self._sync_inplace_reshard_parallel_groups(new_tp),
+        )
         timings["comm_s"] = _time.time() - t_comm
+        detailed["comm_group_total_ms"] = timings["comm_s"] * 1000.0
 
         is_joining = self.tp_rank >= old_tp and self.tp_rank < new_tp
         is_active = self.tp_rank < old_tp
@@ -2971,38 +3301,71 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if is_joining and prep_ready and st.weights_ready:
             self._pre_reshard_tp = old_tp
             self.tp_size = new_tp
-            self._update_model_tp_metadata(new_tp)
             self.is_inplace_standby_rank = False
             # Participate in rank0's pre/post-xfer barriers (do not block early:
             # rank0 also waits at the pre-xfer barrier before narrow/xfer).
             self._inplace_reshard_world_barrier()
             dist.barrier(group=get_tp_group().cpu_group)
-            self._inplace_reshard_rendezvous_before_transfer(old_tp, new_tp)
+            just_built_for_new_tp = False
+            if old_tp > 1 and self.model is None:
+                self._ensure_inplace_reshard_dummy_model_loaded()
+                just_built_for_new_tp = True
+            if not just_built_for_new_tp:
+                self._update_model_tp_metadata(new_tp)
+            if old_tp > 1:
+                self._inplace_reshard_transfer_weights(
+                    old_tp, new_tp, prepared_joiners=False
+                )
+            else:
+                self._inplace_reshard_rendezvous_before_transfer(old_tp, new_tp)
             dist.barrier(group=get_tp_group().cpu_group)
-            if not st.runtime_ready:
-                self._finalize_inplace_reshard_runtime_stack(new_tp)
-            dist.barrier(group=get_tp_group().cpu_group)
+            t_rebuild = _time.time()
+            self._commit_inplace_reshard_runtime_post_xfer(
+                new_tp, runtime_prepped=st.runtime_ready
+            )
+            timings["rebuild_s"] = _time.time() - t_rebuild
+            self._inplace_reshard_measure(
+                "post_runtime_barriers_ms",
+                lambda: dist.barrier(group=get_tp_group().cpu_group),
+            )
+            runtime_prepped = st.runtime_ready
             timings["commit_s"] = _time.time() - t0
+            detailed["model_runner_total_ms"] = timings["commit_s"] * 1000.0
+            self._last_inplace_reshard_breakdown_ms = dict(detailed)
+            self._inplace_reshard_current_timings_ms = None
             self.reset_inplace_reshard_prep()
             return (
                 True,
                 f"commit joining rank {self.tp_rank} TP{old_tp}->TP{new_tp} "
-                f"prep=1 comm={timings['comm_s']:.3f}s",
+                f"prep=1 runtime_prep={int(runtime_prepped)} "
+                f"comm={timings['comm_s']:.3f}s "
+                f"rebuild={timings.get('rebuild_s', 0):.3f}s",
                 timings["commit_s"],
             )
 
         if self.tp_rank == 0 and is_active:
             rules = get_tp_split_rules(self.model)
-            self._free_inplace_reshard_kv_pools()
+            self._inplace_reshard_measure(
+                "old_kv_runtime_release_ms", self._free_inplace_reshard_kv_pools
+            )
             if self.device == "cuda":
-                self._maybe_defragment_inplace_reshard_before_transfer(old_tp, new_tp)
+                self._inplace_reshard_measure(
+                    "memory_compact_defrag_ms",
+                    lambda: self._maybe_defragment_inplace_reshard_before_transfer(old_tp, new_tp),
+                )
             self._inplace_reshard_world_barrier()
             dist.barrier(group=get_tp_group().cpu_group)
             t_xfer = _time.time()
-            self._inplace_reshard_transfer_weights(
-                old_tp, new_tp, prepared_joiners=prep_ready and st.joiners_prepared
+            self._inplace_reshard_measure(
+                "weight_transfer_total_ms",
+                lambda: self._inplace_reshard_transfer_weights(
+                    old_tp, new_tp, prepared_joiners=prep_ready and st.joiners_prepared
+                ),
             )
             timings["xfer_s"] = _time.time() - t_xfer
+            detailed[
+                "weight_transfer_ipc_rendezvous_ms" if old_tp == 1 else "weight_transfer_multihop_p2p_ms"
+            ] = detailed.get("weight_transfer_total_ms", 0.0)
             self._pre_reshard_tp = old_tp
             self.tp_size = new_tp
             self.tp_rank = 0
@@ -3012,29 +3375,21 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 self._update_model_tp_metadata(new_tp)
             dist.barrier(group=get_tp_group().cpu_group)
             t_rebuild = _time.time()
-            self.rebuild_memory_pool_after_inplace_reshard()
+            self._commit_inplace_reshard_runtime_post_xfer(
+                new_tp, runtime_prepped=False
+            )
             timings["rebuild_s"] = _time.time() - t_rebuild
-            dist.barrier(group=get_tp_group().cpu_group)
-            self.maybe_init_ngram_embedding()
-            self.init_routed_experts_capturer()
-            if self.device == "cuda" or self.device == "musa":
-                self.init_cublas()
-                self.init_attention_backend()
-                self.kernel_warmup()
-                self.init_device_graphs()
-            elif self.device in ["npu", "cpu"]:
-                self.init_attention_backend()
-                self.init_device_graphs()
-            else:
-                self.graph_runner = None
-                self.graph_mem_usage = 0
-                self.init_attention_backend()
-            self.init_piecewise_cuda_graphs()
-            dist.barrier(group=get_tp_group().cpu_group)
+            self._inplace_reshard_measure(
+                "post_runtime_barriers_ms",
+                lambda: dist.barrier(group=get_tp_group().cpu_group),
+            )
             total_sent = sum(
                 p.numel() * p.element_size() for p in self.model.parameters()
             )
             timings["commit_s"] = _time.time() - t0
+            detailed["model_runner_total_ms"] = timings["commit_s"] * 1000.0
+            self._last_inplace_reshard_breakdown_ms = dict(detailed)
+            self._inplace_reshard_current_timings_ms = None
             self.reset_inplace_reshard_prep()
             return (
                 True,
@@ -3050,24 +3405,41 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 enable=self.server_args.enable_memory_saver
             )
             self._free_inplace_reshard_kv_pools()
+            self._inplace_reshard_world_barrier()
+            dist.barrier(group=get_tp_group().cpu_group)
             self._inplace_reshard_transfer_weights(
                 old_tp, new_tp, prepared_joiners=prep_ready and st.joiners_prepared
             )
             self._pre_reshard_tp = old_tp
             self._update_model_tp_metadata(new_tp)
             dist.barrier(group=get_tp_group().cpu_group)
-            self._finalize_inplace_reshard_runtime_stack(new_tp)
-            dist.barrier(group=get_tp_group().cpu_group)
+            t_rebuild = _time.time()
+            self._commit_inplace_reshard_runtime_post_xfer(
+                new_tp, runtime_prepped=st.runtime_ready
+            )
+            timings["rebuild_s"] = _time.time() - t_rebuild
+            self._inplace_reshard_measure(
+                "post_runtime_barriers_ms",
+                lambda: dist.barrier(group=get_tp_group().cpu_group),
+            )
+            runtime_prepped = st.runtime_ready
             timings["commit_s"] = _time.time() - t0
+            detailed["model_runner_total_ms"] = timings["commit_s"] * 1000.0
+            self._last_inplace_reshard_breakdown_ms = dict(detailed)
+            self._inplace_reshard_current_timings_ms = None
             self.reset_inplace_reshard_prep()
             return (
                 True,
-                f"commit active follower rank {self.tp_rank} TP{old_tp}->TP{new_tp}",
+                f"commit active follower rank {self.tp_rank} TP{old_tp}->TP{new_tp} "
+                f"runtime_prep={int(runtime_prepped)}",
                 timings["commit_s"],
             )
 
         dist.barrier(group=get_tp_group().cpu_group)
         timings["commit_s"] = _time.time() - t0
+        detailed["model_runner_total_ms"] = timings["commit_s"] * 1000.0
+        self._last_inplace_reshard_breakdown_ms = dict(detailed)
+        self._inplace_reshard_current_timings_ms = None
         self.reset_inplace_reshard_prep()
         return True, f"commit rank {self.tp_rank} noop", timings["commit_s"]
 
@@ -3339,11 +3711,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             "old_tp_size": old_tp,
             "new_tp_size": new_tp,
         }
-        broadcast_pyobj(
-            cmd,
-            get_world_group().rank,
-            get_world_group().cpu_group,
-            src=get_world_group().ranks[0],
+        self._inplace_reshard_precommit_timings_ms = {}
+        self._inplace_reshard_current_timings_ms = self._inplace_reshard_precommit_timings_ms
+        self._inplace_reshard_measure(
+            "activation_broadcast_ms",
+            lambda: broadcast_pyobj(
+                cmd,
+                get_world_group().rank,
+                get_world_group().cpu_group,
+                src=get_world_group().ranks[0],
+            ),
         )
         ok, msg, elapsed = self.commit_inplace_reshard_tp(new_tp, old_tp)
         if not ok:
@@ -3611,59 +3988,409 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         logger.info(full_msg)
         return True, full_msg, timings["total_ms"] / 1000
 
-    def _update_model_tp_metadata(self, new_tp: int):
-        """Update attention/MLP layer metadata after TP reshard.
+    def attach_afd_component_stager(
+        self,
+        gloo_data_group,
+        nccl_data_group,
+        control_group,
+        *,
+        max_cpu_staging_bytes: int = 16 * 1024**3,
+        shadow_device: Optional[str] = None,
+        collective_commands_enabled: bool = False,
+        group_refresh_callback=None,
+        topology_refresh_callback=None,
+    ):
+        """Attach independent max-world transport to the component adapter.
 
-        After weights are sliced, the model's cached shape constants
-        (num_heads, q_size, kv_size, tp_head_num, etc.) must match the new TP.
+        Group construction and collective command fan-out intentionally live
+        outside this method: every max-world rank must call them in the same
+        order. The adapter remains fail-closed until this method is called.
         """
-        old_tp = getattr(self, '_pre_reshard_tp', 1)
-        factor = new_tp // old_tp
+        from sglang.srt.reshard.afd_component_weight_staging import (
+            HybridMaxWorldTransport,
+            ModelRunnerAFDComponentStager,
+            TorchDistributedMaxWorldTransport,
+            TorchDistributedNCCLMaxWorldTransport,
+        )
+
+        max_tp = int(self.server_args.afd_component_max_tp)
+        serving_device_group = getattr(getattr(self, "tp_group", None), "device_group", None)
+        serving_cpu_group = getattr(getattr(self, "tp_group", None), "cpu_group", None)
+        if (
+            gloo_data_group is serving_cpu_group
+            or nccl_data_group is serving_device_group
+            or control_group is serving_cpu_group
+        ):
+            raise ValueError("AFD component staging groups must be independent from serving TP")
+        staging_backend = os.getenv("AFD_COMPONENT_STAGING_BACKEND", "gloo").lower()
+        common = dict(rank=self.tp_rank, world_size=max_tp, control_group=control_group)
+        gloo_transport = (
+            TorchDistributedMaxWorldTransport(
+                data_group=gloo_data_group, **common
+            )
+            if gloo_data_group is not None
+            else None
+        )
+        nccl_transport = (
+            TorchDistributedNCCLMaxWorldTransport(
+                data_group=nccl_data_group,
+                device=torch.device(f"cuda:{self.gpu_id}"),
+                **common,
+            )
+            if nccl_data_group is not None
+            else None
+        )
+        if staging_backend == "gloo":
+            transport = gloo_transport
+        elif staging_backend == "nccl":
+            transport = nccl_transport
+        elif staging_backend == "hybrid":
+            transport = HybridMaxWorldTransport(gloo_transport, nccl_transport)
+        else:
+            raise ValueError(
+                "AFD_COMPONENT_STAGING_BACKEND must be gloo, nccl, or hybrid"
+            )
+        logger.info(
+            "AFD component staging initialized configured_backend=%s "
+            "gloo_data=%s nccl_data=%s control=gloo",
+            staging_backend,
+            gloo_data_group is not None,
+            nccl_data_group is not None,
+        )
+        self._afd_component_collective_commands_enabled = bool(
+            collective_commands_enabled
+        )
+        self._afd_component_stager = ModelRunnerAFDComponentStager(
+            self,
+            self.server_args.afd_perspective,
+            max_tp,
+            transport,
+            max_cpu_staging_bytes=max_cpu_staging_bytes,
+            shadow_device=shadow_device,
+            group_refresh_callback=group_refresh_callback,
+            topology_refresh_callback=topology_refresh_callback,
+        )
+        return self._afd_component_stager
+
+    def afd_component_ensure_model_shell(self, target_tp: int) -> None:
+        """Build a dummy target-TP shell on a joining component rank."""
+        self._ensure_inplace_reshard_dummy_model_loaded(shard_tp=int(target_tp))
+
+    def afd_component_rebuild_groups(self, target_tp: int) -> None:
+        """Rebuild this component process's serving groups after strict drain."""
+        old_tp = int(getattr(self, "tp_size", target_tp))
+        self._sync_inplace_reshard_parallel_groups(int(target_tp))
+        self._pre_reshard_tp = old_tp
+        self.tp_size = int(target_tp)
+        self.server_args.tp_size = int(target_tp)
+
+    def afd_component_refresh_peer_topology(
+        self,
+        attn_tp: int,
+        ffn_tp: int,
+        *,
+        reset_data_plane: bool,
+    ) -> None:
+        """Publish complete A/F topology and optionally drop peer-bound links."""
+        server_args = self.server_args
+        old_attn_tp = getattr(server_args, "afd_attn_tp", None)
+        old_ffn_tp = getattr(server_args, "afd_ffn_tp", None)
+        if hasattr(server_args, "afd_attn_tp"):
+            server_args.afd_attn_tp = int(attn_tp)
+        if hasattr(server_args, "afd_ffn_tp"):
+            server_args.afd_ffn_tp = int(ffn_tp)
+        try:
+            if reset_data_plane:
+                self._refresh_afd_component_data_plane()
+        except Exception:
+            if hasattr(server_args, "afd_attn_tp"):
+                server_args.afd_attn_tp = old_attn_tp
+            if hasattr(server_args, "afd_ffn_tp"):
+                server_args.afd_ffn_tp = old_ffn_tp
+            raise
+
+    def _afd_async_rebuild_kv_and_disagg(
+        self, target_tp: int, ready: "threading.Event"
+    ) -> None:
+        """Background: rebuild KV pool + attention backend (no collectives).
+
+        Runs after rebuild_groups (TP groups are at target) in parallel with
+        ensure_shell and materialize.  Uses the pre-computed kv_hint from
+        PREPARE so no barrier/all_reduce is needed in this thread.
+        """
+        try:
+            logger.info(
+                "AFD async KV rebuild start: rank=%d target_tp=%d",
+                self.tp_rank, target_tp,
+            )
+            self._free_inplace_reshard_kv_pools_only()
+            self._afd_allocate_kv_pool_from_hint(int(target_tp))
+            self._init_inplace_reshard_attention_stack()
+            self._refresh_afd_component_data_plane()
+            logger.info(
+                "AFD async KV rebuild done: rank=%d", self.tp_rank,
+            )
+        except Exception:
+            logger.exception(
+                "Async KV rebuild failed on rank %d", self.tp_rank
+            )
+        finally:
+            ready.set()
+
+    def _afd_allocate_kv_pool_from_hint(self, target_tp: int) -> None:
+        """Allocate KV pool using the pre-computed kv_hint config (no collectives).
+
+        This is the heavy GPU allocation that can overlap with rebuild_groups
+        and ensure_shell. The kv_hint was computed during PREPARE and provides
+        token/request counts; we use it directly without all_reduce.
+        """
+        import torch.distributed as dist
+
+        if self._is_afd_ffn_no_kv():
+            self.rebuild_afd_ffn_memory_pool_after_reshard()
+            return
+
+        self.configure_kv_cache_dtype()
+        self._release_inplace_reshard_attention_state()
+        self._compact_inplace_reshard_cuda_memory()
+
+        st = getattr(self, "_inplace_reshard_prep_state", None)
+        hint = (
+            getattr(st, "kv_cfg_hint", None)
+            if st is not None and int(getattr(st, "new_tp", 0)) == int(target_tp)
+            else None
+        )
+
+        if hint is not None and getattr(hint, "max_total_num_tokens", 0) > 0:
+            hint_tokens = int(hint.max_total_num_tokens)
+            hint_reqs = int(hint.max_running_requests)
+        else:
+            hint_tokens = int(getattr(self, "max_total_num_tokens", 4096) or 4096)
+            hint_reqs = self._resolve_max_num_reqs(hint_tokens)
+
+        # Conservative: use 80% of hint to avoid OOM from per-rank differences
+        hint_tokens = max(int(hint_tokens * 0.8), 4096)
+
+        cfg = __import__("sglang.srt.model_executor.model_runner_kv_cache_mixin", fromlist=["MemoryPoolConfig"]).MemoryPoolConfig(
+            max_total_num_tokens=hint_tokens,
+            max_running_requests=hint_reqs,
+            full_max_total_num_tokens=(
+                hint.full_max_total_num_tokens if hint else None
+            ),
+            swa_max_total_num_tokens=(
+                hint.swa_max_total_num_tokens if hint else None
+            ),
+            mem_fraction_static=(
+                hint.mem_fraction_static
+                if hint
+                else self.server_args.mem_fraction_static
+            ),
+        )
+        self._apply_memory_pool_config(cfg)
+        logger.info(
+            "AFD async KV pool allocated: rank=%d tp=%d tokens=%d",
+            self.tp_rank, target_tp, hint_tokens,
+        )
+
+    def afd_component_refresh_runtime(self, target_tp: int, perspective) -> None:
+        """Refresh TP metadata; only attention owns KV/attention runtime."""
+        value = str(getattr(perspective, "value", perspective)).lower()
+        if value.endswith("ffn"):
+            self.tp_size = int(target_tp)
+            self.rebuild_afd_ffn_memory_pool_after_reshard()
+            self._ensure_afd_joining_ffn_runtime_initialized()
+            self._refresh_afd_component_data_plane()
+            return
+        if value.endswith("attn"):
+            self._free_inplace_reshard_kv_pools_only()
+        self._update_model_tp_metadata(int(target_tp))
+        if value.endswith("attn"):
+            self._commit_inplace_reshard_runtime_post_xfer(
+                int(target_tp), runtime_prepped=False
+            )
+            self._refresh_afd_component_data_plane()
+        if not hasattr(self, "eplb_manager"):
+            self.eplb_manager = None
+        if not hasattr(self, "expert_location_updater"):
+            self.expert_location_updater = None
+
+    def afd_component_precompute_kv_hint(self, target_tp: int) -> None:
+        """Pre-compute KV pool config hint during PREPARE for fast ACTIVATE rebuild."""
+        import time as _time
+
+        if not hasattr(self, "dtype") or self.dtype is None:
+            if hasattr(self, "model_config") and self.model_config is not None:
+                self.dtype = self.model_config.dtype
+            else:
+                logger.warning(
+                    "AFD component KV hint skipped: ModelRunner.dtype not available"
+                )
+                return
+
+        t0 = _time.time()
+        saved_tp = self.tp_size
+        self.tp_size = int(target_tp)
+        try:
+            self.configure_kv_cache_dtype()
+            cfg = self._resolve_memory_pool_config_fill_inplace_reshard(
+                distributed=False
+            )
+            st = self._inplace_reshard_prep_state_obj()
+            st.kv_cfg_hint = cfg
+            st.new_tp = int(target_tp)
+            logger.info(
+                "AFD component KV hint precomputed: tp=%d tokens=%d reqs=%d in %.3fs",
+                target_tp,
+                cfg.max_total_num_tokens,
+                cfg.max_running_requests,
+                _time.time() - t0,
+            )
+        except Exception as exc:
+            logger.warning(
+                "AFD component KV hint precompute failed (tp=%d): %s",
+                target_tp,
+                exc,
+            )
+        finally:
+            self.tp_size = saved_tp
+
+    @staticmethod
+    def _refresh_afd_component_data_plane() -> None:
+        """Drop TP-bound AFD communicators for lazy rebuild on the new groups."""
+        from sglang.srt.layers.afd import reset_afd_communicators
+
+        reset_afd_communicators()
+
+    def _ensure_afd_joining_ffn_runtime_initialized(self) -> None:
+        """Idempotently initialize lightweight runtime state skipped by standby."""
+        if not hasattr(self, "use_ngram_embedding"):
+            self.maybe_init_ngram_embedding()
+        if getattr(self, "attn_backend", None) is None:
+            self.init_attention_backend()
+        if not hasattr(self, "graph_runner"):
+            self.graph_runner = None
+        if not hasattr(self, "piecewise_cuda_graph_runner"):
+            self.piecewise_cuda_graph_runner = None
+        if not hasattr(self, "graph_mem_usage"):
+            self.graph_mem_usage = 0
+        if not hasattr(self, "eplb_manager"):
+            self.eplb_manager = None
+        if not hasattr(self, "expert_location_updater"):
+            self.expert_location_updater = None
+
+    def afd_component_demote_rank(self, perspective) -> None:
+        """Release the retired component model/runtime on shrink followers."""
+        value = str(getattr(perspective, "value", perspective)).lower()
+        import time as _time
+        _t0 = _time.time()
+        _free_before = torch.cuda.memory_allocated(self.gpu_id) / 1024**3 if self.device == "cuda" else 0
+        if value.endswith("attn"):
+            self._free_inplace_reshard_kv_pools()
+        self.model = None
+        self.max_total_num_tokens = 1
+        self.max_running_requests = 1
+        # Component participants use their own lifecycle and command world;
+        # never enroll a retired component rank in native in-place standby.
+        self.is_afd_component_standby_rank = True
+        gc.collect()
+        if self.device == "cuda":
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            _free_after = torch.cuda.memory_allocated(self.gpu_id) / 1024**3
+            logger.warning(
+                "[AFD-reshard] DEMOTE rank=%d perspective=%s gpu=%d "
+                "freed=%.2fGB (%.2f -> %.2f) elapsed=%.3fs",
+                self.tp_rank, value, self.gpu_id,
+                _free_before - _free_after, _free_before, _free_after,
+                _time.time() - _t0,
+            )
+
+    def _update_model_tp_metadata(self, new_tp: int):
+        """Recompute TP-dependent model metadata from immutable global sizes."""
+        if new_tp < 1:
+            raise ValueError("new_tp must be positive")
+        old_tp = int(getattr(self, "_pre_reshard_tp", getattr(self, "tp_size", 1)))
 
         n_tp_size = 0
         n_reduce = 0
         for module in self.model.modules():
-            # Update Qwen3Attention-style layers
-            if hasattr(module, 'total_num_heads') and hasattr(module, 'q_size'):
-                total_heads = module.total_num_heads
-                total_kv = getattr(module, 'total_num_kv_heads', total_heads)
-                head_dim = module.head_dim
-
-                module.num_heads = total_heads // new_tp
+            total_heads = getattr(module, "total_num_heads", None)
+            if total_heads is not None:
+                total_heads = int(total_heads)
+                total_kv = int(getattr(module, "total_num_kv_heads", total_heads))
+                module.num_heads = max(1, total_heads // new_tp)
                 module.num_kv_heads = max(1, total_kv // new_tp)
-                module.q_size = module.num_heads * head_dim
-                module.kv_size = module.num_kv_heads * head_dim
+                if hasattr(module, "num_kv_head_replicas"):
+                    module.num_kv_head_replicas = (
+                        new_tp // total_kv if new_tp >= total_kv else 1
+                    )
 
-            # Update RadixAttention (tp_q_head_num etc. are per-rank counts)
-            if hasattr(module, 'tp_q_head_num') and hasattr(module, 'tp_k_head_num'):
-                module.tp_q_head_num = module.tp_q_head_num // factor
-                module.tp_k_head_num = max(1, module.tp_k_head_num // factor)
-                module.tp_v_head_num = max(1, module.tp_v_head_num // factor)
+                if hasattr(module, "q_size") and hasattr(module, "head_dim"):
+                    module.q_size = module.num_heads * module.head_dim
+                    module.kv_size = module.num_kv_heads * module.head_dim
+                    if hasattr(module, "attn") and hasattr(module.attn, "tp_q_head_num"):
+                        # Preserve parent-owned immutable totals on the child so
+                        # its later standalone visit cannot infer them from an
+                        # already-updated per-rank value.
+                        module.attn._reshard_total_q_head_num = total_heads
+                        module.attn._reshard_total_k_head_num = total_kv
+                        module.attn._reshard_total_v_head_num = total_kv
+                        module.attn.tp_q_head_num = module.num_heads
+                        module.attn.tp_k_head_num = module.num_kv_heads
+                        module.attn.tp_v_head_num = module.num_kv_heads
 
-            # Update ANY parallel-linear-style module carrying a tp_size (Column/
-            # Row/QKV/MergedColumn ParallelLinear). Their forward() gates the TP
-            # all_reduce on self.tp_size; rank0 built them at TP1 so without this
-            # update rank0 would skip the all_reduce while joining ranks perform
-            # it, deadlocking the collective. Also refresh per-partition sizes.
-            if hasattr(module, 'tp_size') and not hasattr(module, 'total_num_heads') \
-                    and not hasattr(module, 'tp_q_head_num'):
+                # QKVParallelLinear has immutable total head counts but mutable
+                # projection widths which must be recomputed for TP shrink too.
+                if hasattr(module, "head_size") and hasattr(module, "q_proj_shard_size"):
+                    v_head_size = int(getattr(module, "v_head_size", module.head_size))
+                    module.q_proj_shard_size = module.num_heads * module.head_size
+                    module.kv_proj_shard_size = module.num_kv_heads * module.head_size
+                    module.v_proj_shard_size = module.num_kv_heads * v_head_size
+                    module.output_sizes = [
+                        module.q_proj_shard_size * new_tp,
+                        module.kv_proj_shard_size * new_tp,
+                        module.v_proj_shard_size * new_tp,
+                    ]
+                    module.output_size = sum(module.output_sizes)
+
+            # Capture immutable totals on the first transition for standalone
+            # RadixAttention objects, then reuse them across expand/shrink cycles.
+            elif hasattr(module, "tp_q_head_num") and hasattr(module, "tp_k_head_num"):
+                if not hasattr(module, "_reshard_total_q_head_num"):
+                    module._reshard_total_q_head_num = module.tp_q_head_num * old_tp
+                    module._reshard_total_k_head_num = module.tp_k_head_num * old_tp
+                    module._reshard_total_v_head_num = (
+                        getattr(module, "tp_v_head_num", module.tp_k_head_num) * old_tp
+                    )
+                module.tp_q_head_num = max(1, module._reshard_total_q_head_num // new_tp)
+                module.tp_k_head_num = max(1, module._reshard_total_k_head_num // new_tp)
+                module.tp_v_head_num = max(1, module._reshard_total_v_head_num // new_tp)
+
+            # Every ParallelLinear caches its TP topology. Recompute partition
+            # widths from full dimensions, including fused output segments.
+            if hasattr(module, "tp_size"):
                 module.tp_size = new_tp
-                if hasattr(module, 'tp_rank'):
+                if hasattr(module, "tp_rank"):
                     module.tp_rank = self.tp_rank
                 n_tp_size += 1
-                if hasattr(module, 'reduce_results'):
+                if hasattr(module, "reduce_results"):
                     n_reduce += 1
-                # Refresh cached per-partition input width used by RowParallel.
-                if hasattr(module, 'input_size_per_partition') and hasattr(module, 'input_size'):
+                if hasattr(module, "input_size_per_partition") and hasattr(module, "input_size"):
                     module.input_size_per_partition = module.input_size // new_tp
-                if hasattr(module, 'output_size_per_partition') and hasattr(module, 'output_size'):
+                if hasattr(module, "output_partition_sizes"):
+                    if hasattr(module, "output_sizes"):
+                        module.output_partition_sizes = [
+                            size // new_tp for size in module.output_sizes
+                        ]
+                        module.output_size_per_partition = sum(
+                            module.output_partition_sizes
+                        )
+                    elif hasattr(module, "output_size"):
+                        module.output_size_per_partition = module.output_size // new_tp
+                        module.output_partition_sizes = [module.output_size_per_partition]
+                elif hasattr(module, "output_size_per_partition") and hasattr(module, "output_size"):
                     module.output_size_per_partition = module.output_size // new_tp
 
-        # Refresh LogitsProcessor's cached TP-all-gather decision. It is computed
-        # once at build time from the world size; rank0 built at TP1 cached
-        # do_tensor_parallel_all_gather=False, so after reshard rank0 would skip
-        # the vocab-parallel logits all_gather while joining ranks perform it,
-        # deadlocking the collective in the logits stage.
         n_lp = 0
         try:
             from sglang.srt.distributed import (
@@ -3689,10 +4416,6 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.warning("Failed to refresh LogitsProcessor tp state: %s", e)
         logger.info("In-place reshard: refreshed %d LogitsProcessor(s)", n_lp)
 
-        # Recompute vocab-parallel shard indices (embed_tokens / lm_head). These
-        # are cached from build time; after the vocab dim is re-sharded, the
-        # embedding must mask the correct per-rank token id range or decode hits a
-        # device-side index assert.
         n_vpe = 0
         try:
             for module in self.model.modules():
@@ -3705,30 +4428,15 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             logger.warning("Failed to recompute vocab-parallel shard indices: %s", e)
         logger.info("In-place reshard: recomputed %d vocab-parallel shard indices", n_vpe)
 
-        # Refresh every LayerCommunicator's cached CommunicateContext. It caches
-        # tp_size / attn_tp_size captured at build time (TP1 on rank0), which
-        # gates the per-layer scatter/gather/all-reduce. Stale context makes
-        # rank0 skip TP communication that joining ranks still perform, hanging
-        # the collective. Re-init picks up the now-updated global TP sizes.
         n_ctx = 0
         try:
-            from sglang.srt.layers.communicator import (
-                CommunicateContext,
-                LayerCommunicator,
-            )
+            from sglang.srt.layers.communicator import CommunicateContext, LayerCommunicator
 
-            fresh_ctx = CommunicateContext.init_new()
             seen = set()
-            # LayerCommunicator objects are plain attributes on decoder layers
-            # (not nn.Modules), so scan every module's __dict__ for them.
             for module in self.model.modules():
                 for attr_val in list(vars(module).values()):
                     if isinstance(attr_val, LayerCommunicator) and id(attr_val) not in seen:
                         attr_val._context = CommunicateContext.init_new()
-                        # Re-bind the communication functions: they are chosen at
-                        # build time from the (then TP1) context and cache whether
-                        # to all_reduce/reduce_scatter. Without this rank0 keeps
-                        # the TP1 no-op comm fns and skips half the all_reduces.
                         attr_val._post_init_communicate()
                         seen.add(id(attr_val))
                         n_ctx += 1
@@ -3740,21 +4448,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             "(%d row-parallel reduce), refreshed %d layer-communicator contexts",
             n_tp_size, n_reduce, n_ctx,
         )
-        # Update KV cache pool metadata (row_dim, head_num)
-        self._update_kv_pool_metadata(new_tp, factor)
+        self._update_kv_pool_metadata(new_tp)
 
-    def _update_kv_pool_metadata(self, new_tp: int, factor: int):
-        """Update KV cache pool's head_num and row_dim after TP reshard.
-
-        The KV buffer physical size stays the same (we flush cache anyway),
-        but metadata must match the new per-rank head count.
-        """
+    def _update_kv_pool_metadata(self, new_tp: int):
+        """Recompute KV pool dimensions from the model's global KV heads."""
         try:
             pool = getattr(self, "token_to_kv_pool", None)
             if pool is None:
                 return
-            if hasattr(pool, 'head_num') and hasattr(pool, 'row_dim'):
-                pool.head_num = pool.head_num // factor
+            if hasattr(pool, "head_num") and hasattr(pool, "row_dim"):
+                pool.head_num = self.model_config.get_num_kv_heads(new_tp)
                 pool.row_dim = pool.head_num * pool.head_dim
                 logger.info(
                     "KV pool metadata updated: head_num=%d, row_dim=%d",
@@ -4010,7 +4713,21 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         return c
 
     def init_attention_backend(self):
-        """Init attention kernel backend."""
+        """Init attention kernel backend.
+
+        Idempotent: returns immediately if a backend is already initialized.
+        During reshard refresh_runtime, the KV pool is resized but the
+        attention backend's flashinfer wrappers are stateless and only
+        depend on head counts (already updated in _update_model_tp_metadata).
+        """
+        if hasattr(self, "attn_backend") and self.attn_backend is not None:
+            return
+        if self._is_afd_ffn_no_kv():
+            from sglang.srt.layers.attention.tbo_backend import AFDFFNNoOpAttnBackend
+
+            self.attn_backend = AFDFFNNoOpAttnBackend()
+            return
+
         if self.server_args.enable_pdmux:
             self.attn_backend = self._get_attention_backend(init_new_workspace=True)
             self.decode_attn_backend_group = []

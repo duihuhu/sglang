@@ -25,14 +25,16 @@ def _pick_free_port() -> int:
 
 
 def _rank0_subprocess_load_worker(conn, config_bytes: bytes) -> None:
-    """Child entry: fresh CUDA context, disk load at (tp_rank=0, tp_size=new_tp)."""
+    """Child entry: fresh CUDA context, disk load at (tp_rank=0, tp_size=new_tp).
+
+    Loads raw safetensor weights, fuses q/k/v→qkv_proj and gate/up→gate_up_proj
+    to match sglang's internal parameter names, then TP-shards for rank0.
+    """
     try:
         cfg: Dict[str, Any] = pickle.loads(config_bytes)
         gpu_id = int(cfg["gpu_id"])
         new_tp = int(cfg["new_tp"])
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        # Child is a standalone loader (world_size=1); inherited in-place reshard
-        # env from the parent server breaks initialize_model_parallel assertions.
         for key in (
             "SGLANG_INPLACE_RESHARD_MAX_TP",
             "SGLANG_INPLACE_RESHARD_ACTIVE_TP",
@@ -43,65 +45,37 @@ def _rank0_subprocess_load_worker(conn, config_bytes: bytes) -> None:
 
         torch.cuda.set_device(0)
 
-        port = int(cfg["dist_port"])
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = str(port)
-        os.environ.setdefault("LOCAL_RANK", "0")
+        from safetensors import safe_open
+        from pathlib import Path
 
-        from sglang.srt.distributed.parallel_state import (
-            init_distributed_environment,
-            initialize_model_parallel,
+        model_path = Path(cfg["model_path"])
+        shard_files = sorted(model_path.glob("*.safetensors"))
+        if not shard_files:
+            raise FileNotFoundError(f"No safetensors in {model_path}")
+
+        from sglang.srt.layers.reshard_weights import (
+            reshard_shard_for_rank,
         )
 
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            distributed_init_method=f"tcp://127.0.0.1:{port}",
-            local_rank=0,
-            backend="gloo",
-        )
-        initialize_model_parallel(tensor_model_parallel_size=new_tp)
+        fused_rules = _build_fused_tp_rules(model_path)
 
-        from sglang.srt.configs.model_config import ModelConfig
-        from sglang.srt.model_executor.model_runner import DeviceConfig
-        from sglang.srt.model_loader import get_model_loader
-        from sglang.srt.model_loader.loader import LoadConfig, LoadFormat
+        raw: Dict[str, torch.Tensor] = {}
+        for sf in shard_files:
+            with safe_open(str(sf), framework="pt", device="cpu") as f:
+                for name in f.keys():
+                    raw[name] = f.get_tensor(name)
 
-        model_config = ModelConfig(
-            model_path=cfg["model_path"],
-            trust_remote_code=bool(cfg.get("trust_remote_code", True)),
-            revision=cfg.get("revision"),
-            context_length=cfg.get("context_length"),
-            dtype=cfg.get("dtype", "auto"),
-            quantization=cfg.get("quantization"),
-        )
-        load_format = cfg.get("load_format", LoadFormat.AUTO)
-        if load_format == LoadFormat.DUMMY:
-            load_format = LoadFormat.AUTO
-        load_config = LoadConfig(
-            load_format=load_format,
-            download_dir=cfg.get("download_dir"),
-            tp_rank=0,
-        )
-        loader = get_model_loader(load_config=load_config, model_config=model_config)
-        model = loader.load_model(
-            model_config=model_config,
-            device_config=DeviceConfig("cuda", 0),
-        )
+        fused = _fuse_safetensor_weights(raw)
+        del raw
 
-        from sglang.srt.utils import MultiprocessingSerializer
-
-        exported = {
-            name: MultiprocessingSerializer.serialize(param.data.detach())
-            for name, param in model.named_parameters()
-        }
-        del model
-        torch.cuda.synchronize()
-
-        import torch.distributed as dist
-
-        if dist.is_initialized():
-            dist.destroy_process_group()
+        exported = {}
+        for name, tensor in fused.items():
+            rule = fused_rules.get(name)
+            if rule is not None and new_tp > 1:
+                tensor = reshard_shard_for_rank(tensor, rule, 0, new_tp)
+            exported[name] = tensor.contiguous()
+            del tensor
+        del fused
 
         conn.send(("ok", exported))
     except Exception as exc:
@@ -109,6 +83,125 @@ def _rank0_subprocess_load_worker(conn, config_bytes: bytes) -> None:
         conn.send(("error", repr(exc)))
     finally:
         conn.close()
+
+
+def _build_fused_tp_rules(model_path) -> Dict[str, Any]:
+    """Build TP split rules keyed by fused sglang parameter names."""
+    import json
+    from pathlib import Path
+
+    p = Path(model_path)
+    config_file = p / "config.json"
+    config = {}
+    if config_file.exists():
+        with open(config_file) as f:
+            config = json.load(f)
+
+    num_heads = config.get("num_attention_heads", 32)
+    num_kv_heads = config.get("num_key_value_heads", num_heads)
+    hidden_size = config.get("hidden_size", 4096)
+    head_dim = config.get("head_dim", hidden_size // num_heads)
+    intermediate_size = config.get("intermediate_size", hidden_size * 4)
+
+    q_size = num_heads * head_dim
+    k_size = num_kv_heads * head_dim
+    v_size = num_kv_heads * head_dim
+
+    rules: Dict[str, Any] = {}
+    num_layers = config.get("num_hidden_layers", 64)
+    for i in range(num_layers):
+        prefix = f"model.layers.{i}"
+        rules[f"{prefix}.self_attn.qkv_proj.weight"] = (
+            "column_fused", 0, (q_size, k_size, v_size)
+        )
+        rules[f"{prefix}.mlp.gate_up_proj.weight"] = (
+            "column_fused", 0, (intermediate_size, intermediate_size)
+        )
+        rules[f"{prefix}.self_attn.o_proj.weight"] = ("row", 1)
+        rules[f"{prefix}.mlp.down_proj.weight"] = ("row", 1)
+    rules["model.embed_tokens.weight"] = ("column", 0)
+    rules["lm_head.weight"] = ("column", 0)
+    return rules
+
+
+def _fuse_safetensor_weights(raw: Dict[str, "torch.Tensor"]) -> Dict[str, "torch.Tensor"]:
+    """Convert HF safetensor param names to sglang fused names.
+
+    Fusions:
+    - q_proj + k_proj + v_proj → qkv_proj (cat dim=0)
+    - gate_proj + up_proj → gate_up_proj (cat dim=0)
+    """
+    import re
+    import torch
+
+    fused: Dict[str, torch.Tensor] = {}
+    consumed = set()
+
+    layer_pattern = re.compile(
+        r"(model\.layers\.\d+\.self_attn)\.(q_proj|k_proj|v_proj)(\.weight|\.bias)"
+    )
+    mlp_pattern = re.compile(
+        r"(model\.layers\.\d+\.mlp)\.(gate_proj|up_proj)(\.weight|\.bias)"
+    )
+
+    layer_groups: Dict[str, Dict[str, "torch.Tensor"]] = {}
+    mlp_groups: Dict[str, Dict[str, "torch.Tensor"]] = {}
+
+    for name, tensor in raw.items():
+        m = layer_pattern.match(name)
+        if m:
+            prefix, proj, suffix = m.group(1), m.group(2), m.group(3)
+            key = prefix + suffix
+            layer_groups.setdefault(key, {})[proj] = tensor
+            consumed.add(name)
+            continue
+        m = mlp_pattern.match(name)
+        if m:
+            prefix, proj, suffix = m.group(1), m.group(2), m.group(3)
+            key = prefix + suffix
+            mlp_groups.setdefault(key, {})[proj] = tensor
+            consumed.add(name)
+            continue
+
+    for key, parts in layer_groups.items():
+        if "q_proj" in parts and "k_proj" in parts and "v_proj" in parts:
+            fused_name = key.replace(".weight", ".qkv_proj.weight").replace(
+                ".bias", ".qkv_proj.bias"
+            )
+            suffix = ".weight" if key.endswith(".weight") else ".bias"
+            prefix = key[: -len(suffix)]
+            fused_name = prefix + ".qkv_proj" + suffix
+            fused[fused_name] = torch.cat(
+                [parts["q_proj"], parts["k_proj"], parts["v_proj"]], dim=0
+            )
+        else:
+            for proj, t in parts.items():
+                orig = key.replace(".weight", f".{proj}.weight").replace(
+                    ".bias", f".{proj}.bias"
+                )
+                suffix = ".weight" if key.endswith(".weight") else ".bias"
+                prefix = key[: -len(suffix)]
+                fused[prefix + f".{proj}" + suffix] = t
+
+    for key, parts in mlp_groups.items():
+        if "gate_proj" in parts and "up_proj" in parts:
+            suffix = ".weight" if key.endswith(".weight") else ".bias"
+            prefix = key[: -len(suffix)]
+            fused_name = prefix + ".gate_up_proj" + suffix
+            fused[fused_name] = torch.cat(
+                [parts["gate_proj"], parts["up_proj"]], dim=0
+            )
+        else:
+            for proj, t in parts.items():
+                suffix = ".weight" if key.endswith(".weight") else ".bias"
+                prefix = key[: -len(suffix)]
+                fused[prefix + f".{proj}" + suffix] = t
+
+    for name, tensor in raw.items():
+        if name not in consumed:
+            fused[name] = tensor
+
+    return fused
 
 
 def load_rank0_weights_via_subprocess(config: Dict[str, Any], *, timeout_s: float = 600.0):
@@ -176,44 +269,40 @@ def import_subprocess_weights(
     if hooks is not None:
         runner.pyt_hooks = None
         del hooks
-    stale_model = runner.model
-    runner.model = None
-    if hasattr(runner, "loader"):
-        runner.loader = None
-    if stale_model is not None:
-        for param in stale_model.parameters():
-            if param.data.is_cuda and param.data.numel() > 0:
-                param.data = torch.empty(0, device=param.device, dtype=param.dtype)
-    del stale_model
-    for _ in range(5):
-        _gc.collect()
-        torch.cuda.synchronize()
-        if hasattr(torch.cuda, "ipc_collect"):
-            torch.cuda.ipc_collect()
-        torch.cuda.empty_cache()
 
-    runner.tp_size = new_tp
-    runner.server_args.tp_size = new_tp
-    original = runner.server_args.load_format
-    runner.server_args.load_format = LoadFormat.DUMMY
-    runner._skip_load_model_barrier_once = True
-    try:
-        runner.load_model()
-    finally:
-        runner.server_args.load_format = original
+    # Instead of deleting the model and re-creating it (which causes fragmentation),
+    # directly overwrite existing parameter data in-place from CPU tensors.
+    # This reuses the SAME GPU memory addresses and avoids allocator churn.
+    import gc as _gc
 
     local_device = torch.device(runner.device, runner.gpu_id)
+
+    missing = []
+    loaded = 0
     for name, param in runner.model.named_parameters():
         if name not in exported:
-            raise RuntimeError(f"subprocess reload missing parameter {name}")
-        tensor = MultiprocessingSerializer.deserialize(exported[name])
-        param.data = tensor.to(local_device, non_blocking=False).contiguous()
-        del tensor
+            missing.append(name)
+            continue
+        cpu_tensor = exported[name]
+        # Reshape param storage to match exported tensor if sizes differ
+        if param.data.shape != cpu_tensor.shape:
+            param.data = torch.empty(
+                cpu_tensor.shape, dtype=cpu_tensor.dtype, device=local_device
+            )
+        param.data.copy_(cpu_tensor)
+        loaded += 1
+        del cpu_tensor
+    if missing:
+        logger.warning(
+            "subprocess reload: %d params not in export (kept as-is): %s",
+            len(missing),
+            missing[:5],
+        )
     exported.clear()
     _gc.collect()
     torch.cuda.synchronize()
-    if hasattr(torch.cuda, "ipc_collect"):
-        torch.cuda.ipc_collect()
 
+    runner.tp_size = new_tp
+    runner.server_args.tp_size = new_tp
     runner._update_model_tp_metadata(new_tp)
     runner._finalize_inplace_reshard_weight_storage()

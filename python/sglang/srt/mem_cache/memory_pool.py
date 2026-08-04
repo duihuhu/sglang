@@ -187,6 +187,30 @@ class ReqToTokenPool:
         self.free_slots = list(range(self.size))
 
 
+class AFDFFNReqToTokenPool(ReqToTokenPool):
+    """Request-slot pool with a zero-storage virtual token table for AFD FFN."""
+
+    def __init__(
+        self,
+        size: int,
+        max_context_len: int,
+        device: str,
+        enable_memory_saver: bool,
+    ):
+        self.size = size
+        self.max_context_len = max_context_len
+        self.device = device
+        self.req_to_token = torch.zeros(
+            (1, 1), dtype=torch.int32, device=device
+        ).expand(size, max_context_len)
+        self.free_slots = list(range(size))
+        self.no_kv_bookkeeping = True
+
+    def write(self, indices, values):
+        # Every logical cache location is the padded slot 0.
+        return
+
+
 class MambaPool:
     @dataclass(frozen=True, kw_only=True)
     class State:

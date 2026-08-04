@@ -73,6 +73,36 @@ class PrefillStats:
             num_new_seqs=len(adder.can_run_list),
         )
 
+    @classmethod
+    def from_authoritative(
+        cls,
+        reqs: List[Req],
+        extend_lens: List[int],
+        seq_lens: List[int],
+        new_token_ratio: float,
+        running_reqs: List[Req],
+        enable_priority_scheduling: bool = False,
+    ):
+        """Build stats for a PA-selected batch without fabricating a PrefillAdder."""
+        if len(reqs) != len(extend_lens) or len(reqs) != len(seq_lens):
+            raise ValueError(
+                "Authoritative prefill stats geometry mismatch: "
+                f"reqs={len(reqs)}, extend_lens={len(extend_lens)}, "
+                f"seq_lens={len(seq_lens)}"
+            )
+        return cls(
+            log_input_tokens=sum(int(value) for value in extend_lens),
+            log_hit_tokens=sum(
+                int(seq_len) - int(extend_len)
+                for seq_len, extend_len in zip(seq_lens, extend_lens)
+            ),
+            new_token_ratio=float(new_token_ratio),
+            num_running_reqs=QueueCount.from_reqs(
+                running_reqs, enable_priority_scheduling
+            ),
+            num_new_seqs=len(reqs),
+        )
+
 
 class KvMetrics:
     def __init__(self):
