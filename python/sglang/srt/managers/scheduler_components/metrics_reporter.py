@@ -1059,7 +1059,10 @@ class SchedulerMetricsReporter:
             self.scheduler.tree_cache, "token_to_kv_pool_host", None
         ) or getattr(self.scheduler.tree_cache, "full_kv_pool_host", None)
         assert host_pool is not None, "Host pool not found"
-        host_total = host_pool.logical_size
+        # Central I/O leases a smaller active quota from a larger logical
+        # address space. Report the effective active quota so unleased pages
+        # are not shown as used.
+        host_total = getattr(host_pool, "active_size", host_pool.logical_size)
         self.stats.hicache_host_used_tokens = host_total - host_pool.available_size()
         self.stats.hicache_host_total_tokens = host_total
 

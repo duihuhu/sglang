@@ -874,6 +874,9 @@ class HiCacheController:
             raise ValueError("Other eviction policies are not supported yet.")
 
         self.mem_pool_host.free(host_indices)
+        record_eviction = getattr(self.mem_pool_host, "record_host_eviction", None)
+        if record_eviction is not None:
+            record_eviction(len(host_indices))
         return len(host_indices)
 
     def set_draft_kv_pool(self, draft_device_pool, draft_host_pool) -> None:

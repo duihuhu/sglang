@@ -1,0 +1,127 @@
+"""Unit tests for Central I/O's page-granular reservation protocol.
+
+These tests intentionally avoid CUDA.  They exercise the agent-side state
+machine that is used by the real SGLang adapter after its slot-index API
+boundary has compressed an allocation into full KV pages.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+import sys
+import threading
+import unittest
+
+import torch
+
+
+_SPEC = importlib.util.spec_from_file_location(
+    "central_io_page_protocol", Path(__file__).with_name("central_io.py")
+)
+assert _SPEC is not None and _SPEC.loader is not None
+_MODULE = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MODULE
+_SPEC.loader.exec_module(_MODULE)
+CentralIOAgent = _MODULE.CentralIOAgent
+_HostSegment = _MODULE._HostSegment
+_ModelState = _MODULE._ModelState
+_PageRangeSet = _MODULE._PageRangeSet
+
+
+class CentralIOPageProtocolTest(unittest.TestCase):
+    page_size = 16
+
+    def setUp(self):
+        self.agent = CentralIOAgent.__new__(CentralIOAgent)
+        segment = _HostSegment(
+            segment_id=0,
+            byte_offset=0,
+            allocated_bytes=0,
+            logical_start=0,
+            slot_count=113 * self.page_size,
+            host_k=None,
+            host_v=None,
+        )
+        self.state = _ModelState(
+            model_id="model",
+            device=0,
+            max_capacity=113 * self.page_size,
+            segment_tokens=113 * self.page_size,
+            k_ptrs=None,
+            v_ptrs=None,
+            opened_bases={},
+            layer_count=2,
+            head_count=1,
+            head_dim=4,
+            dtype=torch.float16,
+            reserved=set(),
+            segments={0: segment},
+            segment_starts=[0],
+            segments_by_start={0: 0},
+            active_capacity=113 * self.page_size,
+            page_size=self.page_size,
+        )
+        self.agent._models = {"model": self.state}
+        self.agent._lock = threading.RLock()
+
+    def test_one_extent_records_one_page_range_not_113_page_records(self):
+        self.agent._handle(
+            {"op": "reserve_pages", "model_id": "model", "ranges": [[0, 113]]}
+        )
+
+        segment = self.state.segments[0]
+        self.assertEqual(self.state.reserved_pages.copy_ranges(), [[0, 113]])
+        self.assertEqual(segment.reserved_pages.copy_ranges(), [[0, 113]])
+        self.assertEqual(self.state.reserved, set())
+        self.assertEqual(segment.reserved_slots, set())
+
+        self.agent._handle(
+            {"op": "release_pages", "model_id": "model", "ranges": [[0, 113]]}
+        )
+        self.assertEqual(self.state.reserved_pages.copy_ranges(), [])
+        self.assertEqual(segment.reserved_pages.copy_ranges(), [])
+
+    def test_release_splits_range_without_expanding_to_page_ids(self):
+        self.agent._handle(
+            {"op": "reserve_pages", "model_id": "model", "ranges": [[0, 113]]}
+        )
+        self.agent._handle(
+            {"op": "release_pages", "model_id": "model", "ranges": [[20, 40]]}
+        )
+
+        segment = self.state.segments[0]
+        self.assertEqual(self.state.reserved_pages.copy_ranges(), [[0, 20], [60, 53]])
+        self.assertEqual(segment.reserved_pages.copy_ranges(), [[0, 20], [60, 53]])
+        self.assertEqual(segment.dirty_pages.copy_ranges(), [[20, 40]])
+
+    def test_page_protocol_rejects_duplicate_or_unreserved_pages(self):
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            self.agent._handle(
+                {
+                    "op": "reserve_pages",
+                    "model_id": "model",
+                    "ranges": [[0, 2], [1, 1]],
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "unreserved"):
+            self.agent._handle(
+                {"op": "release_pages", "model_id": "model", "ranges": [[0, 1]]}
+            )
+
+    def test_layout_reports_live_and_dirty_pages_separately(self):
+        self.agent._handle(
+            {"op": "reserve_pages", "model_id": "model", "ranges": [[0, 3]]}
+        )
+        self.agent._handle(
+            {"op": "release_pages", "model_id": "model", "ranges": [[0, 1]]}
+        )
+
+        layout = self.agent._handle({"op": "describe_layout", "model_id": "model"})
+
+        self.assertEqual(layout["segments"][0]["reserved_page_ranges"], [[1, 2]])
+        self.assertEqual(layout["segments"][0]["dirty_page_ranges"], [[0, 1]])
+
+
+if __name__ == "__main__":
+    unittest.main()
