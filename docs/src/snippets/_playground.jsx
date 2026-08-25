@@ -171,19 +171,11 @@ export const Playground = ({ config }) => {
     return null;
   };
 
-  // hw|variant|quant → variant|quant → hw|quant → quant → "".
+  // hw|variant|quant → variant|quant → "".
   const resolveModelName = (sel) => {
-    const keys = [
-      `${sel.hw}|${sel.variant}|${sel.quant}`,
-      `${sel.variant}|${sel.quant}`,
-      `${sel.hw}|${sel.quant}`,
-      sel.quant,
-    ];
-    for (const k of keys) {
-      const hit = config.modelNames[k];
-      if (hit) return hit;
-    }
-    return "";
+    const triple = `${sel.hw}|${sel.variant}|${sel.quant}`;
+    const pair = `${sel.variant}|${sel.quant}`;
+    return config.modelNames[triple] ?? config.modelNames[pair] ?? "";
   };
 
   const interpolate = (text, env, modelName) =>
@@ -637,7 +629,7 @@ export const Playground = ({ config }) => {
             "--moe-a2a-backend", "--moe-runner-backend",
           ]);
           // Backend options may carry their own env (e.g. the FlashInfer MXFP4
-          // backend-specific path): strip every backend option's env keys, then
+          // cubin-pool path): strip every backend option's env keys, then
           // re-add the selected option's.
           const backendEnvKeys = [];
           for (const o of (fc.backend?.options || [])) {
@@ -909,6 +901,10 @@ export const Playground = ({ config }) => {
           "--disaggregation-mode", "--disaggregation-transfer-backend",
           "--disaggregation-ib-device", "--disaggregation-bootstrap-port",
         ]);
+        const specAlgorithm = (h.findFlagArg(flags, "--speculative-algorithm") || "").toUpperCase();
+        if ((fc.incompatibleSpeculativeAlgorithms || []).includes(specAlgorithm)) {
+          return { flags, env };
+        }
         const backends = fc.transferBackends || [];
         // A config that omits `modes` has the role on the Deploy panel instead;
         // this card then only tunes the transport for whatever role is selected.
@@ -917,16 +913,6 @@ export const Playground = ({ config }) => {
           : ((sel && sel.pdMode) || "off");
 
         if (mode === "prefill" || mode === "decode") {
-          // PD and some speculative algorithms cannot run together. Keep the
-          // PD card reachable for a speculative base recipe, then make the
-          // user's explicit PD-role selection win by removing the whole
-          // speculative flag family before composing the role command.
-          const specAlgorithm = (h.findFlagArg(
-            flags, "--speculative-algorithm") || "").toUpperCase();
-          if ((fc.incompatibleSpeculativeAlgorithms || []).includes(specAlgorithm)) {
-            flags = flags.filter((flag) =>
-              !flag.split(/[\s=]/)[0].startsWith("--speculative-"));
-          }
           const backend = value.transferBackend || (backends[0] || {}).id || "mooncake";
           const adds = [
             `--disaggregation-mode ${mode}`,
@@ -939,20 +925,6 @@ export const Playground = ({ config }) => {
           }
           if (value.ibDevice && value.ibDevice !== "auto") {
             adds.push(`--disaggregation-ib-device ${value.ibDevice}`);
-          }
-          // A `modes[]` entry may declare `flags` / `env` that only the PD role
-          // it names needs (the prefill worker's balance policy, the decode
-          // worker's polling interval, ...). Strip the same heads first so the
-          // role's value wins over a base cell that sets one for its own
-          // reasons, instead of emitting the flag twice. This runs only inside
-          // the role branch: applyAllDeltas re-seeds from the base cell on every
-          // render, so a base flag is never left over from an earlier selection
-          // and must not be stripped when the role is Off.
-          const modeMeta = (fc.modes || []).find((m) => m.id === mode);
-          if (modeMeta && modeMeta.flags && modeMeta.flags.length) {
-            flags = h.stripFlagsByFirstToken(
-              flags, modeMeta.flags.map((f) => f.split(/[\s=]/)[0]));
-            adds.push(...modeMeta.flags);
           }
           // Single-host needs no --dist-init-addr: prefill/decode derive their
           // ZMQ/dist ports from the role-specific --port (spaced 100 apart, see
@@ -977,10 +949,6 @@ export const Playground = ({ config }) => {
             const ok = !gate || Object.keys(gate).every(
               (k) => (gate[k] || []).includes(sel[k]));
             if (ok) env = [...env, ...meta.env.filter((e) => !env.includes(e))];
-          }
-          // Same for env declared on the selected role.
-          if (modeMeta && modeMeta.env && modeMeta.env.length) {
-            env = [...env, ...modeMeta.env.filter((e) => !env.includes(e))];
           }
         }
         return { flags, env };

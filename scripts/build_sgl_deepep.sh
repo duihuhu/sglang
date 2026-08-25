@@ -125,8 +125,12 @@ docker run --rm \
     --env CUDA_TAG="${CUDA_TAG}" \
     --env CUDA_VERSION="${CUDA_VERSION}" \
     --env MAX_JOBS="${MAX_JOBS:-8}" \
+    --env TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-}" \
+    --env DISABLE_SM90_FEATURES="${DISABLE_SM90_FEATURES:-0}" \
+    --env DISABLE_AGGRESSIVE_PTX_INSTRS="${DISABLE_AGGRESSIVE_PTX_INSTRS:-1}" \
+    --env DISABLE_NVSHMEM="${DISABLE_NVSHMEM:-0}" \
     --volume "${DEEPEP_SOURCE}:/deepep:ro" \
-    --volume "${PACKAGING_OVERLAY}:/sgl-deep-ep-packaging:ro" \
+    --volume "${PACKAGING_OVERLAY}:/packaging:ro" \
     --volume "${DIST_DIR}:/output/dist" \
     --volume "${PYPI_DIST_DIR}:/output/dist-pypi" \
     "${IMAGE_TAG}" \
@@ -136,8 +140,8 @@ find /output/dist-pypi -maxdepth 1 -type f -name "sgl_deep_ep-*.whl" -delete
 raw_dir="$(mktemp -d -t sgl-deep-ep-raw.XXXXXX)"
 trap '\''rm -rf -- "${raw_dir}"'\'' EXIT
 
-bash /sgl-deep-ep-packaging/build_sgl_deep_ep.sh \
-    /deepep /sgl-deep-ep-packaging "${raw_dir}" "${CUDA_VERSION}" "${ARCHITECTURE}"
+bash /packaging/build_sgl_deep_ep.sh \
+    /deepep /packaging "${raw_dir}" "${CUDA_VERSION}" "${ARCHITECTURE}"
 
 shopt -s nullglob
 raw_wheels=("${raw_dir}"/*.whl)

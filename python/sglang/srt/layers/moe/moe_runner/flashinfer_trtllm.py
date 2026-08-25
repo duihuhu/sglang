@@ -51,12 +51,6 @@ _deferred_finalize_enabled: contextvars.ContextVar[bool] = contextvars.ContextVa
 _TRTLLM_MOE_PDL_MAX_TOKENS = envs.SGLANG_TRTLLM_MOE_PDL_MAX_TOKENS.get()
 
 
-def trtllm_moe_enable_pdl(num_tokens: int) -> bool:
-    from sglang.kernels.jit.utils import is_arch_support_pdl
-
-    return is_arch_support_pdl() and num_tokens <= _TRTLLM_MOE_PDL_MAX_TOKENS
-
-
 @dataclass
 class FlashInferTrtllmDeferredFinalizeOutput:
     gemm2_out: torch.Tensor
@@ -80,6 +74,7 @@ def finalize_flashinfer_trtllm_deferred_output(
     deferred_output: FlashInferTrtllmDeferredFinalizeOutput,
     shared_output: torch.Tensor,
 ) -> torch.Tensor:
+    from sglang.kernels.jit.utils import is_arch_support_pdl
     from sglang.kernels.ops.moe.moe_finalize_fuse_shared import moe_finalize_fuse_shared
 
     return moe_finalize_fuse_shared(
@@ -88,7 +83,7 @@ def finalize_flashinfer_trtllm_deferred_output(
         deferred_output.expert_weights,
         shared_output,
         deferred_output.top_k,
-        enable_pdl=trtllm_moe_enable_pdl(deferred_output.expert_weights.shape[0]),
+        enable_pdl=is_arch_support_pdl(),
     )
 
 
@@ -1092,7 +1087,7 @@ def fused_experts_none_to_flashinfer_trtllm_fp4(
             activation_type=activation_type,
             tune_max_num_tokens=next_power_of_2(hs_fp4.shape[0]),
             output=symm_output,
-            enable_pdl=trtllm_moe_enable_pdl(hs_fp4.shape[0]),
+            enable_pdl=hs_fp4.shape[0] <= _TRTLLM_MOE_PDL_MAX_TOKENS,
         )[0]
     else:
         assert TopKOutputChecker.format_is_bypassed(topk_output)
@@ -1136,7 +1131,7 @@ def fused_experts_none_to_flashinfer_trtllm_fp4(
             do_finalize=not defer_finalize,
             activation_type=activation_type,
             tune_max_num_tokens=next_power_of_2(hs_fp4.shape[0]),
-            enable_pdl=trtllm_moe_enable_pdl(hs_fp4.shape[0]),
+            enable_pdl=hs_fp4.shape[0] <= _TRTLLM_MOE_PDL_MAX_TOKENS,
         )
         if not defer_finalize:
             moe_kwargs["output"] = symm_output

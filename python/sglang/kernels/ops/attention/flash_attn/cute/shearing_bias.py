@@ -35,7 +35,6 @@ class ShearingBias:
         qhead_per_kvhead: cutlass.Constexpr[int] = 1,
         rows_per_cta: int = 4,
         tile_m: int = 128,
-        attention_tile_m: int = 128,
         max_m_blocks_leq_one: bool = False,
         use_pdl: bool = False,
         clamp_subtiles: bool = True,
@@ -68,12 +67,6 @@ class ShearingBias:
 
         # only used with block packed scheduling
         self.tile_m = tile_m
-        # The output columns are aligned to the rightmost N tile visible to the
-        # attention CTA. Keep this distinct from ``tile_m`` above: the shear
-        # scheduler may group rows in larger blocks than the attention kernel
-        # consumes per CTA.
-        assert attention_tile_m % self.rows_per_cta == 0
-        self.attention_tile_m = attention_tile_m
         # Shrink the subtile grid dim to the rows a block can actually hold
         # (decode blocks hold qhead_per_kvhead*seqlen_q rows, not tile_m).
         self.clamp_subtiles = clamp_subtiles
@@ -342,7 +335,7 @@ class ShearingBias:
             )
 
             block_info = BlockInfo(
-                self.attention_tile_m,
+                128,
                 128,
                 self.is_causal,
                 self.is_local,
@@ -393,7 +386,7 @@ class ShearingBias:
 
             # Convention: inclusive min, exclusive max
             m_idx = m_block * self.rows_per_cta + warp_idx
-            attn_m_block = m_idx // self.attention_tile_m
+            attn_m_block = m_idx // 128
 
             _, attn_n_block_max = block_info.get_n_block_min_max(
                 seqlen_info,

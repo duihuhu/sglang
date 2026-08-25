@@ -39,6 +39,7 @@ from sglang.srt.layers.moe.token_dispatcher.ascend_tp import (
 )
 from sglang.srt.layers.moe.token_dispatcher.base import BaseDispatcher
 from sglang.srt.layers.moe.token_dispatcher.flashinfer import FlashinferDispatcher
+from sglang.srt.layers.moe.token_dispatcher.ampere_ep import AmpereEPDispatcher
 from sglang.srt.layers.moe.token_dispatcher.standard import (
     StandardDispatcher,
 )
@@ -174,6 +175,14 @@ def create_moe_dispatcher(moe_runner_config: MoeRunnerConfig) -> BaseDispatcher:
             num_local_experts=moe_runner_config.num_local_experts,
             hidden_size=moe_runner_config.hidden_size,
         )
+    elif a2a_backend.is_ampere_ep():
+        return AmpereEPDispatcher(
+            group=get_tp_group().device_group,
+            router_topk=moe_runner_config.top_k,
+            num_experts=moe_runner_config.num_experts,
+            num_local_experts=moe_runner_config.num_local_experts,
+            hidden_size=moe_runner_config.hidden_size,
+        )
     else:
         raise NotImplementedError(f"Unsupported a2a backend: {a2a_backend}")
 
@@ -227,9 +236,6 @@ class FusedMoE(torch.nn.Module):
     # True on shared-expert FusedMoE subclasses (e.g. Inkling's sink); lets
     # backend resolution distinguish them from routed experts.
     is_shared_fused_moe = False
-
-    # Attached by quant methods for a quantized MoE layer; see LinearBase.scheme.
-    scheme = None
 
     _skip_aiter_moe_shuffle: bool = False
 
@@ -422,13 +428,6 @@ class FusedMoE(torch.nn.Module):
         if expert_mask is not None:
             self.register_buffer("expert_mask_gpu", expert_mask, persistent=False)
         self._use_ascend_fuseep = get_moe_a2a_backend().is_ascend_fuseep()
-        # Expose swigluoai alpha/clamp on the layer so deepep's W8A8 apply
-        # (apply_without_routing_weights) picks swiglu_oai_quant instead of plain
-        # npu_swiglu. fuseep injects these via fuseep_activation (aclnnFusedDeepMoe
-        # internal); deepep reads them here via getattr(layer, "swiglu_alpha").
-        # Default None (no-op for non-swigluoai models).
-        self.swiglu_alpha = gemm1_alpha
-        self.swiglu_clamp_limit = gemm1_clamp_limit
 
         if (
             get_moe_runner_backend().is_flashinfer_trtllm_routed()
@@ -1085,7 +1084,7 @@ class FusedMoE(torch.nn.Module):
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
         method = self.quant_method
-        if self.scheme is not None:
+        if hasattr(self, "scheme"):
             method = self.scheme
         if method.__class__.__name__ == "KTEPWrapperMethod":
             method = method.gpu_method
@@ -1352,7 +1351,7 @@ class FusedMoE(torch.nn.Module):
         # TODO: check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
         method = self.quant_method
-        if self.scheme is not None:
+        if hasattr(self, "scheme"):
             method = self.scheme
         if isinstance(method, Fp8MoEMethod) and (
             get_moe_runner_backend().is_flashinfer_trtllm_routed()

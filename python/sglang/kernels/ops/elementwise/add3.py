@@ -12,7 +12,6 @@ from sglang.kernels.jit.utils import (
     load_jit,
     make_cpp_args,
 )
-from sglang.srt.utils import is_npu
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
@@ -39,8 +38,7 @@ def covered(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> bool:
     """Same-shape contiguous CUDA bf16 tensors, numel a multiple of the
     widest vector (16 elements)."""
     return (
-        not is_npu()
-        and a.dtype == b.dtype == c.dtype == torch.bfloat16
+        a.dtype == b.dtype == c.dtype == torch.bfloat16
         and a.shape == b.shape == c.shape
         and a.is_contiguous()
         and b.is_contiguous()

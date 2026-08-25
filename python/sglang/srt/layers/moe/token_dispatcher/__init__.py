@@ -47,6 +47,11 @@ from sglang.srt.layers.moe.token_dispatcher.pplx import (
     PplxDispatcher,
     PplxDispatchOutput,
 )
+from sglang.srt.layers.moe.token_dispatcher.ampere_ep import (
+    AmpereEPCombineInput,
+    AmpereEPDispatcher,
+    AmpereEPDispatchOutput,
+)
 from sglang.srt.layers.moe.token_dispatcher.standard import (
     StandardCombineInput,
     StandardDispatcher,
@@ -78,6 +83,9 @@ __all__ = [
     "PplxCombineInput",
     "PplxDispatchOutput",
     "PplxDispatcher",
+    "AmpereEPDispatcher",
+    "AmpereEPDispatchOutput",
+    "AmpereEPCombineInput",
     "StandardDispatcher",
     "StandardDispatchOutput",
     "StandardCombineInput",

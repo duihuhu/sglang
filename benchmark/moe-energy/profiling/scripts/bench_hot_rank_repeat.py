@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Run all hot-rank fractions in one model process for controlled repetition."""
+from __future__ import annotations
+import argparse,json,multiprocessing,sys,time
+from pathlib import Path
+import numpy as np,torch
+HERE=Path(__file__).resolve().parent;ROOT=HERE.parents[3];sys.path[:0]=[str(ROOT/'python'),str(HERE)]
+from profile_utils import DEFAULT_MODEL,NvmlController,build_forward_batch,dist_barrier,forced_routing,load_runner,make_reqs,profile_world,routing_summary,stable_seed
+MODES=['hot_rank_0250','hot_rank_03125','hot_rank_0375','hot_rank_04375','hot_rank_0500','hot_rank_05625','hot_rank_0625','hot_rank_06875','hot_rank_0750','hot_rank_08125','hot_rank_0875','hot_rank_09375','hot_rank_1000']
+def worker(sa,pa,a,gpu,rank):
+ from sglang.srt.layers.moe import initialize_moe_config
+ from sglang.srt.layers.dp_attention import set_is_extend_in_batch
+ from sglang.srt.model_executor.forward_context import ForwardContext,forward_context
+ initialize_moe_config(sa);runner=load_runner(sa,pa,gpu,rank);world=sa.tp_size;set_is_extend_in_batch(a.phase=='prefill');ctrl=NvmlController(gpu);layer=runner.model.model.layers[0]
+ order=list(MODES);np.random.default_rng(a.order_seed).shuffle(order)
+ out=Path(a.output);f=out.open('a',buffering=1) if rank==0 else None
+ try:
+  ctrl.lock(a.freq);time.sleep(.1)
+  for M in a.tokens:
+   runner.req_to_token_pool.clear();runner.token_to_kv_pool_allocator.clear();length=M if a.phase=='prefill' else 64;batch=1 if a.phase=='prefill' else M
+   reqs=make_reqs(batch,length if a.phase=='prefill' else length-1,np.random.default_rng(stable_seed(42,a.phase,length,batch,'req')));fb=build_forward_batch(reqs,runner,a.phase);n=int(fb.seq_lens_sum) if a.phase=='prefill' else batch
+   hidden=torch.randn(n,runner.model_config.hidden_size,device=runner.device,dtype=torch.bfloat16,generator=torch.Generator(device=runner.device).manual_seed(stable_seed(42,a.phase,length,batch,'hidden')));residual=hidden.clone()
+   for mode in order:
+    old=forced_routing(layer.mlp,mode,world)
+    with torch.no_grad(),forward_context(ForwardContext(attn_backend=runner.attn_backend)):
+     hs,_=layer.post_attention_layernorm(hidden,residual);routing=routing_summary(layer.mlp,hs,world);
+     if routing is not None: routing['forced_mode']=mode
+     def target():
+      x,_=layer.post_attention_layernorm(hidden,residual);return layer.mlp(x,fb)
+     lat,rl,re,ene,actual=profile_world(target,ctrl,a.warmup,a.repeat,world,a.phase,a.min_measure_seconds)
+    layer.mlp.topk.forward=old
+    if rank==0:
+     row={'status':'ok','phase':a.phase,'routing':mode,'M':M,'freq_mhz':a.freq,'latency_us':lat,'latency_per_rank_us':rl,'energy_total_mj':ene,'energy_per_rank_mj':re,'actual_repeat':actual,'replicate':a.replicate,'block':a.block,'order_seed':a.order_seed};f.write(json.dumps(row,separators=(',',':'))+'\n');f.flush()
+ finally:
+  ctrl.close();f and f.close()
+  if world>1:
+   from sglang.srt.distributed.parallel_state import destroy_distributed_environment;destroy_distributed_environment()
+def main():
+ from sglang.srt.entrypoints.engine import _set_envs_and_config
+ from sglang.srt.server_args import PortArgs,ServerArgs
+ from sglang.srt.utils import maybe_reindex_device_id
+ p=argparse.ArgumentParser();ServerArgs.add_cli_args(p);p.set_defaults(model_path=DEFAULT_MODEL,tp_size=4,ep_size=4,moe_runner_backend='triton',moe_a2a_backend='none',cuda_graph_backend_decode='disabled',cuda_graph_backend_prefill='disabled',disable_custom_all_reduce=True,max_total_tokens=600000,max_running_requests=4096)
+ p.add_argument('--phase',choices=['prefill','decode'],required=True);p.add_argument('--tokens',type=int,nargs='+',default=[512,1024,4096]);p.add_argument('--freq',type=int,default=930);p.add_argument('--warmup',type=int,default=10);p.add_argument('--repeat',type=int,default=50);p.add_argument('--min-measure-seconds',type=float,default=3);p.add_argument('--output',required=True);p.add_argument('--local-world-size',type=int,default=4);p.add_argument('--replicate',type=int,required=True);p.add_argument('--block',required=True);p.add_argument('--order-seed',type=int,required=True);a=p.parse_args();sa=ServerArgs.from_cli_args(a);_set_envs_and_config(sa);pa=PortArgs.init_new(sa);ps=[]
+ for r in range(4):
+  with maybe_reindex_device_id(r) as gpu:
+   x=multiprocessing.Process(target=worker,args=(sa,pa,a,gpu,r));x.start();ps.append(x)
+ for x in ps:x.join()
+ failed=[(x.pid,x.exitcode) for x in ps if x.exitcode]
+ if failed: raise SystemExit(failed)
+if __name__=='__main__':main()

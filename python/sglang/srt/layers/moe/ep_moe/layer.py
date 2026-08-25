@@ -287,14 +287,16 @@ class DeepEPMoE(FusedMoE):
 
         if DispatchOutputChecker.format_is_deepep_normal(dispatch_output):
             if self.quant_config is None:
-                raise NotImplementedError(
-                    "Unquantized DeepEP MoE currently supports low_latency mode only"
-                )
+                # The Triton runner supports BF16 expert computation on the
+                # contiguous token layout produced by DeepEP normal dispatch.
+                return super().run_moe_core(dispatch_output)
             elif self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8(dispatch_output)
             else:
                 assert False, "forward_deepgemm_contiguous is deprecated"
         elif DispatchOutputChecker.format_is_deepep_ll(dispatch_output):
+            if self.quant_config is None:
+                return super().run_moe_core(dispatch_output)
             if self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8_masked(dispatch_output)
             else:

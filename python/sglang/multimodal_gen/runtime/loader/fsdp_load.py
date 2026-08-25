@@ -207,20 +207,6 @@ def _maybe_dequantize_fp8(
     return full_tensor
 
 
-def register_fsdp_entrypoints(model: torch.nn.Module) -> None:
-    """Let FSDP2 unshard around forward passes that bypass ``__call__``.
-
-    FSDP2 only unshards around the wrapped module's own ``forward``. Parameters
-    the shard conditions did not match stay in the catch-all root group, whose
-    hook therefore never fires for a model driven through a custom method, and
-    the first op mixing them with a plain tensor fails. Models declare those
-    entry points in ``_fsdp_forward_methods``, which every model loaded through
-    FSDP must define; ``BaseDiT`` and ``TextEncoder`` default it to ``()``.
-    """
-    for name in model._fsdp_forward_methods:
-        register_fsdp_forward_method(model, name)
-
-
 # TODO(PY): add compile option
 def maybe_load_fsdp_model(
     model_cls: type[nn.Module],
@@ -231,18 +217,14 @@ def maybe_load_fsdp_model(
     hsdp_shard_dim: int,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
-    component_starts_on_cpu: bool = False,
+    cpu_offload: bool = False,
     fsdp_inference: bool = False,
     output_dtype: torch.dtype | None = None,
     pin_cpu_memory: bool = True,
     strict: bool = True,
     weight_load_plan: WeightLoadPlan | None = None,
-    checkpoint_key_filter: Callable[[str], bool] | None = None,
 ) -> torch.nn.Module:
     """Load a model with optional FSDP (Fully Sharded Data Parallel) support.
-
-    ``model_cls`` must declare ``_fsdp_forward_methods``, the entry points FSDP2
-    has to unshard around (empty when the model is driven through ``__call__``).
 
     Args:
         param_dtype: Data type for model parameters, also used for:
@@ -251,8 +233,6 @@ def maybe_load_fsdp_model(
               original parameter dtypes
             - Weight loading and casting
         reduce_dtype: Data type for gradient reduction in FSDP mixed precision.
-        component_starts_on_cpu: Load a non-FSDP component onto CPU initially.
-            Runtime residency strategies move it to the compute device before use.
         strict: If True, enforce strict state dict loading (all keys must match).
         weight_load_plan: Optional checkpoint/postprocess device plan for this load.
     """
@@ -295,12 +275,16 @@ def maybe_load_fsdp_model(
         logger.info("Disabling FSDP for MPS platform as it's not compatible")
 
     weight_load_plan = weight_load_plan or WeightLoadPlan(checkpoint_load_device=device)
-    defer_cpu_placement = bool(
-        component_starts_on_cpu
-        and weight_load_plan.defer_cpu_placement
-        and not use_fsdp
+    defer_cpu_offload = bool(
+        cpu_offload and weight_load_plan.defer_component_cpu_offload
     )
-    load_on_cpu = bool(component_starts_on_cpu and not defer_cpu_placement)
+    if defer_cpu_offload and use_fsdp:
+        logger.warning(
+            "Ignoring deferred CPU offload for FSDP loading; keeping the existing "
+            "FSDP offload policy."
+        )
+        defer_cpu_offload = False
+    load_cpu_offload = bool(cpu_offload and not defer_cpu_offload)
     weight_postprocess_device = weight_load_plan.weight_postprocess_device
     if use_fsdp and weight_postprocess_device is not None:
         logger.warning("Ignoring weight postprocess device override for FSDP loading.")
@@ -325,14 +309,15 @@ def maybe_load_fsdp_model(
         )
         shard_model(
             model,
-            cpu_offload=False,
+            cpu_offload=load_cpu_offload,
             reshard_after_forward=True,
             mp_policy=mp_policy,
             mesh=device_mesh,
             fsdp_shard_conditions=getattr(model, "_fsdp_shard_conditions", None),
             pin_cpu_memory=pin_cpu_memory,
         )
-        register_fsdp_entrypoints(model)
+        if callable(getattr(model, "refine_prompt_embeds", None)):
+            register_fsdp_forward_method(model, "refine_prompt_embeds")
 
     param_names_mapping_fn = get_param_names_mapping(model.param_names_mapping)
 
@@ -346,7 +331,6 @@ def maybe_load_fsdp_model(
         and use_fsdp
         and weight_dir_list
         and preprocess_loaded_state_dict is None
-        and checkpoint_key_filter is None
         and not is_bnb_quantized
     ):
         preconverted_state_dict = (
@@ -361,7 +345,6 @@ def maybe_load_fsdp_model(
         and not use_fsdp
         and weight_dir_list
         and preprocess_loaded_state_dict is None
-        and checkpoint_key_filter is None
         and not is_bnb_quantized
     ):
         preconverted_state_dict = (
@@ -376,14 +359,10 @@ def maybe_load_fsdp_model(
         if weight_load_plan.load_full_state_dict_on_device:
             weight_iterator = safetensors_weights_iterator(
                 weight_dir_list,
-                key_filter=checkpoint_key_filter,
                 weight_load_plan=weight_load_plan,
             )
         else:
-            weight_iterator = safetensors_weights_iterator(
-                weight_dir_list,
-                key_filter=checkpoint_key_filter,
-            )
+            weight_iterator = safetensors_weights_iterator(weight_dir_list)
         if preprocess_loaded_state_dict is not None:
             weight_iterator = preprocess_loaded_state_dict(weight_iterator)
         if is_bnb_quantized:
@@ -406,7 +385,7 @@ def maybe_load_fsdp_model(
         weight_load_plan.checkpoint_load_device,
         param_dtype,
         strict=strict,
-        cpu_offload=load_on_cpu,
+        cpu_offload=load_cpu_offload,
         param_names_mapping=param_names_mapping_fn,
         preconverted_state_dict=preconverted_state_dict,
     )
@@ -442,7 +421,7 @@ def maybe_load_fsdp_model(
             p.requires_grad = False
 
     # 4. deferred cpu offload
-    if defer_cpu_placement:
+    if defer_cpu_offload:
         model.to("cpu")
 
     return model

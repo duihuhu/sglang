@@ -47,7 +47,6 @@ class SGLangFailuresAnalyzer:
             "check-changes",
             "pr-test-finish",  # Nvidia workflow teardown
             "pr-test-amd-finish",  # AMD workflow teardown
-            "pr-test-amd-rocm720-finish",  # Default AMD ROCm 7.2 teardown
             "call-gate",
             "pr-gate",
             "check-all-jobs",
@@ -2457,7 +2456,7 @@ def main():
         # These 4 don't have scheduled events, so filter by main branch instead
         pr_test_amd_scheduled_runs = analyzer.get_recent_runs(
             limit=pr_test_scheduled_limit,
-            workflow_filter=["pr-test-amd-rocm720.yml"],
+            workflow_filter=["pr-test-amd.yml"],
             filters={"branch": "main"},
         )
         pr_test_xeon_scheduled_runs = analyzer.get_recent_runs(
@@ -2484,7 +2483,7 @@ def main():
         )
         nightly_amd_scheduled_runs = analyzer.get_recent_runs(
             limit=nightly_scheduled_limit,
-            workflow_filter=["nightly-test-amd-rocm720.yml"],
+            workflow_filter=["nightly-test-amd.yml"],
             filters={"event": "schedule"},
         )
         nightly_intel_scheduled_runs = analyzer.get_recent_runs(
@@ -2506,7 +2505,7 @@ def main():
         )
         pr_test_amd_general_runs = analyzer.get_recent_runs(
             limit=args.limit,
-            workflow_filter=["pr-test-amd-rocm720.yml"],
+            workflow_filter=["pr-test-amd.yml"],
         )
         pr_test_xeon_general_runs = analyzer.get_recent_runs(
             limit=args.limit,
@@ -2528,7 +2527,7 @@ def main():
         )
         nightly_amd_general_runs = analyzer.get_recent_runs(
             limit=args.limit,
-            workflow_filter=["nightly-test-amd-rocm720.yml"],
+            workflow_filter=["nightly-test-amd.yml"],
         )
         nightly_intel_general_runs = analyzer.get_recent_runs(
             limit=args.limit,

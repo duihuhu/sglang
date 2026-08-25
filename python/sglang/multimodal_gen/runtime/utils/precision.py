@@ -55,7 +55,7 @@ def resolve_component_precision(server_args, module_name: str) -> Optional[torch
 
     if module_name in ("audio_vae", "vocoder"):
         precision_attr = "audio_vae_precision"
-    elif module_name in ("vae", "video_vae", "diffusion_decoder"):
+    elif module_name in ("vae", "video_vae"):
         precision_attr = "vae_precision"
     elif module_name in (
         "transformer",

@@ -69,9 +69,6 @@ class TritonMoeQuantInfo(MoeQuantInfo):
     a13_scale: Optional[torch.Tensor] = None
     a2_scale: Optional[torch.Tensor] = None
     block_shape: Optional[List[int]] = None
-    # w13 rows were permuted to interleave gate/up at load, so the activation
-    # must be applied by the fused up-GEMM epilogue (see fused_moe_kernel).
-    fuse_swiglu_interleaved: bool = False
 
 
 class TritonRunnerCore(MoeRunnerCore):
@@ -141,7 +138,6 @@ class TritonRunnerCore(MoeRunnerCore):
             running_state["config"],
             running_state.get("down_config"),
             running_state.get("down_moe_use_tma", False),
-            running_state.get("up_moe_use_tma", False),
             b1=quant_info.b13,
             b2=quant_info.b2,
             use_fp8_w8a8=quant_info.use_fp8_w8a8,
@@ -167,7 +163,6 @@ class TritonRunnerCore(MoeRunnerCore):
             filter_expert=filter_expert,
             hooks=hooks,
             swiglu_limit=self.config.swiglu_limit,
-            fuse_swiglu_interleaved=quant_info.fuse_swiglu_interleaved,
         )
 
         return TritonRunnerOutput(hidden_states=out)
@@ -252,11 +247,251 @@ def fused_experts_none_to_triton(
             a2_scale=quant_info.a2_scale,
             block_shape=quant_info.block_shape,
             a1_q=a1_q,
-            fuse_swiglu_interleaved=quant_info.fuse_swiglu_interleaved,
         )
 
     return StandardCombineInput(
         hidden_states=output,
+    )
+
+
+def _map_global_topk_ids_to_local(
+    topk_ids: torch.Tensor,
+    *,
+    num_local_routed_experts: int,
+    invalid_expert_id: int,
+) -> torch.Tensor:
+    from sglang.srt.runtime_context import get_parallel
+
+    ep_rank = get_parallel().moe_ep_rank
+    expert_base = ep_rank * num_local_routed_experts
+    expert_limit = expert_base + num_local_routed_experts
+    local_topk_ids = topk_ids.clone()
+    valid = (topk_ids >= expert_base) & (topk_ids < expert_limit)
+    local_topk_ids = torch.where(
+        valid,
+        topk_ids - expert_base,
+        torch.full_like(topk_ids, -1),
+    )
+    if invalid_expert_id != -1:
+        local_topk_ids = torch.where(
+            topk_ids == invalid_expert_id,
+            torch.full_like(topk_ids, -1),
+            local_topk_ids,
+        )
+    return local_topk_ids
+
+
+@register_fused_func("ampere_ep", "triton")
+def fused_experts_ampere_ep_to_triton(
+    dispatch_output: "FlashinferDispatchOutput",
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+) -> "FlashinferCombineInput":
+    from sglang.srt.layers.moe.token_dispatcher.flashinfer import (
+        FlashinferCombineInput,
+        FlashinferDispatchOutput,
+    )
+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_experts
+    from sglang.srt.layers.moe.topk import StandardTopKOutput
+
+    assert isinstance(dispatch_output, FlashinferDispatchOutput)
+
+    num_local_routed = runner_config.num_local_experts - (
+        runner_config.num_fused_shared_experts or 0
+    )
+    topk_output = dispatch_output.topk_output
+    local_topk_ids = _map_global_topk_ids_to_local(
+        topk_output.topk_ids,
+        num_local_routed_experts=num_local_routed,
+        invalid_expert_id=runner_config.num_experts,
+    )
+    local_topk_output = StandardTopKOutput(
+        topk_weights=topk_output.topk_weights,
+        topk_ids=local_topk_ids,
+        router_logits=topk_output.router_logits,
+    )
+
+    output = fused_experts(
+        hidden_states=dispatch_output.hidden_states,
+        w1=quant_info.w13_weight,
+        w2=quant_info.w2_weight,
+        topk_output=local_topk_output,
+        moe_runner_config=runner_config,
+        b1=quant_info.b13,
+        b2=quant_info.b2,
+        use_fp8_w8a8=quant_info.use_fp8_w8a8,
+        use_int8_w8a8=quant_info.use_int8_w8a8,
+        use_int8_w8a16=quant_info.use_int8_w8a16,
+        use_int4_w4a16=quant_info.use_int4_w4a16,
+        per_channel_quant=quant_info.per_channel_quant,
+        w1_scale=quant_info.w13_scale,
+        w2_scale=quant_info.w2_scale,
+        w1_zp=quant_info.w13_zp,
+        w2_zp=quant_info.w2_zp,
+        a1_scale=quant_info.a13_scale,
+        a2_scale=quant_info.a2_scale,
+        block_shape=quant_info.block_shape,
+    )
+    return FlashinferCombineInput(hidden_states=output)
+
+
+@register_fused_func("deepep", "triton")
+def fused_experts_deepep_to_triton(
+    dispatch_output,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+):
+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import fused_experts
+    from sglang.srt.layers.moe.token_dispatcher.deepep import (
+        DeepEPLLCombineInput,
+        DeepEPLLDispatchOutput,
+        DeepEPNormalCombineInput,
+        DeepEPNormalDispatchOutput,
+    )
+    from sglang.srt.layers.moe.topk import StandardTopKOutput
+
+    if isinstance(dispatch_output, DeepEPNormalDispatchOutput):
+        topk_output = StandardTopKOutput(
+            topk_weights=dispatch_output.topk_weights,
+            topk_ids=dispatch_output.topk_ids.to(torch.int32),
+            router_logits=None,
+        )
+        output = fused_experts(
+            hidden_states=dispatch_output.hidden_states,
+            w1=quant_info.w13_weight,
+            w2=quant_info.w2_weight,
+            topk_output=topk_output,
+            moe_runner_config=runner_config,
+            b1=quant_info.b13,
+            b2=quant_info.b2,
+            use_fp8_w8a8=quant_info.use_fp8_w8a8,
+            use_int8_w8a8=quant_info.use_int8_w8a8,
+            use_int8_w8a16=quant_info.use_int8_w8a16,
+            use_int4_w4a16=quant_info.use_int4_w4a16,
+            per_channel_quant=quant_info.per_channel_quant,
+            w1_scale=quant_info.w13_scale,
+            w2_scale=quant_info.w2_scale,
+            w1_zp=quant_info.w13_zp,
+            w2_zp=quant_info.w2_zp,
+            a1_scale=quant_info.a13_scale,
+            a2_scale=quant_info.a2_scale,
+            block_shape=quant_info.block_shape,
+        )
+        return DeepEPNormalCombineInput(
+            hidden_states=output,
+            topk_ids=dispatch_output.topk_ids,
+            topk_weights=dispatch_output.topk_weights,
+        )
+
+    assert isinstance(dispatch_output, DeepEPLLDispatchOutput)
+    num_local_experts, capacity, hidden_size = dispatch_output.hidden_states.shape
+    rows = torch.arange(capacity, device=dispatch_output.hidden_states.device)
+    valid = rows.unsqueeze(0) < dispatch_output.masked_m.unsqueeze(1)
+    local_expert_ids = torch.arange(
+        num_local_experts,
+        dtype=torch.int32,
+        device=dispatch_output.hidden_states.device,
+    ).unsqueeze(1)
+    topk_ids = torch.where(valid, local_expert_ids, -1).reshape(-1, 1)
+    topk_weights = valid.reshape(-1, 1).to(dispatch_output.hidden_states.dtype)
+    topk_output = StandardTopKOutput(
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        router_logits=None,
+    )
+    output = fused_experts(
+        hidden_states=dispatch_output.hidden_states.reshape(-1, hidden_size),
+        w1=quant_info.w13_weight,
+        w2=quant_info.w2_weight,
+        topk_output=topk_output,
+        moe_runner_config=runner_config,
+        b1=quant_info.b13,
+        b2=quant_info.b2,
+        use_fp8_w8a8=quant_info.use_fp8_w8a8,
+        use_int8_w8a8=quant_info.use_int8_w8a8,
+        use_int8_w8a16=quant_info.use_int8_w8a16,
+        use_int4_w4a16=quant_info.use_int4_w4a16,
+        per_channel_quant=quant_info.per_channel_quant,
+        w1_scale=quant_info.w13_scale,
+        w2_scale=quant_info.w2_scale,
+        w1_zp=quant_info.w13_zp,
+        w2_zp=quant_info.w2_zp,
+        a1_scale=quant_info.a13_scale,
+        a2_scale=quant_info.a2_scale,
+        block_shape=quant_info.block_shape,
+    ).view(num_local_experts, capacity, hidden_size)
+    return DeepEPLLCombineInput(
+        hidden_states=output,
+        topk_ids=dispatch_output.topk_ids,
+        topk_weights=dispatch_output.topk_weights,
+    )
+
+
+@register_pre_permute("deepep_normal", "triton")
+def pre_permute_deepep_normal_to_triton(
+    dispatch_output,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> TritonRunnerInput:
+    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe import (
+        _prepare_fused_moe_run,
+    )
+    from sglang.srt.layers.moe.token_dispatcher.deepep import (
+        DeepEPNormalDispatchOutput,
+    )
+
+    assert isinstance(dispatch_output, DeepEPNormalDispatchOutput)
+    local_topk_ids = dispatch_output.topk_ids.to(torch.int32)
+    (
+        config,
+        down_config,
+        down_moe_use_tma,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+    ) = _prepare_fused_moe_run(
+        dispatch_output.hidden_states,
+        quant_info.w13_weight,
+        quant_info.w2_weight,
+        local_topk_ids,
+        use_fp8_w8a8=quant_info.use_fp8_w8a8,
+        use_int8_w8a8=quant_info.use_int8_w8a8,
+        use_int8_w8a16=quant_info.use_int8_w8a16,
+        use_int4_w4a16=quant_info.use_int4_w4a16,
+        per_channel_quant=quant_info.per_channel_quant,
+        block_shape=quant_info.block_shape,
+    )
+    running_state["config"] = config
+    running_state["down_config"] = down_config
+    running_state["down_moe_use_tma"] = down_moe_use_tma
+    running_state["topk_ids"] = dispatch_output.topk_ids
+    running_state["topk_weights"] = dispatch_output.topk_weights
+    return TritonRunnerInput(
+        hidden_states=dispatch_output.hidden_states,
+        topk_weights=dispatch_output.topk_weights,
+        topk_ids=local_topk_ids,
+        sorted_token_ids=sorted_token_ids,
+        expert_ids=expert_ids,
+        num_tokens_post_padded=num_tokens_post_padded,
+    )
+
+
+@register_post_permute("triton", "deepep_normal")
+def post_permute_triton_to_deepep_normal(
+    runner_output: TritonRunnerOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+):
+    from sglang.srt.layers.moe.token_dispatcher.deepep import (
+        DeepEPNormalCombineInput,
+    )
+
+    return DeepEPNormalCombineInput(
+        hidden_states=runner_output.hidden_states,
+        topk_ids=running_state["topk_ids"],
+        topk_weights=running_state["topk_weights"],
     )
 
 
@@ -286,7 +521,6 @@ def pre_permute_standard_to_triton(
         config,
         down_config,
         down_moe_use_tma,
-        up_moe_use_tma,
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
@@ -306,7 +540,6 @@ def pre_permute_standard_to_triton(
     running_state["config"] = config
     running_state["down_config"] = down_config
     running_state["down_moe_use_tma"] = down_moe_use_tma
-    running_state["up_moe_use_tma"] = up_moe_use_tma
 
     return TritonRunnerInput(
         hidden_states=hidden_states,

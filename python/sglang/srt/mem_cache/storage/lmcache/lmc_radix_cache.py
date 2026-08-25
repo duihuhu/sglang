@@ -229,12 +229,7 @@ class LMCRadixCache(RadixCache):
         if token_ids is key.token_ids:
             token_ids = token_ids[:]
         self._mp_load_back_markers[req.rid] = _LMCacheLoadBackMarker(
-            key=RadixKey(
-                token_ids,
-                key.extra_key,
-                key.is_bigram,
-                cache_salt=key.cache_salt,
-            ),
+            key=RadixKey(token_ids, key.extra_key, key.is_bigram),
             value_numel=int(value.numel()),
         )
         return MatchResult(
@@ -468,13 +463,7 @@ class LMCRadixCache(RadixCache):
 
         # Use super() to avoid a redundant LOOKUP — we only need new_last_node from radix.
         match_result = super().match_prefix(
-            MatchPrefixParams(
-                key=RadixKey(
-                    token_ids,
-                    req.extra_key,
-                    cache_salt=req.cache_salt,
-                )
-            )
+            MatchPrefixParams(key=RadixKey(token_ids, req.extra_key))
         )
         new_last_node = match_result.last_device_node
         assert new_last_node is not None

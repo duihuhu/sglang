@@ -46,7 +46,6 @@ def _recv(rid, input_ids, max_new_tokens=8):
         priority=None,
         routing_key=None,
         extra_key=None,
-        cache_salt=None,
         http_worker_ipc=None,
         time_stats=None,
     )

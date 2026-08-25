@@ -36,6 +36,7 @@ class MoeA2ABackend(Enum):
     ASCEND_FUSEEP = "ascend_fuseep"
     ASCEND_TP = "ascend_tp"
     FLASHINFER = "flashinfer"
+    AMPERE_EP = "ampere_ep"
     MEGAMOE = "megamoe"
     PPLX = "pplx"
     CUSTOMIZED = "customized"
@@ -63,6 +64,9 @@ class MoeA2ABackend(Enum):
 
     def is_flashinfer(self):
         return self == MoeA2ABackend.FLASHINFER
+
+    def is_ampere_ep(self):
+        return self == MoeA2ABackend.AMPERE_EP
 
     def is_ascend_fuseep(self):
         return self == MoeA2ABackend.ASCEND_FUSEEP
@@ -614,6 +618,8 @@ def should_skip_post_experts_all_reduce(*, is_tp_path: bool) -> bool:
     if is_tp_path and should_use_flashinfer_cutlass_moe_fp4_allgather():
         return True
     if get_moe_a2a_backend().is_flashinfer():
+        return True
+    if get_moe_a2a_backend().is_ampere_ep():
         return True
     if get_moe_a2a_backend().is_pplx():
         # pplx's AllToAll.combine already sums each token's expert outputs back

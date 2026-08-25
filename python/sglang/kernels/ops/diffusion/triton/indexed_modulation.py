@@ -53,7 +53,6 @@ def _indexed_gate_bf16_kernel(
     other_ptr,
     indices_ptr,
     hidden_size,
-    stride_output_row,
     stride_x_row,
     stride_gate_row,
     stride_other_row,
@@ -77,7 +76,7 @@ def _indexed_gate_bf16_kernel(
 
     gated = round_bf16_to_fp32(gate * other)
     tl.store(
-        output_ptr + row * stride_output_row + columns,
+        output_ptr + row * stride_x_row + columns,
         x + gated,
         mask=mask,
     )
@@ -110,8 +109,7 @@ def indexed_scale_shift_bf16_(
     return x
 
 
-def _indexed_gate_bf16(
-    output: torch.Tensor,
+def indexed_gate_bf16_(
     x: torch.Tensor,
     gate: torch.Tensor,
     other: torch.Tensor,
@@ -119,16 +117,15 @@ def _indexed_gate_bf16(
 ) -> torch.Tensor:
     rows, hidden_size = x.shape
     if rows == 0:
-        return output
+        return x
     block_n = triton.next_power_of_2(hidden_size)
     _indexed_gate_bf16_kernel[(rows,)](
-        output,
+        x,
         x,
         gate,
         other,
         indices,
         hidden_size,
-        output.stride(0),
         x.stride(0),
         gate.stride(0),
         other.stride(0),
@@ -136,22 +133,4 @@ def _indexed_gate_bf16(
         BLOCK_N=block_n,
         num_warps=8,
     )
-    return output
-
-
-def indexed_gate_bf16_(
-    x: torch.Tensor,
-    gate: torch.Tensor,
-    other: torch.Tensor,
-    indices: torch.Tensor,
-) -> torch.Tensor:
-    return _indexed_gate_bf16(x, x, gate, other, indices)
-
-
-def indexed_gate_bf16(
-    x: torch.Tensor,
-    gate: torch.Tensor,
-    other: torch.Tensor,
-    indices: torch.Tensor,
-) -> torch.Tensor:
-    return _indexed_gate_bf16(torch.empty_like(x), x, gate, other, indices)
+    return x

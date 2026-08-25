@@ -28,7 +28,6 @@ async fn retrieve_model(State(state): State<AppState>, Path(model): Path<String>
         return openai_error(
             StatusCode::NOT_FOUND,
             format!("The model `{model}` does not exist"),
-            false,
         );
     }
     Json(model_card(&state)).into_response()

@@ -139,15 +139,11 @@ class TestGetModuleRole(unittest.TestCase):
         self.assertEqual(get_module_role("audio_vae"), RoleType.DECODER)
         self.assertEqual(get_module_role("video_vae"), RoleType.DECODER)
         self.assertEqual(get_module_role("vocoder"), RoleType.DECODER)
-        self.assertEqual(get_module_role("diffusion_decoder"), RoleType.DECODER)
         self.assertEqual(get_module_role("hy3dshape_vae"), RoleType.DECODER)
 
     def test_shared_modules(self):
         self.assertIsNone(get_module_role("scheduler"))
         self.assertIsNone(get_module_role("hy3dshape_scheduler"))
-
-    def test_ltx25_optional_modules(self):
-        self.assertEqual(get_module_role("duration_head"), RoleType.ENCODER)
 
 
 class TestFilterModulesForRole(unittest.TestCase):
@@ -345,6 +341,9 @@ class TestPipelineSpecificExtraModules(unittest.TestCase):
             extra_allowed_modules=extras,
         )
         self.assertEqual(extras, {"vae", "transformer"})
+        self.assertNotIn(
+            "text_encoder", QwenImageLayeredPipeline._required_config_modules
+        )
         self.assertEqual(
             set(filtered),
             {
@@ -353,7 +352,6 @@ class TestPipelineSpecificExtraModules(unittest.TestCase):
                 "processor",
                 "transformer",
                 "scheduler",
-                "text_encoder",
             },
         )
 
@@ -462,16 +460,21 @@ class TestQwenImageLayeredDtype(_GlobalStageArgsMixin, unittest.TestCase):
             def to(self, *args, **kwargs):
                 return self
 
-        stage = QwenImageLayeredBeforeDenoisingStage(
-            vae=_DummyVAE(),
-            text_encoder=torch.nn.Linear(1, 1),
-            tokenizer=object(),
-            processor=object(),
-            transformer=object(),
-            scheduler=object(),
-            vae_dtype=torch.float32,
-            text_encoder_dtype=torch.float16,
-        )
+        with patch(
+            "sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.qwen_image_layered.get_local_torch_device",
+            return_value=torch.device("cpu"),
+        ):
+            stage = QwenImageLayeredBeforeDenoisingStage(
+                vae=_DummyVAE(),
+                text_encoder=torch.nn.Linear(1, 1),
+                tokenizer=object(),
+                processor=object(),
+                transformer=object(),
+                scheduler=object(),
+                model_path="/unused",
+                vae_dtype=torch.float32,
+                text_encoder_dtype=torch.float16,
+            )
 
         uses = stage.component_uses(SimpleNamespace(), "qwen_layered")
         self.assertEqual(
