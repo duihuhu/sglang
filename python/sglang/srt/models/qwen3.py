@@ -12,11 +12,12 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from sglang.srt.layers.afd import afd_is_ffn
 from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
 from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import QKVParallelLinear, RowParallelLinear
-from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
@@ -624,14 +625,23 @@ class Qwen3ForCausalLM(nn.Module):
 
         if self.pp_group.is_last_rank:
             if not get_embedding:
-                result = self.logits_processor(
+                if afd_is_ffn():
+                    dummy = torch.zeros(
+                        forward_batch.batch_size,
+                        self.config.vocab_size,
+                        dtype=hidden_states.dtype,
+                        device=hidden_states.device,
+                    )
+                    return LogitsProcessorOutput(
+                        next_token_logits=dummy, hidden_states=None
+                    )
+                return self.logits_processor(
                     input_ids,
                     hidden_states,
                     self.lm_head,
                     forward_batch,
                     aux_hidden_states,
                 )
-                return result
             else:
                 return self.pooler(hidden_states, forward_batch)
         else:

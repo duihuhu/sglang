@@ -1,0 +1,5 @@
+数据集类别 \ 网络,PCIe,RDMA,NVLink
+轻负载（QA/Balanced）,PD,PD（Balanced 下 PD≈AF）,PD
+重负载（Sum/LC）,Native,AF,AF（LC 下 AF≈Native）
+长输入（LC/Rag）,RAG 选 PD；LC 选 Native,AF,RAG 选 PD；LC 选 AF（≈Native）
+长输出（Chatbot）,PD,PD,PD

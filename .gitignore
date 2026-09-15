@@ -334,3 +334,15 @@ tmp*.txt
 !benchmark/AFlex_bench/multi_node/node_scalibility_macro/more_trying/results/tier1_selected_solutions_v4_20260711_validation.json
 !benchmark/AFlex_bench/multi_node/node_scalibility_macro/more_trying/results/tier1_megascale_solutions_v4_20260711.json
 !benchmark/AFlex_bench/multi_node/node_scalibility_macro/more_trying/results/tier1_megascale_solutions_v4_20260711_validation.json
+
+# Local measurement outputs
+benchmark/AFlex_bench/measurement/**/*.log
+benchmark/AFlex_bench/measurement/**/*.json
+benchmark/AFlex_bench/measurement/**/*.jsonl
+benchmark/AFlex_bench/measurement/**/*.pkl
+benchmark/AFlex_bench/measurement/**/*.pickle
+benchmark/AFlex_bench/measurement/**/*.npy
+benchmark/AFlex_bench/measurement/**/*.npz
+benchmark/AFlex_bench/measurement/**/*.parquet
+benchmark/AFlex_bench/measurement/**/*.pt
+benchmark/AFlex_bench/measurement/**/*.pth

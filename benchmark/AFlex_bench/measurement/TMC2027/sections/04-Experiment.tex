@@ -1,0 +1,105 @@
+\section{Experimental Setup and Methodology}
+\label{sec:methodology}
+
+This section describes the experimental platforms, workloads, deployment configurations, and measurement methodology. The individual experiments and research questions are presented in Section~5.
+
+\subsection{Hardware Configuration}
+\label{sec:hardware}
+
+Our hardware matrix covers both datacenter and consumer GPUs with different compute throughput, memory capacity, memory technology, and interconnect support. Table~\ref{tab:hardware} summarizes the principal devices. NVIDIA A800-SXM4-80GB servers form the primary datacenter platform. Each server contains eight GPUs connected by NVLink/NVSwitch; PCIe and GPUDirect RDMA are used for intra-host and inter-host communication experiments, respectively. L40S provides a datacenter comparison with higher arithmetic throughput but lower memory capacity and bandwidth. RTX~5090 is the consumer-GPU platform, while L20 is a PCIe datacenter GPU. Both use GDDR memory and lack NVLink, complementing the tightly coupled A800 SXM platform.
+
+\begin{table}[t]
+  \caption{Principal GPU platforms. Compute values are dense peak TFLOPS without structured sparsity.}
+  \label{tab:hardware}
+  \centering
+  \small
+  \setlength{\tabcolsep}{2.5pt}
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{lrrrll}
+    \toprule
+    GPU & FP32 & FP16/BF16 & Memory & Bandwidth & Class \\
+    \midrule
+    A800 SXM4 & 19.5 & 312   & 80 GB HBM2e & 2039 GB/s & Datacenter \\
+    L40S      & 91.6 & 362   & 48 GB GDDR6 & 864 GB/s  & Datacenter \\
+    RTX 5090  & 104.8 & 419  & 32 GB GDDR7 & 1792 GB/s & Consumer \\
+    L20       & 59.3 & 119.5 & 48 GB GDDR6 & 864 GB/s  & Datacenter \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+To isolate network effects, only the A800 platform is used for the network comparison. A800 deployments exercise NVLink/NVSwitch within a server, PCIe-isolated placements, and GPUDirect RDMA across two or four servers while preserving the intended GPU budget. L40S, RTX~5090, and L20 are not included in the network-variable experiment; they use their platform-local PCIe connectivity. Every run records the GPU model and UUID, participating devices, GPU--NIC affinity, applied clock state, and observed transport so that an unintended communication path cannot be mistaken for the target topology.
+
+Host CPUs launch workers, route requests, and coordinate measurements, but CPU type and CPU parallelism are not experimental variables. Paired comparisons use the same host allocation and process placement. Because the current energy scope is the set of GPUs assigned to a deployment, CPU and network-device energy are not included in the reported joules; this boundary is stated explicitly when interpreting cluster-level energy results.
+
+\subsection{Models, Workloads, and Parallelism}
+\label{sec:models-workloads}
+
+We select dense and mixture-of-experts (MoE) models at three scales (Table~\ref{tab:models}). For dense models, Small denotes fewer than 10 billion parameters, Middle denotes 10--50 billion, and Large denotes more than 50 billion. MoE systems have substantially different total and active parameter counts, so we use deployment-oriented tiers rather than forcing dense-model thresholds onto them: OLMoE-1B-7B represents Small, Qwen3-30B-A3B represents Middle, and Mixtral-8$\times$7B represents Large. Total parameters capture memory and placement cost, whereas active parameters approximate per-token expert computation.
+
+
+
+\begin{table*}[t]
+  \centering
+  \begin{minipage}[t]{0.42\textwidth}
+    \caption{Models included in the measurement matrix.}
+    \label{tab:models}
+    \centering
+    \small
+    \begin{tabular}{lll}
+      \toprule
+      Scale & Dense & MoE \\
+      \midrule
+      Small  & Llama-3.1-8B & OLMoE-1B-7B \\
+      Middle & Qwen3-32B & Qwen3-30B-A3B \\
+      Large  & Llama-3.3-70B & Mixtral-8$\times$7B \\
+      \bottomrule
+    \end{tabular}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.54\textwidth}
+    \caption{Fixed-shape workloads; lengths are in tokens.}
+    \label{tab:workloads}
+    \centering
+    \small
+    \begin{tabular}{lrrl}
+      \toprule
+      Workload & Input & Output & Regime \\
+      \midrule
+      QA          & 128   & 64   & LPLD \\
+      Chatbot     & 128   & 1024 & LPHD \\
+      Balanced    & 512   & 256  & MPMD \\
+      RAG         & 4096  & 64   & HPLD \\
+      Summary     & 4096  & 1024 & HPHD \\
+      LongContext & 16384 & 256  & Long context \\
+      \bottomrule
+    \end{tabular}
+  \end{minipage}
+\end{table*}
+
+The workload suite contains six fixed input/output shapes (Table~\ref{tab:workloads}). QA represents short-prefill/short-decode traffic, Chatbot is decode-heavy, Balanced has moderate input and output lengths, RAG is prefill-heavy, Summary combines a long prompt with a long response, and LongContext stresses long-prefill execution and KV-cache capacity. Requests are generated once from fixed seeds and replayed across configurations. An open-loop generator issues requests according to a Poisson process, preventing server response time from altering the offered arrival rate.
+
+
+
+We support data parallelism (DP), tensor parallelism (TP), expert parallelism (EP), and their hybrid combinations. DP creates complete model replicas and distributes requests among them. TP shards dense operators across GPUs and introduces collective communication. EP distributes MoE experts and routes tokens to their selected experts. A deployment manifest records the DP, TP, and EP degree independently for every role. Unless parallelism itself is varied, a configuration uses the same total GPU budget as its architectural counterparts.
+
+\subsection{Serving Architectures}
+\label{sec:architectures}
+
+We implement three serving architectures in SGLang. \emph{Native} is the non-disaggregated baseline: one worker group executes the complete model and colocates prefill and decode as well as attention and FFN computation. Its default eight-GPU configuration is TP8.
+
+\emph{PD} separates prefill and decode into independent worker groups. The prefill group computes the prompt and transfers the resulting request state and KV cache to the decode group. Its default eight-GPU configuration assigns four GPUs to each group, denoted P-TP4 + D-TP4. The groups can also be placed on separate hosts to exercise RDMA communication.
+
+\emph{AF} separates attention and FFN execution. Attention workers maintain the attention/KV path, while FFN workers execute dense or routed-expert computation; intermediate activations cross the pool boundary at transformer-layer granularity. Its default eight-GPU configuration is A-TP4 + F-TP4. AF can use NVLink within a host or RDMA across hosts, and each pool can independently use DP, TP, or EP.
+
+All comparisons hold model precision, serving software, request stream, and total GPU allocation constant unless the evaluated configuration explicitly changes one of them. Prefix reuse is disabled to prevent cache-hit variation from confounding architecture comparisons. The complete deployment, rather than an individual worker or pool, is the unit of performance and energy accounting.
+
+\subsection{Measurement Methodology and Metrics}
+\label{sec:metrics}
+
+Each configuration is launched as a fresh deployment and must pass readiness and health checks before measurement. After any required warm-up, the load generator replays the frozen request stream and waits for all admitted requests to complete or time out. Configurations are executed serially to avoid resource interference, and each reported point uses three independent repetitions. The deployment manifest and system snapshots preserve model, placement, topology, process, and clock information needed to reproduce a run.
+
+We obtain GPU energy from NVML cumulative-energy counters and calculate consumed energy from counter differences over the same interval used for request measurement. Cluster GPU energy is the sum over only the GPUs assigned in the deployment plan, and average GPU power is total GPU energy divided by measurement duration. Per-GPU and per-node values are retained to reveal role or placement imbalance. On devices or clock domains that do not expose a reliable cumulative counter, the applicable telemetry source and integration method are recorded with the result.
+
+Performance metrics include offered and achieved QPS, input- and output-token throughput, end-to-end latency, time to first token (TTFT), time per output token (TPOT), and inter-token latency (ITL). We report mean and p50/p90/p95/p99 latency where applicable. Energy-efficiency metrics include total joules, average power, joules per successful request, joules per input token, joules per output token, joules per total token, and input/output/total tokens per joule. Network configurations additionally record link validation and telemetry; system snapshots include GPU utilization, memory use, temperature, and core/memory clocks.
+
+A run is valid only when the deployment remains healthy, at least 99\% of requests succeed, and the load generator reproduces the configured open-loop arrival process. We compare energy efficiency only among configurations satisfying the same service-level objective and having all three repetitions. This joint treatment of runtime, power, and energy is necessary because reducing instantaneous power can increase execution time and therefore fail to reduce total energy~\cite{zhang2026distributedenergy}.

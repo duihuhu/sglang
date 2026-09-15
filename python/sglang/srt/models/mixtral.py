@@ -35,6 +35,7 @@ from sglang.srt.layers.linear import (
     RowParallelLinear,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.moe import MoeA2ABackend, get_moe_a2a_backend
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
 from sglang.srt.layers.moe.topk import TopK
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -52,13 +53,26 @@ from sglang.srt.utils import add_prefix, make_layers
 logger = logging.getLogger(__name__)
 
 
+def _should_all_reduce_moe_output(
+    tp_size: int, moe_a2a_backend: MoeA2ABackend
+) -> bool:
+    """Return whether MixtralMoE needs its outer TP all-reduce.
+
+    The plain ``none`` backend leaves tensor-parallel expert outputs sharded.
+    Dedicated A2A backends return outputs after their dispatch/combine phase, so
+    an additional outer all-reduce would duplicate the reduction.
+    """
+    return tp_size > 1 and moe_a2a_backend.is_none()
+
+
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
     across all ranks.
 
     Each expert's weights are sharded across all ranks and a fused MoE
-    kernel is used for the forward pass, and finally we reduce the outputs
-    across ranks.
+    kernel is used for the forward pass. With the plain A2A backend, outputs
+    are reduced across tensor-parallel ranks. Dedicated A2A backends already
+    complete dispatch/combine and therefore skip that outer reduction.
     """
 
     def __init__(
@@ -111,7 +125,7 @@ class MixtralMoE(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         topk_output = self.topk(hidden_states, router_logits)
         final_hidden_states = self.experts(hidden_states, topk_output)
-        if self.tp_size > 1:
+        if _should_all_reduce_moe_output(self.tp_size, get_moe_a2a_backend()):
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
         return final_hidden_states.view(orig_shape)
 

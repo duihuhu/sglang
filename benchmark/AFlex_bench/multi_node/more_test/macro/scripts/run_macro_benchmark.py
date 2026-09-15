@@ -48,21 +48,22 @@ log = logging.getLogger("macro_bench")
 NODE1_IP = os.environ.get("MN_NODE1_IP", "10.252.129.36")  # prefill side (local)
 NODE2_IP = os.environ.get("MN_NODE2_IP", "10.252.129.35")  # decode side (remote)
 NODE_EXTRA_IP = os.environ.get("MN_NODE_EXTRA_IP", "")  # optional 3rd node (partial GPUs)
-CONTAINER = os.environ.get("MN_CONTAINER", "operator_test")
+CONTAINER = os.environ.get("MN_CONTAINER", "moe-energy")
 PYTHON = "/usr/bin/python3"
 MODEL = "/models/Qwen3-32B/"
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
-LOG_C = "/workspace/sglang/benchmark/AFlex_bench/multi_node/logs"
+CONTAINER_ROOT = os.environ.get("MN_CONTAINER_ROOT", "/workspace/moe-tier")
+LOG_C = f"{CONTAINER_ROOT}/benchmark/AFlex_bench/multi_node/logs"
 WORKLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "workloads"
-CLEANUP = "/workspace/sglang/benchmark/AFlex_bench/multi_node/scripts/cleanup_node.sh"
+CLEANUP = f"{CONTAINER_ROOT}/benchmark/AFlex_bench/multi_node/scripts/cleanup_node.sh"
 
 MAX_GPU_FREQ = 1410
 # Native/PD use V1 (per-layer A/F split) models via UnifiedDVFSController.
 # PDAF uses V2 (coupled decode-iteration) models via AFD DVFS controller.
-ENERGY_MODEL_DIR_V1 = ("/workspace/sglang/benchmark/AFlex_bench/energy_model/"
+ENERGY_MODEL_DIR_V1 = (f"{CONTAINER_ROOT}/benchmark/AFlex_bench/energy_model/"
                        "Qwen3-32B/models_v1")
-ENERGY_MODEL_DIR_V2 = ("/workspace/sglang/benchmark/AFlex_bench/energy_model/"
+ENERGY_MODEL_DIR_V2 = (f"{CONTAINER_ROOT}/benchmark/AFlex_bench/energy_model/"
                        "Qwen3-32B/models_v2")
 
 # Ports
@@ -142,9 +143,9 @@ def _node1_container_exec(shell_cmd: str, **kwargs):
     return subprocess.run(_ssh(NODE1_IP, inner), **kwargs)
 
 # Repo-relative path to dvfs.py (synced into containers before harness lock).
-_REPO_ROOT = Path(__file__).resolve().parents[4]
+_REPO_ROOT = Path(__file__).resolve().parents[6]
 DVFS_PY_SRC = _REPO_ROOT / "python" / "sglang" / "srt" / "layers" / "dvfs.py"
-DVFS_PY_CONTAINER = "/workspace/sglang/python/sglang/srt/layers/dvfs.py"
+DVFS_PY_CONTAINER = f"{CONTAINER_ROOT}/python/sglang/srt/layers/dvfs.py"
 
 
 def _ensure_local_node1_flag():
@@ -561,7 +562,7 @@ def _plain_env(gpu):
 
 
 DVFS_LOG_DIR = (
-    "/workspace/sglang/benchmark/AFlex_bench/multi_node/logs/dvfs_decisions"
+    f"{CONTAINER_ROOT}/benchmark/AFlex_bench/multi_node/logs/dvfs_decisions"
 )
 
 

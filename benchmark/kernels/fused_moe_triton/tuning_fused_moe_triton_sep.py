@@ -2,13 +2,13 @@
 import argparse
 import dataclasses
 import json
+import multiprocessing
 import os
 import time
 from contextlib import nullcontext
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
-import ray
 import torch
 import triton
 import triton.language as tl
@@ -20,7 +20,13 @@ from common_utils import (
     get_model_config,
     sort_config,
 )
-from ray.experimental.tqdm_ray import tqdm
+
+try:
+    import ray
+    from ray.experimental.tqdm_ray import tqdm
+except ImportError:
+    ray = None
+    from tqdm import tqdm
 
 from sglang.srt.layers.moe.fused_moe_triton.fused_moe import (
     get_config_dtype_str,
@@ -39,6 +45,21 @@ from sglang.srt.server_args import (
 from sglang.srt.utils import is_hip
 
 _is_hip = is_hip()
+
+
+def get_tuning_search_space(mode: str):
+    search_space = get_configs_compute_bound()
+    if mode == "full" or is_hip():
+        return search_space
+    return [
+        config
+        for config in search_space
+        if config["num_stages"] in (2, 3, 4)
+        and config["BLOCK_SIZE_M"] in (16, 32, 64, 128)
+        and config["BLOCK_SIZE_K"] in (64, 128)
+        and config["BLOCK_SIZE_N"] in (32, 64, 128)
+        and config["GROUP_SIZE_M"] in (1, 16, 32)
+    ]
 
 
 @dataclasses.dataclass
@@ -122,6 +143,50 @@ def load_topk_ids(topk_ids_dir, i: int):
     moe_layers = num_layers - dense_layers
     return torch.load(
         f"{topk_ids_dir}/topk_ids_layer{i % moe_layers + dense_layers}_idx{i // moe_layers}.pt"
+    )
+
+
+def make_synthetic_topk_ids(
+    num_tokens: int,
+    num_experts: int,
+    topk: int,
+    ep_size: int,
+    seed: int,
+    count: int = 100,
+):
+    """Generate deterministic routing traces when captured traces are unavailable."""
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    global_num_experts = num_experts * ep_size
+    return [
+        torch.randint(
+            0,
+            global_num_experts,
+            (num_tokens, topk),
+            dtype=torch.int64,
+            device="cpu",
+            generator=generator,
+        )
+        for _ in range(count)
+    ]
+
+
+def get_topk_ids_list(
+    topk_ids_dir,
+    num_tokens,
+    num_experts,
+    topk,
+    ep_size,
+    seed,
+):
+    if topk_ids_dir:
+        return [load_topk_ids(topk_ids_dir, i) for i in range(100)]
+    return make_synthetic_topk_ids(
+        num_tokens,
+        num_experts,
+        topk,
+        ep_size,
+        seed,
     )
 
 
@@ -444,13 +509,14 @@ class BestConfigTrace:
 
 class BenchmarkWorker:
 
-    def __init__(self, seed: int, server_args: ServerArgs) -> None:
-        torch.set_default_device("cuda")
+    def __init__(self, seed: int, server_args: ServerArgs, device_id: int = 0) -> None:
+        torch.cuda.set_device(device_id)
+        torch.set_default_device(f"cuda:{device_id}")
         torch.cuda.manual_seed_all(0)
         self.seed = seed
         # Get the device ID to allocate tensors and kernels
         # on the respective GPU.
-        self.device_id = 0  # int(ray.get_gpu_ids()[0])
+        self.device_id = device_id
         set_global_server_args_for_scheduler(server_args)
 
     def benchmark(
@@ -471,7 +537,14 @@ class BenchmarkWorker:
         ep_size: int = 1,
     ) -> Tuple[Dict[str, int], float]:
         torch.cuda.manual_seed_all(0)
-        topk_ids_list = [load_topk_ids(topk_ids_dir, i) for i in range(100)]
+        topk_ids_list = get_topk_ids_list(
+            topk_ids_dir,
+            num_tokens,
+            num_experts,
+            topk,
+            ep_size,
+            self.seed,
+        )
         with torch.cuda.device(self.device_id) if is_hip() else nullcontext():
             kernel_time = benchmark_config(
                 cfg,
@@ -507,10 +580,18 @@ class BenchmarkWorker:
         search_space: List[Dict[str, int]],
         topk_ids_dir: str,
         ep_size: int = 1,
+        num_iters: int = 20,
     ) -> Dict[str, int]:
         trace0 = BestConfigTrace("kernel0", down_moe=False)
         trace1 = BestConfigTrace("kernel1", down_moe=True)
-        topk_ids_list = [load_topk_ids(topk_ids_dir, i) for i in range(100)]
+        topk_ids_list = get_topk_ids_list(
+            topk_ids_dir,
+            num_tokens,
+            num_experts,
+            topk,
+            ep_size,
+            self.seed,
+        )
 
         with torch.cuda.device(self.device_id) if is_hip() else nullcontext():
             for config in tqdm(search_space):
@@ -530,9 +611,9 @@ class BenchmarkWorker:
                         topk_ids_list,
                         block_shape,
                         ep_size=ep_size,
-                        num_iters=100,
+                        num_iters=num_iters,
                     )
-                except triton.runtime.autotuner.OutOfResources:
+                except (triton.runtime.autotuner.OutOfResources, RuntimeError):
                     # Some configurations may be invalid and fail to compile.
                     continue
                 trace0.update(
@@ -618,6 +699,12 @@ class BenchmarkWorker:
                     print(f"  config {i} {cfg}: {kernel_times[i]}")
 
 
+def run_local_tune_task(payload):
+    device_id, seed, server_args, input_args = payload
+    worker = BenchmarkWorker(seed, server_args, device_id=device_id)
+    return worker.tune(*input_args)
+
+
 def save_configs_sep(
     configs: Dict[int, BenchmarkConfig],
     num_experts: int,
@@ -631,6 +718,7 @@ def save_configs_sep(
     use_int4_w4a16: bool,
     block_shape: List[int],
     down_moe: bool = False,
+    output_dir: str = ".",
 ) -> None:
     dtype_str = get_config_dtype_str(
         dtype,
@@ -650,8 +738,10 @@ def save_configs_sep(
         down_moe=down_moe,
     )
 
-    print(f"Writing best config to {filename}...")
-    with open(filename, "w") as f:
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, filename)
+    print(f"Writing best config to {output_path}...")
+    with open(output_path, "w") as f:
         json.dump(configs, f, indent=4)
         f.write("\n")
 
@@ -684,7 +774,9 @@ def main(args: argparse.Namespace):
     use_int4_w4a16 = args.dtype == "int4_w4a16"
 
     topk_ids_dir = args.topk_ids_dir
-    if args.batch_size is None:
+    if args.batch_sizes is not None:
+        batch_sizes = args.batch_sizes
+    elif args.batch_size is None:
         batch_sizes = get_default_batch_sizes()
         batch_sizes.reverse()
     else:
@@ -713,7 +805,7 @@ def main(args: argparse.Namespace):
     if len(batch_sizes) == 1:
         worker = BenchmarkWorker(args.seed, server_args)
         if args.tune:
-            search_space = get_configs_compute_bound()
+            search_space = get_tuning_search_space(args.search_space)
             worker.tune(
                 batch_sizes[0],
                 E,
@@ -729,6 +821,7 @@ def main(args: argparse.Namespace):
                 search_space,
                 topk_ids_dir,
                 args.ep_size,
+                args.num_iters,
             )
         else:
             cfg = {
@@ -761,25 +854,7 @@ def main(args: argparse.Namespace):
 
     assert args.tune
 
-    ray.init()
-    num_gpus = int(ray.available_resources()["GPU"])
-    workers = [
-        ray.remote(num_gpus=1)(BenchmarkWorker).remote(args.seed, server_args)
-        for _ in range(num_gpus)
-    ]
-
-    def _distribute(method: str, inputs: List[Any]) -> List[Any]:
-        outputs = []
-        worker_idx = 0
-        for input_args in inputs:
-            worker = workers[worker_idx]
-            worker_method = getattr(worker, method)
-            output = worker_method.remote(*input_args)
-            outputs.append(output)
-            worker_idx = (worker_idx + 1) % num_gpus
-        return ray.get(outputs)
-
-    search_space = get_configs_compute_bound()
+    search_space = get_tuning_search_space(args.search_space)
     if block_shape is not None:
         block_n, block_k = block_shape[0], block_shape[1]
         search_space = [
@@ -803,28 +878,48 @@ def main(args: argparse.Namespace):
     )
 
     start = time.perf_counter()
-    configs = _distribute(
-        "tune",
-        [
-            (
-                batch_size,
-                E,
-                shard_intermediate_size,
-                hidden_size,
-                topk,
-                dtype,
-                use_fp8_w8a8,
-                use_int8_w8a8,
-                use_int8_w8a16,
-                use_int4_w4a16,
-                block_shape,
-                search_space,
-                topk_ids_dir,
-                args.ep_size,
-            )
-            for batch_size in batch_sizes
-        ],
-    )
+    tune_inputs = [
+        (
+            batch_size,
+            E,
+            shard_intermediate_size,
+            hidden_size,
+            topk,
+            dtype,
+            use_fp8_w8a8,
+            use_int8_w8a8,
+            use_int8_w8a16,
+            use_int4_w4a16,
+            block_shape,
+            search_space,
+            topk_ids_dir,
+            args.ep_size,
+            args.num_iters,
+        )
+        for batch_size in batch_sizes
+    ]
+    if ray is not None:
+        ray.init()
+        num_gpus = int(ray.available_resources()["GPU"])
+        workers = [
+            ray.remote(num_gpus=1)(BenchmarkWorker).remote(args.seed, server_args)
+            for _ in range(num_gpus)
+        ]
+        outputs = []
+        for index, input_args in enumerate(tune_inputs):
+            outputs.append(workers[index % num_gpus].tune.remote(*input_args))
+        configs = ray.get(outputs)
+    else:
+        num_gpus = torch.cuda.device_count()
+        if num_gpus < 1:
+            raise RuntimeError("Triton tuning requires at least one visible GPU")
+        payloads = [
+            (index % num_gpus, args.seed, server_args, input_args)
+            for index, input_args in enumerate(tune_inputs)
+        ]
+        mp_ctx = multiprocessing.get_context("spawn")
+        with mp_ctx.Pool(processes=min(num_gpus, len(payloads))) as pool:
+            configs = pool.map(run_local_tune_task, payloads)
     print(f"{configs=}", flush=True)
     cur_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     with open(f"tuning_result_{cur_time}.txt", "w") as f:
@@ -847,6 +942,7 @@ def main(args: argparse.Namespace):
         use_int8_w8a16,
         use_int4_w4a16,
         block_shape,
+        output_dir=args.output_dir,
     )
 
     best_configs1 = {M: sort_config(config) for M, config in zip(batch_sizes, configs1)}
@@ -863,6 +959,7 @@ def main(args: argparse.Namespace):
         use_int4_w4a16,
         block_shape,
         down_moe=True,
+        output_dir=args.output_dir,
     )
     end = time.perf_counter()
     print(f"Tuning took {end - start:.2f} seconds")
@@ -883,11 +980,19 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, required=False)
+    parser.add_argument("--batch-sizes", type=int, nargs="+", required=False)
+    parser.add_argument("--num-iters", type=int, default=20)
+    parser.add_argument("--search-space", choices=("quick", "full"), default="quick")
+    parser.add_argument("--output-dir", type=str, default=".")
     parser.add_argument("--tune", action="store_true")
     parser.add_argument("--disable-shared-experts-fusion", action="store_true")
     parser.add_argument("--configs", type=int, nargs="+", required=False)
-    parser.add_argument("--topk-ids-dir", type=str, required=True)
+    parser.add_argument("--topk-ids-dir", type=str, required=False)
     parser.add_argument("--cmp-configs", type=str, nargs="+", required=False)
     args = parser.parse_args()
+    if args.batch_size is not None and args.batch_sizes is not None:
+        parser.error("use only one of --batch-size and --batch-sizes")
+    if args.num_iters < 10 or args.num_iters % 10 != 0:
+        parser.error("--num-iters must be a positive multiple of 10")
 
     main(args)

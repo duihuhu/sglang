@@ -739,6 +739,15 @@ class TboForwardBatchPreparer:
                 tbo_split_seq_index=None,
                 tbo_parent_token_range=(start_token_index, end_token_index),
                 tbo_children=None,
+                # TBO children are raw sub-batches. AFD overlap metadata is
+                # rebuilt later if AFD is enabled; carrying parent AFD state
+                # here would make the two overlap pipelines inconsistent.
+                afd_split_seq_index=None,
+                afd_parent_token_range=None,
+                afd_children=None,
+                can_run_afd_overlap=False,
+                afd_pf_group_ids=None,
+                afd_pf_group_id=0,
                 original_global_num_tokens_cpu=None,
                 global_num_tokens_gpu=None,
                 global_num_tokens_cpu=None,

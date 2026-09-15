@@ -1265,9 +1265,9 @@ class SchedulerDisaggregationDecodeMixin:
         # NOTE: interleaved schedule (--afd-async-schedule) uses the same
         # single shared channel — no per-mb channels needed.
         if SchedulerAFDMixin.afd_component_should_eager_init_data_plane(self):
-            from sglang.srt.layers.afd import get_async_communicator
+            from sglang.srt.layers.afd import initialize_afd_data_plane
             try:
-                get_async_communicator()
+                initialize_afd_data_plane()
                 logger.info(
                     "event_loop_afd_disagg_decode: UCX communicator ready (async=%s)",
                     getattr(self.server_args, "afd_async_schedule", False),

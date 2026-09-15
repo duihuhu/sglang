@@ -413,6 +413,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     can_run_afd_overlap: bool = False
     afd_pf_group_ids: Optional[List[int]] = None
     afd_pf_group_id: int = 0
+    afd_peer_id: Optional[str] = None
+    afd_lease_id: Optional[str] = None
+    afd_pair_epoch: int = 0
 
     # For matryoshka embeddings
     dimensions: Optional[list[int]] = None
@@ -479,6 +482,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
                 if batch.afd_pf_group_ids and len(batch.afd_pf_group_ids) == 1
                 else 0
             ),
+            afd_peer_id=batch.afd_peer_id,
+            afd_lease_id=batch.afd_lease_id,
+            afd_pair_epoch=batch.afd_pair_epoch,
             dimensions=batch.dimensions,
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
             rids=[req.rid for req in batch.reqs],

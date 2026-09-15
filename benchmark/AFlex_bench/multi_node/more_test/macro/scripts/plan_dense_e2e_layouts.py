@@ -57,7 +57,7 @@ def config_for(dataset: str, qps: int) -> PlanDenseAflexConfig:
     c = aflex[key]["config"]
     return PlanDenseAflexConfig(
         name=c["name"],
-        qps=c["qps"],
+        qps=c.get("qps", qps),
         k_p=c["k_p"],
         k_d=c["k_d"],
         tp_pa=c["tp_pa"],

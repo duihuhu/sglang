@@ -964,6 +964,13 @@ class AFDReqInput(BaseReq):
     # but has no Req objects — these fields let DF create them.
     input_ids_per_req: Optional[List[List[int]]] = None
     max_new_tokens_per_req: Optional[List[int]] = None
+    # Shared-AF protocol metadata. Appended defaults preserve old constructors and
+    # unpickling of payloads created before the shared pool protocol existed.
+    pa_instance_id: Optional[str] = None
+    pf_instance_id: Optional[str] = None
+    lease_id: Optional[str] = None
+    lease_ids: Optional[List[str]] = None
+    pair_epoch: int = 0
 
 
 @dataclass

@@ -1,0 +1,13 @@
+﻿Research Category,Work,Venue,Year,Energy-Aware Scheduling,DVFS Domain,Monolithic Deployment,Disaggregated Architecture,Dense Model Scale/Type,MoE Model Scale,Data-Center Accelerator,Edge Accelerator,Interconnect,Workload/Trace
+SLO-Aware Energy Optimization,DynamoLLM,HPCA,2025,Yes,SM frequency,Yes,N/A,Large,N/A,NVIDIA H100,N/A,NVLink,Azure trace
+SLO-Aware Energy Optimization,BiScale,arXiv,2025,Yes,SM frequency,No,Prefill–Decode Disaggregation (PDD),Large,N/A,NVIDIA H100,N/A,RDMA,Azure trace; ShareGPT
+SLO-Aware Energy Optimization,throttLL’eM,HPCA,2025,Yes,SM frequency,Yes,N/A,Small; Medium; Large,Small,NVIDIA A40; NVIDIA A10,N/A,NVLink,Azure trace
+SLO-Aware Energy Optimization,GreenLLM,arXiv,2025,No,SM frequency,No,Prefill–Decode Disaggregation (PDD),Medium,Medium,NVIDIA A100,N/A,NVLink,Alibaba trace; Azure trace
+SLO-Aware Energy Optimization,PALS,arXiv,2026,No,SM frequency,Yes,N/A,Small,Small,NVIDIA A100,N/A,NVLink,HellaSwag; GSM8K
+SLO-Aware Energy Optimization,AFlex,HPCA,2026,Yes,SM frequency,No,Prefill–Decode and Attention–FFN Disaggregation (PDD + AFD),Medium,Small,NVIDIA A800,N/A,NVLink; RDMA,Azure trace
+SLO-Aware Energy Optimization,OpScale,arXiv,2026,Yes,Not reported,No,Operator-Level Disaggregation (OPD),Small,Large,NVIDIA A100,N/A,NVLink; RDMA,Not reported
+Energy Measurement,Characterizing Performance–Energy,SIGMETRICS,2026,No,SM frequency,Yes,N/A,Small,N/A,NVIDIA A100,N/A,NVLink,Other workloads
+Energy Measurement,Req-Token Energy,arXiv,2026,No,Not reported,Yes,N/A,Small,Small,NVIDIA H100; NVIDIA H200,N/A,N/A,Other workloads
+Disaggregated LLM Serving,DistServe,OSDI,2024,No,Not reported,No,Prefill–Decode Disaggregation (PDD),Not classified,Not classified,NVIDIA A100,N/A,NVLink; RDMA,ShareGPT; HumanEval; LongBench
+Disaggregated LLM Serving,MegaScale-Infer,SIGCOMM,2025,No,Not reported,No,Attention–FFN Disaggregation (AFD),Not classified,Large,NVIDIA A100; NVIDIA H20; NVIDIA L40S,N/A,NVLink; RDMA; PCIe,Other workloads
+Other AI Accelerators,Using Analytical Performance,ASPLOS,2025,No,SM frequency,Yes,N/A,Conventional DNNs (CNNs; ViTs; BERT),N/A,Huawei Ascend NPU,N/A,Not reported,Not reported

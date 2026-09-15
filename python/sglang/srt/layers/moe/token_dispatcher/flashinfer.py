@@ -147,7 +147,7 @@ class FlashinferDispatcher(BaseDispatcher):
         )
 
         # Preallocate dummy tensors (to overcome numLocalTokens > 0 restriction)
-        self.dummy_x = torch.empty(
+        self.dummy_x = torch.zeros(
             (1, hidden_size),
             dtype=torch.bfloat16,
             device="cuda",
@@ -186,7 +186,7 @@ class FlashinferDispatcher(BaseDispatcher):
             topk_ids = self.dummy_topk_ids
             topk_weights = self.dummy_topk_weights
 
-        global_scale = self.quant_config.get("input_global_scale", None)
+        global_scale = (self.quant_config or {}).get("input_global_scale")
         if global_scale is not None:
             if x.shape[0] > 0:
                 x, x_sf = fp4_quantize(x, global_scale, is_sf_swizzled_layout=False)
@@ -208,11 +208,34 @@ class FlashinferDispatcher(BaseDispatcher):
         payloads.append(topk_ids)
         payloads.append(topk_weights)
 
-        self.runtime_max_tokens_per_rank = (
-            max(get_dp_global_num_tokens())
-            if get_dp_global_num_tokens() is not None
-            else x.shape[0]
+        global_num_tokens = get_dp_global_num_tokens()
+        self.runtime_max_tokens_per_rank = max(
+            max(global_num_tokens) if global_num_tokens is not None else 0,
+            x.shape[0],
+            1,
         )
+        max_tokens_per_rank = self.max_num_tokens // self.ep_size
+        if self.runtime_max_tokens_per_rank > max_tokens_per_rank:
+            raise ValueError(
+                "Flashinfer A2A runtime token capacity exceeded: "
+                f"{self.runtime_max_tokens_per_rank} > {max_tokens_per_rank}. "
+                "Increase SGLANG_FLASHINFER_NUM_MAX_DISPATCH_TOKENS_PER_RANK."
+            )
+        if x.ndim != 2 or x.shape[1] != self.hidden_size:
+            raise ValueError(
+                f"Expected hidden states [M, {self.hidden_size}], got {tuple(x.shape)}."
+            )
+        if topk_ids.shape != topk_weights.shape or topk_ids.shape[0] != x.shape[0]:
+            raise ValueError(
+                "Flashinfer routing metadata must have matching [M, K] shapes; "
+                f"got hidden={tuple(x.shape)}, ids={tuple(topk_ids.shape)}, "
+                f"weights={tuple(topk_weights.shape)}."
+            )
+        if topk_ids.dtype != torch.int32 or topk_weights.dtype != torch.float32:
+            raise TypeError(
+                "Flashinfer A2A requires int32 expert ids and float32 weights, "
+                f"got {topk_ids.dtype} and {topk_weights.dtype}."
+            )
         recv_tensors = self.moe_a2a.dispatch(
             self.dummy_topk_ids_current_rank if self.has_dummy_token else topk_ids,
             payloads,

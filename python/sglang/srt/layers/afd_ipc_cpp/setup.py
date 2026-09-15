@@ -9,6 +9,7 @@ The compiled .so will be placed in this directory for direct import.
 """
 
 import os
+
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
@@ -26,17 +27,21 @@ setup(
                 os.path.join(CSRC, "afd_ipc_kernels.cu"),
                 os.path.join(CSRC, "afd_ipc_pybind.cpp"),
                 os.path.join(CSRC, "afd_pipeline_driver.cpp"),
+                os.path.join(CSRC, "afd_fused_pipeline.cpp"),
             ],
             include_dirs=[CSRC],
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
-                "nvcc": ["-O3", "--expt-relaxed-constexpr",
-                         "-gencode=arch=compute_80,code=sm_80",
-                         "-gencode=arch=compute_86,code=sm_86",
-                         "-gencode=arch=compute_89,code=sm_89",
-                         "-gencode=arch=compute_90,code=sm_90"],
+                "nvcc": [
+                    "-O3",
+                    "--expt-relaxed-constexpr",
+                    "-gencode=arch=compute_80,code=sm_80",
+                    "-gencode=arch=compute_86,code=sm_86",
+                    "-gencode=arch=compute_89,code=sm_89",
+                    "-gencode=arch=compute_90,code=sm_90",
+                ],
             },
-            libraries=["cudart", "pthread", "rt"],
+            libraries=["cudart", "cuda", "pthread", "rt"],
         ),
     ],
     cmdclass={"build_ext": BuildExtension},

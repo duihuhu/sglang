@@ -14,6 +14,7 @@
 """A scheduler that manages a tensor parallel GPU worker."""
 
 import faulthandler
+import json
 import logging
 import os
 import signal
@@ -232,6 +233,7 @@ else:
     from torch.cuda import StreamContext as CudaStreamContext
 
 logger = logging.getLogger(__name__)
+AFD_NULL_DEBUG_ENABLED = os.getenv("AFD_NULL_DEBUG") == "1"
 
 # Test retract decode for debugging purposes
 TEST_RETRACT = envs.SGLANG_TEST_RETRACT.get()
@@ -299,6 +301,148 @@ class Scheduler(
 ):
     """A scheduler that manages a tensor parallel GPU worker."""
 
+    def _afd_scheduler_is_ffn(self) -> bool:
+        """Return the scheduler-local FFN role, failing closed on bad values."""
+        from sglang.srt.layers.afd_type import AFDPerspective
+
+        perspective = getattr(self.server_args, "afd_perspective", None)
+        if isinstance(perspective, AFDPerspective):
+            return perspective == AFDPerspective.AFD_PERSPECTIVE_FFN
+        return isinstance(perspective, str) and perspective.lower() == "ffn"
+
+    def _afd_scheduler_is_attn(self) -> bool:
+        """Return the scheduler-local attention role, failing closed on bad values."""
+        from sglang.srt.layers.afd_type import AFDPerspective
+
+        perspective = getattr(self.server_args, "afd_perspective", None)
+        if isinstance(perspective, AFDPerspective):
+            return perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN
+        return isinstance(perspective, str) and perspective.lower() == "attn"
+
+    @staticmethod
+    def _afd_null_debug_enabled() -> bool:
+        """Return whether the opt-in NULL-mode AFD diagnostic is enabled."""
+        return AFD_NULL_DEBUG_ENABLED
+
+    @staticmethod
+    def _afd_null_debug_value(value):
+        """Convert tensors and enums into JSON-serializable values."""
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            tensor = value.detach().cpu()
+            return {
+                "shape": list(tensor.shape),
+                "value": tensor.tolist(),
+            }
+        if hasattr(value, "value"):
+            return value.value
+        if isinstance(value, (list, tuple)):
+            return [Scheduler._afd_null_debug_value(item) for item in value]
+        return value
+
+    def _afd_null_debug_batch_fields(self, batch) -> dict:
+        """Snapshot fields needed to diagnose NULL-mode AF decode divergence."""
+        if batch is None:
+            return {
+                "batch_forward_mode": None,
+                "rid": [],
+                "rids": [],
+                "req_output_ids": [],
+                "batch_input_ids": None,
+                "seq_lens_cpu": None,
+                "extend_lens": None,
+                "batch_output_ids": None,
+            }
+        reqs = list(getattr(batch, "reqs", ()) or ())
+        return {
+            "batch_forward_mode": self._afd_null_debug_value(
+                getattr(batch, "forward_mode", None)
+            ),
+            "rid": [getattr(req, "rid", None) for req in reqs],
+            "rids": [getattr(req, "rid", None) for req in reqs],
+            "req_output_ids": [
+                {
+                    "rid": getattr(req, "rid", None),
+                    "last": (req.output_ids[-1] if getattr(req, "output_ids", None) else None),
+                    "len": len(getattr(req, "output_ids", ()) or ()),
+                }
+                for req in reqs
+            ],
+            "batch_input_ids": self._afd_null_debug_value(
+                getattr(batch, "input_ids", None)
+            ),
+            "seq_lens_cpu": self._afd_null_debug_value(
+                getattr(batch, "seq_lens_cpu", None)
+            ),
+            "extend_lens": self._afd_null_debug_value(
+                getattr(batch, "extend_lens", None)
+            ),
+            "batch_output_ids": self._afd_null_debug_value(
+                getattr(batch, "output_ids", None)
+            ),
+        }
+
+    def _afd_null_debug_log(self, event: str, **fields) -> None:
+        """Emit one structured diagnostic record when explicitly enabled."""
+        if not self._afd_null_debug_enabled():
+            return
+
+        try:
+            from sglang.srt.layers.afd import get_afd_perspective
+
+            global_perspective = self._afd_null_debug_value(get_afd_perspective())
+        except Exception:
+            # Global server args may not be initialized yet. Diagnostics must never
+            # affect scheduler startup or runtime behavior.
+            global_perspective = "unavailable"
+
+        local = getattr(self.server_args, "afd_perspective", None)
+        payload = {
+            "event": event,
+            "local_perspective": self._afd_null_debug_value(local),
+            "global_perspective": global_perspective,
+            **fields,
+        }
+        logger.info(
+            "[AFD_NULL_DEBUG] %s",
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+        )
+
+    def _afd_log_perspective_mismatch(self) -> None:
+        """Log once when process-global AFD state disagrees with this scheduler."""
+        if getattr(self, "_afd_perspective_mismatch_checked", False):
+            return
+        self._afd_perspective_mismatch_checked = True
+
+        local_ffn = self._afd_scheduler_is_ffn()
+        local_attn = self._afd_scheduler_is_attn()
+        if not (local_ffn or local_attn):
+            return
+
+        try:
+            from sglang.srt.layers.afd import afd_is_attn, afd_is_ffn
+
+            global_ffn = afd_is_ffn()
+            global_attn = afd_is_attn()
+        except Exception:
+            # Scheduler.__init__ can run before process-global server args are set.
+            # This check is diagnostic only; the scheduler-local role is authoritative.
+            logger.debug(
+                "AFD scheduler perspective check skipped: global=unavailable; "
+                "scheduler-local perspective is authoritative",
+                exc_info=True,
+            )
+            return
+
+        if local_ffn != global_ffn or local_attn != global_attn:
+            logger.warning(
+                "AFD scheduler perspective mismatch: local=%s global=%s; "
+                "scheduler-local perspective is authoritative",
+                "ffn" if local_ffn else "attn",
+                "ffn" if global_ffn else "attn" if global_attn else "unknown",
+            )
+
     def __init__(
         self,
         server_args: ServerArgs,
@@ -316,6 +460,7 @@ class Scheduler(
 
         # Parse args
         self.server_args = server_args
+        self._afd_log_perspective_mismatch()
         self.tp_rank = tp_rank
         self.moe_ep_rank = moe_ep_rank
         self.pp_rank = pp_rank
@@ -595,7 +740,18 @@ class Scheduler(
             port = int(os.getenv("AFD_SCHED_PORT", "65300"))
             afd_ipc = f"tcp://{host}:{port}"
             if afd_perspective == AFDPerspective.AFD_PERSPECTIVE_ATTN:
-                if getattr(
+                if getattr(self.server_args, "afd_shared_pool", False):
+                    from sglang.srt.layers.afd_multi_peer import parse_shared_peer_specs
+                    for spec in parse_shared_peer_specs(
+                        self.server_args.afd_shared_peer_specs
+                    ):
+                        endpoint = spec.control_endpoint or f"tcp://{spec.peer_host}:{port}"
+                        if not endpoint.startswith("tcp://"):
+                            endpoint = f"tcp://{endpoint}"
+                        self.afd_send_to_ffn_groups[spec.peer_id] = get_zmq_socket(
+                            context, zmq.PUSH, endpoint, False
+                        )
+                elif getattr(
                     self.server_args, "afd_multi_pf_continuation", False
                 ):
                     endpoints = [
@@ -2974,8 +3130,6 @@ class Scheduler(
     def event_loop_afd(self):
         """AFD scheduler loop with zmq.Poller (optimization S2)."""
         from sglang.srt.layers.afd import (
-            afd_is_attn,
-            afd_is_ffn,
             get_afd_micro_batch,
             get_afd_perspective,
         )
@@ -3011,9 +3165,9 @@ class Scheduler(
             # Interleaved schedule uses the same single shared channel as
             # the batch schedule — no per-mb channels needed.  Just init
             # the regular communicator.
-            from sglang.srt.layers.afd import get_async_communicator
+            from sglang.srt.layers.afd import initialize_afd_data_plane
             try:
-                get_async_communicator()
+                initialize_afd_data_plane()
                 logger.info(
                     "event_loop_afd: AF communicator ready (interleaved, %s, M=%d)",
                     get_afd_perspective(),
@@ -3027,9 +3181,9 @@ class Scheduler(
                     f"AF communicator init failed in event_loop_afd: {e}"
                 ) from e
         else:
-            from sglang.srt.layers.afd import get_async_communicator
+            from sglang.srt.layers.afd import initialize_afd_data_plane
             try:
-                get_async_communicator()
+                initialize_afd_data_plane()
                 logger.info("event_loop_afd: AF communicator ready (%s)",
                             get_afd_perspective())
             except Exception as e:
@@ -3040,7 +3194,7 @@ class Scheduler(
 
         # S2: use Poller instead of busy-wait
         afd_poller = None
-        if afd_is_ffn() and self.afd_recv_from_attn is not None:
+        if self._afd_scheduler_is_ffn() and self.afd_recv_from_attn is not None:
             afd_poller = zmq.Poller()
             afd_poller.register(self.afd_recv_from_attn, zmq.POLLIN)
 
@@ -3112,6 +3266,12 @@ class Scheduler(
         def _pop_and_process():
             tmp_batch, tmp_result = self.result_queue.popleft()
             self.process_batch_result(tmp_batch, tmp_result)
+            if (
+                self._afd_scheduler_is_attn()
+                and getattr(self.server_args, "afd_shared_pool", False)
+            ):
+                SchedulerAFDMixin.afd_complete_shared_dispatch(self, tmp_batch)
+            SchedulerAFDMixin.afd_shared_finish_scheduler_step(self)
 
         while True:
             _afd_loop_iter += 1
@@ -3130,7 +3290,7 @@ class Scheduler(
             recv_reqs = self.recv_requests()
 
             # Step 3.6: FFN also receives AFD messages
-            if afd_is_ffn():
+            if self._afd_scheduler_is_ffn():
                 extra_reqs = _recv_afd_messages()
                 if extra_reqs:
                     from sglang.srt.layers.afd_mixin import _afd_sched_ts
@@ -3160,7 +3320,7 @@ class Scheduler(
             self._afd_process_input_requests(recv_reqs)
 
             # FFN waits until Attn sends batch info
-            if afd_is_ffn() and self._afd_batchsize_attn is None:
+            if self._afd_scheduler_is_ffn() and self._afd_batchsize_attn is None:
                 if afd_poller is not None:
                     afd_poller.poll(timeout=1)
 
@@ -3184,15 +3344,60 @@ class Scheduler(
             # batch creation so the chunking mechanism (which operates on original
             # extend_lens) would leave a dangling chunked_req that doesn't match
             # the FFN-side KV pool (smaller than Attn's).
-            if afd_is_ffn():
+            if self._afd_scheduler_is_ffn():
                 self.chunked_req = None
 
-            batch = self._afd_get_next_batch(disagg_mode)
+            if (
+                AFD_NULL_DEBUG_ENABLED
+                and self._afd_scheduler_is_ffn()
+                and disagg_mode == DisaggregationMode.NULL
+            ):
+                metadata = self._afd_current_metadata or {}
+                self._afd_null_debug_log(
+                    "dispatch_before_authoritative_build",
+                    dispatch_id=metadata.get("dispatch_id"),
+                    metadata_forward_mode=self._afd_null_debug_value(
+                        self._afd_forward_mode
+                    ),
+                    **self._afd_null_debug_batch_fields(
+                        getattr(self, "running_batch", None)
+                    ),
+                )
+            shared_lane_selected = False
+            if self._afd_scheduler_is_attn() and getattr(
+                self.server_args, "afd_shared_pool", False
+            ):
+                SchedulerAFDMixin.afd_shared_select_scheduler_lane(self)
+                shared_lane_selected = True
+            try:
+                batch = self._afd_get_next_batch(disagg_mode)
+            finally:
+                if shared_lane_selected:
+                    SchedulerAFDMixin.afd_shared_restore_waiting_queue(self)
+            if (
+                AFD_NULL_DEBUG_ENABLED
+                and self._afd_scheduler_is_ffn()
+                and disagg_mode == DisaggregationMode.NULL
+            ):
+                metadata = self._afd_current_metadata or {}
+                self._afd_null_debug_log(
+                    "dispatch_after_authoritative_build",
+                    dispatch_id=metadata.get("dispatch_id"),
+                    metadata_forward_mode=self._afd_null_debug_value(
+                        self._afd_forward_mode
+                    ),
+                    **self._afd_null_debug_batch_fields(batch),
+                )
             self.cur_batch = batch
+            if batch is not None and self._afd_scheduler_is_ffn():
+                metadata = self._afd_current_metadata or {}
+                batch.afd_peer_id = metadata.get("pa_instance_id")
+                batch.afd_lease_id = metadata.get("lease_id")
+                batch.afd_pair_epoch = int(metadata.get("pair_epoch", 0))
             disable_overlap_for_batch = False
 
             # ── FFN side: force-sync decode batches to match Attn metadata ──
-            if afd_is_ffn() and batch is not None:
+            if self._afd_scheduler_is_ffn() and batch is not None:
                 # Decode sends one token per request, but Prefill EXTEND sends
                 # the full prompt tensor.  Collapsing Prefill extend_lens to 1
                 # makes the FFN batch metadata disagree with the tensor shape
@@ -3217,28 +3422,36 @@ class Scheduler(
                 if len(deduped) < bs:
                     batch.reqs = deduped
 
-            # F3: overlap — process last batch immediately if overlap disabled for this batch
+            # Shared PF data channels accept one dispatch at a time. Complete
+            # the prior dispatch before BEGIN/send of the next batch even when
+            # scheduler/GPU overlap is enabled.
             if afd_overlap:
                 disable_overlap_for_batch = self.is_disable_overlap_for_batch(batch)
+                if (
+                    self._afd_scheduler_is_attn()
+                    and getattr(self.server_args, "afd_shared_pool", False)
+                    and self.result_queue
+                ):
+                    disable_overlap_for_batch = True
                 if disable_overlap_for_batch:
                     _pop_and_process()
 
             if batch:
-                if afd_is_attn():
+                if self._afd_scheduler_is_attn():
                     self._afd_dvfs_before_batch(batch)
                 SchedulerAFDMixin.afd_send_batch_info(self, batch)
                 # Record ZMQ-send wall-clock for cross-GPU latency breakdown
-                if afd_is_attn():
+                if self._afd_scheduler_is_attn():
                     from sglang.srt.layers.afd_mixin import _afd_sched_ts
                     _afd_sched_ts["zmq_sent"] = time.time()
 
                 is_decode = batch.forward_mode.is_decode()
                 bsz = batch.batch_size()
-                perspective = "FFN" if afd_is_ffn() else "ATTN"
+                perspective = "FFN" if self._afd_scheduler_is_ffn() else "ATTN"
                 print(f"[AFD_DBG] === ITER {_afd_loop_iter} {perspective} batch={bsz} max_running={self.max_running_requests} ===", flush=True)
 
                 self._tier1_record_batch_start(is_prefill=not is_decode)
-                if not afd_is_attn():
+                if not self._afd_scheduler_is_attn():
                     self._afd_dvfs_before_batch(batch)
                 _prepare_afd_overlap(batch)
 
@@ -3256,13 +3469,21 @@ class Scheduler(
                 self._afd_dvfs_after_prefill_batch(batch)
 
                 # FFN side: compute and publish LIF for ATTN-side DVFS
-                if afd_is_ffn() and is_decode and self._moe_num_experts > 0:
+                if self._afd_scheduler_is_ffn() and is_decode and self._moe_num_experts > 0:
                     self._compute_lif_for_dvfs(batch)
 
                 if afd_overlap:
                     self.result_queue.append((batch.copy(), batch_result))
                 else:
                     self.process_batch_result(batch, batch_result)
+                if (
+                    not afd_overlap
+                    and self._afd_scheduler_is_attn()
+                    and getattr(self.server_args, "afd_shared_pool", False)
+                ):
+                    SchedulerAFDMixin.afd_complete_shared_dispatch(self, batch)
+                if not afd_overlap:
+                    SchedulerAFDMixin.afd_shared_finish_scheduler_step(self)
 
                 t_iter = (time.perf_counter() - self._last_decode_batch_time) * 1e6 \
                     if is_decode and hasattr(self, "_last_decode_batch_time") and self._last_decode_batch_time is not None \
@@ -3279,7 +3500,7 @@ class Scheduler(
                 # schedulable. Keep the dispatch latched and continue polling;
                 # resetting or FFN cleanup here would drop the final forward.
                 afd_metadata_waiting_for_batch = (
-                    afd_is_ffn()
+                    self._afd_scheduler_is_ffn()
                     and self._afd_batchsize_attn is not None
                     and self._afd_current_metadata is not None
                 )
@@ -3291,10 +3512,12 @@ class Scheduler(
                 if afd_overlap:
                     self.cancel_bubble_timer()
                 elif not afd_metadata_waiting_for_batch:
-                    if afd_is_ffn():
+                    if self._afd_scheduler_is_ffn():
                         self._afd_ffn_cleanup_all()
-                    self.self_check_during_idle()
-                    self._maybe_grow_kv_pool_background()
+                    SchedulerAFDMixin.afd_shared_finish_scheduler_step(self)
+                    if not SchedulerAFDMixin.afd_shared_has_scheduler_work(self):
+                        self.self_check_during_idle()
+                        self._maybe_grow_kv_pool_background()
 
                 # Idle freq lock: reduce GPU frequency when no batch is pending.
                 # Only applies to PREFILL instances — Decode side has tight
@@ -3312,12 +3535,15 @@ class Scheduler(
                     if not disable_overlap_for_batch:
                         _pop_and_process()
                 elif batch is None:
-                    self.self_check_during_idle()
-                    self._maybe_grow_kv_pool_background()
+                    SchedulerAFDMixin.afd_shared_finish_scheduler_step(self)
+                    if not SchedulerAFDMixin.afd_shared_has_scheduler_work(self):
+                        self.self_check_during_idle()
+                        self._maybe_grow_kv_pool_background()
                 if self.is_generation:
                     self.launch_batch_sample_if_needed(batch_result)
 
             self.last_batch = batch
+            SchedulerAFDMixin.afd_shared_persist_active_lane(self)
 
             # ── Tier 1 workload monitor (periodic re-planning check) ──
             self._tier1_monitor_check()
@@ -3793,6 +4019,8 @@ class Scheduler(
             return self.get_next_disagg_prefill_batch_to_run()
         elif disagg_mode == DisaggregationMode.DECODE:
             return self.get_next_disagg_decode_batch_to_run()
+        elif self._afd_scheduler_is_ffn():
+            return self._afd_build_authoritative_null_batch()
         else:
             return self.get_next_batch_to_run()
 
@@ -4769,21 +4997,71 @@ class Scheduler(
                     f"dispatch={afd_req.dispatch_id}"
                 )
             consumed_afd_req = afd_req
-            old_req_ids = self._afd_req_ids
+            # A shared FFN's process-level scheduler fields currently belong to
+            # the previously selected PA. Switch before reading old request IDs,
+            # applying tokens, or cleaning stale mirrors.
+            shared_ffn_lanes = getattr(
+                self.server_args, "afd_shared_pool", False
+            )
+            if shared_ffn_lanes:
+                SchedulerAFDMixin.afd_shared_select_ffn_pa_lane(self, afd_req)
+                old_req_ids = getattr(self, "_afd_ffn_lane_req_ids", None)
+                had_active_ledger = old_req_ids is not None
+            else:
+                # The per-iteration dispatch IDs are not an active-request
+                # ledger: EXTEND contains only newly admitted rows. Keep a
+                # separate nonshared ledger across forwards, with the legacy
+                # metadata fallback preserving warmup/new-RID cleanup.
+                old_req_ids = getattr(self, "_afd_ffn_active_req_ids", None)
+                had_active_ledger = old_req_ids is not None
+                if old_req_ids is None:
+                    old_req_ids = self._afd_req_ids
+                if old_req_ids is None:
+                    previous_metadata = getattr(
+                        self, "_afd_current_metadata", None
+                    )
+                    if previous_metadata is not None:
+                        old_req_ids = previous_metadata.get("req_ids")
             self._afd_batchsize_attn = afd_req.batch_size
             self._afd_forward_mode = afd_req.forward_mode
             self._afd_req_ids = list(afd_req.req_ids)
+            if not afd_is_attn():
+                if afd_req.forward_mode.is_decode():
+                    active_ids = list(afd_req.req_ids)
+                else:
+                    active_ids = list(old_req_ids or ())
+                    active_id_set = set(active_ids)
+                    active_ids.extend(
+                        rid for rid in afd_req.req_ids if rid not in active_id_set
+                    )
+                if shared_ffn_lanes:
+                    self._afd_ffn_lane_req_ids = active_ids
+                else:
+                    self._afd_ffn_active_req_ids = active_ids
             SchedulerAFDMixin.afd_set_current_metadata(self, afd_req)
             self._on_afd_batch_info_received()
 
-            if afd_req.output_ids_per_req and afd_req.req_ids:
-                self._afd_sync_output_ids(afd_req)
-
-            # FFN decode side: clean up requests no longer tracked by Attn
-            if not afd_is_attn() and old_req_ids is not None:
+            # Only DECODE metadata is a complete snapshot of the PA's active
+            # set. EXTEND describes the newly admitted prefill rows only; an
+            # older request may still be decoding concurrently and must remain
+            # in the FFN mirror until the next DECODE snapshot omits it.
+            is_authoritative_active_snapshot = afd_req.forward_mode.is_decode()
+            legacy_warmup_transition = (
+                not shared_ffn_lanes
+                and not had_active_ledger
+                and afd_req.forward_mode.is_extend()
+            )
+            if (
+                not afd_is_attn()
+                and old_req_ids is not None
+                and (is_authoritative_active_snapshot or legacy_warmup_transition)
+            ):
                 self._afd_ffn_cleanup_stale(
                     set(afd_req.req_ids), set(old_req_ids)
                 )
+
+            if afd_req.output_ids_per_req and afd_req.req_ids:
+                self._afd_sync_output_ids(afd_req)
 
         # process_input_requests handles TokenizedGenerateReqInput → creates Req objects
         self.process_input_requests(filtered_reqs)
@@ -4927,6 +5205,15 @@ class Scheduler(
                 )
             for matching_req in matching or [req]:
                 self._afd_apply_req_metadata(matching_req, row)
+                if getattr(self.server_args, "afd_shared_pool", False):
+                    matching_req.afd_pa_instance_id = afd_req.pa_instance_id
+                    matching_req.afd_pf_instance_id = afd_req.pf_instance_id
+                    matching_req.afd_lease_id = (
+                        afd_req.lease_ids[i]
+                        if afd_req.lease_ids and i < len(afd_req.lease_ids)
+                        else afd_req.lease_id
+                    )
+                    matching_req.afd_pair_epoch = int(afd_req.pair_epoch)
             ordered.append(req)
 
         if authoritative_waiting:
@@ -4953,39 +5240,132 @@ class Scheduler(
                         self._afd_apply_req_metadata(req, rows[req.rid])
                         seen.add(id(req))
 
-    def _afd_ffn_cleanup_stale(self, active_req_ids: set, old_req_ids: set):
-        """Release KV cache for FFN-side requests that Attn has stopped tracking.
+        # A NULL-mode FFN decode batch is intentionally kept as a mirror so its
+        # logical no-KV allocations and running lifecycle can be reused. Its
+        # previous ``batch.output_ids`` was a dummy, however. Replace that batch-
+        # level decode input from the same authoritative Attention snapshot that
+        # updated Req.output_ids. In overlap mode an older result copy can be
+        # processed after this assignment; the result processor only clears the
+        # dummy tensor by identity and therefore cannot erase this newer value.
+        if (
+            self.disaggregation_mode == DisaggregationMode.NULL
+            and afd_req.forward_mode.is_decode()
+        ):
+            metadata_rids = set(rows)
+            shared_ffn_lanes = getattr(
+                self.server_args, "afd_shared_pool", False
+            )
+            for batch in (self.running_batch, self.last_batch):
+                if batch is None or not batch.reqs:
+                    continue
+                live_reqs = [req for req in batch.reqs if not req.finished()]
+                foreign_rids = [
+                    req.rid for req in live_reqs if req.rid not in metadata_rids
+                ]
+                if shared_ffn_lanes and foreign_rids:
+                    raise RuntimeError(
+                        f"Invalid AFD decode lane dispatch={afd_req.dispatch_id} "
+                        f"pa={afd_req.pa_instance_id}: metadata rows do not match "
+                        f"current PA mirror lane; foreign_rids={foreign_rids}, "
+                        f"metadata_rids={list(rows)}"
+                    )
+                missing_tokens = [req.rid for req in live_reqs if not req.output_ids]
+                if shared_ffn_lanes and missing_tokens:
+                    raise RuntimeError(
+                        f"Invalid AFD decode metadata dispatch={afd_req.dispatch_id} "
+                        f"pa={afd_req.pa_instance_id}: same-PA mirror requests lack "
+                        f"authoritative output tokens: {missing_tokens}"
+                    )
+                if (
+                    not foreign_rids
+                    and not missing_tokens
+                    and len(live_reqs) == len(batch.reqs)
+                ):
+                    batch.output_ids = torch.tensor(
+                        [req.output_ids[-1] for req in batch.reqs],
+                        dtype=torch.int64,
+                        device=batch.device,
+                    )
 
-        On the decode-FFN side, the Attn side drives the request lifecycle.
-        When a request ID disappears from AFDReqInput, it means Attn has
-        finished the request. The FFN side must release its KV cache pages
-        to avoid a false memory-leak detection during idle checks.
+    def _afd_ffn_req_has_kv_allocation(self, req) -> bool:
+        """Return whether ``req`` owns resources handled by release_kv_cache."""
+        no_kv_runtime = getattr(
+            getattr(self, "req_to_token_pool", None), "no_kv_bookkeeping", False
+        )
+        if no_kv_runtime:
+            return False
+        return (
+            req.req_pool_idx is not None
+            or getattr(req, "mamba_pool_idx", None) is not None
+        )
+
+    def _afd_ffn_release_req_resources(self, req) -> None:
+        """Release real KV or a no-KV FFN request-bookkeeping slot, if owned."""
+        req_to_token_pool = getattr(self, "req_to_token_pool", None)
+        if self._afd_ffn_req_has_kv_allocation(req):
+            from sglang.srt.mem_cache.common import release_kv_cache
+
+            release_kv_cache(req, self.tree_cache)
+        elif (
+            getattr(req_to_token_pool, "no_kv_bookkeeping", False)
+            and req.req_pool_idx is not None
+        ):
+            req_to_token_pool.free(req)
+
+    def _afd_ffn_cleanup_stale(self, active_req_ids: set, old_req_ids: set):
+        """Retire FFN mirror requests that Attention has stopped tracking.
+
+        NULL-mode FFN mirrors use a request bookkeeping pool but allocate no KV.
+        Their pool slots must be freed directly; calling ``release_kv_cache`` for
+        an unallocated mirror is invalid. Shared-FFN state has already selected
+        the PA lane before this method runs, so only that lane is mutated.
         """
         from sglang.srt.layers.afd import afd_is_attn as _is_attn
-        from sglang.srt.mem_cache.common import release_kv_cache as _release_kv
+        from sglang.srt.managers.schedule_batch import FINISH_LENGTH
 
         if _is_attn():
             return
 
-        # Req IDs that left the Attn-managed set since last batch info
         finished_ids = old_req_ids - active_req_ids
         if not finished_ids:
             return
 
-        # Clean waiting_queue
-        stale_waiting = [r for r in self.waiting_queue if r.rid in finished_ids]
-        if stale_waiting:
-            for req in stale_waiting:
-                _release_kv(req, self.tree_cache)
-            self.waiting_queue = [r for r in self.waiting_queue if r.rid not in finished_ids]
+        released_req_objects = set()
 
-        # Clean running_batch — force-finish so filter_batch removes them
-        if self.running_batch is not None:
-            for req in self.running_batch.reqs:
-                if req.rid in finished_ids and not req.finished():
-                    from sglang.srt.managers.schedule_batch import FINISH_LENGTH
-                    req.finished_reason = FINISH_LENGTH(length=0)
-                    _release_kv(req, self.tree_cache)
+        def retire(req):
+            if not req.finished():
+                req.finished_reason = FINISH_LENGTH(length=0)
+            req_identity = id(req)
+            if req_identity not in released_req_objects:
+                self._afd_ffn_release_req_resources(req)
+                released_req_objects.add(req_identity)
+
+        stale_waiting = [req for req in self.waiting_queue if req.rid in finished_ids]
+        for req in stale_waiting:
+            retire(req)
+        self.waiting_queue = [
+            req for req in self.waiting_queue if req.rid not in finished_ids
+        ]
+
+        seen_batches = set()
+        for batch in (self.running_batch, self.last_batch):
+            if batch is None or id(batch) in seen_batches:
+                continue
+            seen_batches.add(id(batch))
+            keep_indices = []
+            for index, req in enumerate(batch.reqs):
+                if req.rid in finished_ids:
+                    retire(req)
+                else:
+                    keep_indices.append(index)
+            if len(keep_indices) == len(batch.reqs):
+                continue
+            if callable(getattr(batch, "filter_batch", None)):
+                batch.filter_batch(keep_indices=keep_indices)
+            else:
+                batch.reqs = [batch.reqs[index] for index in keep_indices]
+            if not batch.reqs:
+                batch.batch_is_full = False
 
     def _afd_ffn_cleanup_all(self):
         """Force-clean ALL remaining requests on the FFN decode side at idle.
@@ -4995,15 +5375,13 @@ class Scheduler(
         trigger a false memory-leak detection.
         """
         from sglang.srt.layers.afd import afd_is_attn as _is_attn
-        from sglang.srt.mem_cache.common import release_kv_cache as _release_kv
 
         if _is_attn():
             return
 
         # Clean waiting_queue
         for req in self.waiting_queue:
-            if req.req_pool_idx is not None:
-                _release_kv(req, self.tree_cache)
+            self._afd_ffn_release_req_resources(req)
         self.waiting_queue.clear()
 
         # Clean running_batch
@@ -5012,11 +5390,10 @@ class Scheduler(
             for req in self.running_batch.reqs:
                 if not req.finished():
                     req.finished_reason = FINISH_LENGTH(length=0)
-                if req.req_pool_idx is not None:
-                    _release_kv(req, self.tree_cache)
+                self._afd_ffn_release_req_resources(req)
             # Clear the batch to prevent double-free on the next call
             # (the wait loop calls _afd_ffn_cleanup_all every 10ms, and
-            #  release_kv_cache sets req_pool_idx=None on the first call).
+            #  resource release sets req_pool_idx=None on the first call).
             self.running_batch.reqs.clear()
             self.running_batch.batch_is_full = False
 
@@ -5028,42 +5405,18 @@ class Scheduler(
                     continue
                 from sglang.srt.managers.schedule_batch import FINISH_LENGTH
                 req.finished_reason = FINISH_LENGTH(length=0)
-                if req.req_pool_idx is not None:
-                    _release_kv(req, self.tree_cache)
+                self._afd_ffn_release_req_resources(req)
             self.last_batch.reqs.clear()
             self.last_batch = None
 
     def _afd_ffn_reset_idle_ledger(self):
-        """Reset the FFN batch ledger to idle in the AFD wait branch.
+        """Reset the FFN batch ledger after a terminal AFD drain.
 
-        The FFN (PF) participant's ``event_loop_afd`` spins in the
-        ``_afd_batchsize_attn is None`` wait branch whenever Attn is not sending
-        batch info. FFN requests only ever live in ``last_batch`` (running_batch
-        stays empty), so ``_afd_ffn_cleanup_all`` — the only place that clears
-        ``last_batch`` — was previously gated behind a non-empty ``running_batch``
-        and thus never ran here. That left ``last_batch``/``cur_batch`` non-empty
-        forever, so ``is_fully_idle()`` stayed False and a component reshard
-        drain (quiesce) could never observe idle until it timed out.
-
-        We must NOT clean up on every idle-wait iteration: during normal
-        serving Attn briefly pauses between dispatches and the FFN's live decode
-        reqs legitimately sit in ``last_batch`` waiting for the next
-        ``AFDReqInput``. Destroying them there would break A→F→A serving and M=1
-        semantics. We therefore only reset the ledger when no more AFD work can
-        arrive:
-
-        * a component reshard drain has fenced admission (Attn has stopped
-          dispatching for good, so ``last_batch`` is terminal), or
-        * a stale ``running_batch`` lingers (legacy path — FFN's running_batch
-          is normally empty, so a non-empty one means orphaned reqs).
-
-        The caller's branch guard already guarantees ``_afd_batchsize_attn is
-        None`` and the pending batch-info queue was drained by
-        ``_afd_process_input_requests`` immediately before, so there is no
-        in-flight AFD work to clobber. We reuse ``_afd_ffn_cleanup_all`` so KV
-        pages and reqs are actually released instead of merely dropping
-        references (which would leak tokens), then clear ``cur_batch`` (which
-        aliases the previous forward's batch object).
+        The NULL FFN side now keeps live requests in ``running_batch`` between
+        Attention dispatches. A normal metadata gap therefore must preserve the
+        mirror; only an installed component admission fence proves that no more
+        AFD work can arrive. The caller has already drained pending batch-info
+        and communicator work before reaching this terminal cleanup.
         """
         from sglang.srt.layers.afd import afd_is_attn
 
@@ -5102,10 +5455,10 @@ class Scheduler(
         admission_fenced = bool(
             getattr(self, "_afd_component_fence_installed", False)
         )
-        running_nonempty = (
-            self.running_batch is not None and not self.running_batch.is_empty()
-        )
-        if not (admission_fenced or running_nonempty):
+        # A non-empty running_batch is the normal NULL-FFN decode mirror, not an
+        # orphan. Preserve it across gaps between Attention dispatches; stale
+        # rids are retired only by _afd_ffn_cleanup_stale on the next snapshot.
+        if not admission_fenced:
             return
 
         self._afd_ffn_cleanup_all()
@@ -6819,11 +7172,49 @@ class Scheduler(
             self.future_map.store_to_map(batch_result.future_indices, batch_result)
             batch_result.copy_to_cpu(return_logprob=self.cur_batch.return_logprob)
 
+    def _is_afd_ffn_null_non_authoritative_output(self) -> bool:
+        """Whether this scheduler result is an FFN-only AFD mirror output."""
+        return (
+            self._afd_scheduler_is_ffn()
+            and self.disaggregation_mode == DisaggregationMode.NULL
+        )
+
     def process_batch_result(
         self,
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        bookkeeping = self._is_afd_ffn_null_non_authoritative_output()
+        if AFD_NULL_DEBUG_ENABLED:
+            dummy = getattr(result, "next_token_ids", None)
+            metadata = getattr(self, "_afd_current_metadata", None) or {}
+            self._afd_null_debug_log(
+                "process_batch_result_entry",
+                dispatch_id=metadata.get("dispatch_id"),
+                metadata_forward_mode=self._afd_null_debug_value(
+                    getattr(self, "_afd_forward_mode", None)
+                ),
+                dummy=self._afd_null_debug_value(dummy),
+                bookkeeping=bookkeeping,
+                **self._afd_null_debug_batch_fields(batch),
+            )
+        if bookkeeping:
+            self.process_batch_result_afd_ffn_null(batch, result)
+            if AFD_NULL_DEBUG_ENABLED:
+                metadata = getattr(self, "_afd_current_metadata", None) or {}
+                self._afd_null_debug_log(
+                    "process_batch_result_after_bookkeeping",
+                    dispatch_id=metadata.get("dispatch_id"),
+                    metadata_forward_mode=self._afd_null_debug_value(
+                        getattr(self, "_afd_forward_mode", None)
+                    ),
+                    bookkeeping=True,
+                    **self._afd_null_debug_batch_fields(
+                        getattr(self, "running_batch", None)
+                    ),
+                )
+            return
+
         if batch.forward_mode.is_decode():
             self.process_batch_result_decode(batch, result)
         elif batch.forward_mode.is_extend():

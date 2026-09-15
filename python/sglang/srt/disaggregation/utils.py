@@ -301,6 +301,7 @@ class TransferBackend(Enum):
     MOONCAKE = "mooncake"
     MORI = "mori"
     NIXL = "nixl"
+    CUDA_IPC = "cuda_ipc"
     ASCEND = "ascend"
     FAKE = "fake"
 
@@ -389,6 +390,23 @@ def get_kv_class(
             KVClassType.SENDER: AscendKVSender,
             KVClassType.RECEIVER: (AscendKVReceiver),
             KVClassType.BOOTSTRAP_SERVER: AscendKVBootstrapServer,
+        }
+        return class_mapping.get(class_type)
+    elif transfer_backend == TransferBackend.CUDA_IPC:
+        from sglang.srt.disaggregation.cuda_ipc import (
+            CudaIpcKVArgs,
+            CudaIpcKVBootstrapServer,
+            CudaIpcKVManager,
+            CudaIpcKVReceiver,
+            CudaIpcKVSender,
+        )
+
+        class_mapping = {
+            KVClassType.KVARGS: CudaIpcKVArgs,
+            KVClassType.MANAGER: CudaIpcKVManager,
+            KVClassType.SENDER: CudaIpcKVSender,
+            KVClassType.RECEIVER: CudaIpcKVReceiver,
+            KVClassType.BOOTSTRAP_SERVER: CudaIpcKVBootstrapServer,
         }
         return class_mapping.get(class_type)
     elif transfer_backend == TransferBackend.NIXL:

@@ -10,6 +10,7 @@
 #include <pybind11/stl.h>
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
+#include <cuda.h>
 
 #include "afd_ipc.h"
 #include "afd_pipeline_driver.h"
@@ -18,6 +19,14 @@
 namespace py = pybind11;
 
 namespace afd_ipc {
+
+static const char* cuda_driver_error_string(CUresult result) {
+    const char* error_string = nullptr;
+    CUresult error_result = cuGetErrorString(result, &error_string);
+    return error_result == CUDA_SUCCESS && error_string != nullptr
+        ? error_string
+        : "unknown CUDA driver error";
+}
 
 // Convert torch dtype to our DtypeCode (matches Python _DTYPE_TO_INT)
 static DtypeCode dtype_to_code(at::ScalarType dtype) {
@@ -260,8 +269,98 @@ private:
     size_t cached_recv_bytes_ = 0;
 };
 
+class PyCudaIpcMemory {
+public:
+    py::tuple export_handle(int64_t ptr, size_t length, int device) {
+        TORCH_CHECK(ptr != 0 && length > 0, "Invalid CUDA allocation");
+        cudaSetDevice(device);
+        CUresult driver_result = cuInit(0);
+        TORCH_CHECK(driver_result == CUDA_SUCCESS, "cuInit failed: ",
+                    cuda_driver_error_string(driver_result));
+        CUdeviceptr allocation_base = 0;
+        size_t allocation_size = 0;
+        driver_result = cuMemGetAddressRange(
+            &allocation_base, &allocation_size, static_cast<CUdeviceptr>(ptr));
+        TORCH_CHECK(driver_result == CUDA_SUCCESS, "cuMemGetAddressRange failed: ",
+                    cuda_driver_error_string(driver_result));
+        const CUdeviceptr requested_ptr = static_cast<CUdeviceptr>(ptr);
+        TORCH_CHECK(requested_ptr >= allocation_base,
+                    "CUDA IPC export pointer precedes allocation base");
+        const size_t offset = static_cast<size_t>(requested_ptr - allocation_base);
+        TORCH_CHECK(offset <= allocation_size && length <= allocation_size - offset,
+                    "CUDA IPC export range exceeds allocation");
+        cudaIpcMemHandle_t handle;
+        cudaError_t err = cudaIpcGetMemHandle(
+            &handle, reinterpret_cast<void*>(allocation_base));
+        TORCH_CHECK(err == cudaSuccess, "cudaIpcGetMemHandle failed: ", cudaGetErrorString(err));
+        return py::make_tuple(
+            py::bytes(reinterpret_cast<const char*>(&handle), sizeof(handle)),
+            offset, allocation_size);
+    }
+
+    int64_t open_handle(const py::bytes& encoded, int device) {
+        std::string raw = encoded;
+        TORCH_CHECK(raw.size() == sizeof(cudaIpcMemHandle_t), "Invalid CUDA IPC handle size");
+        cudaIpcMemHandle_t handle;
+        memcpy(&handle, raw.data(), sizeof(handle));
+        cudaSetDevice(device);
+        void* ptr = nullptr;
+        cudaError_t err = cudaIpcOpenMemHandle(
+            &ptr, handle, cudaIpcMemLazyEnablePeerAccess);
+        TORCH_CHECK(err == cudaSuccess, "cudaIpcOpenMemHandle failed: ", cudaGetErrorString(err));
+        return reinterpret_cast<int64_t>(ptr);
+    }
+
+    void close_handle(int64_t ptr) {
+        if (ptr == 0) return;
+        cudaError_t err = cudaIpcCloseMemHandle(reinterpret_cast<void*>(ptr));
+        TORCH_CHECK(err == cudaSuccess, "cudaIpcCloseMemHandle failed: ", cudaGetErrorString(err));
+    }
+
+    void copy_peer_async(int64_t dst, int dst_device, int64_t src,
+                         int src_device, size_t length) {
+        cudaSetDevice(src_device);
+        cudaStream_t stream = c10::cuda::getCurrentCUDAStream(src_device).stream();
+        cudaError_t err = cudaMemcpyPeerAsync(
+            reinterpret_cast<void*>(dst), dst_device,
+            reinterpret_cast<const void*>(src), src_device, length, stream);
+        TORCH_CHECK(err == cudaSuccess, "cudaMemcpyPeerAsync failed: ", cudaGetErrorString(err));
+    }
+
+    void synchronize(int device) {
+        cudaSetDevice(device);
+        cudaError_t err = cudaStreamSynchronize(
+            c10::cuda::getCurrentCUDAStream(device).stream());
+        TORCH_CHECK(err == cudaSuccess, "CUDA IPC stream synchronization failed: ", cudaGetErrorString(err));
+    }
+
+    bool can_access_peer(int src_device, int dst_device) {
+        int access = 0;
+        cudaError_t err = cudaDeviceCanAccessPeer(&access, src_device, dst_device);
+        TORCH_CHECK(err == cudaSuccess, "cudaDeviceCanAccessPeer failed: ", cudaGetErrorString(err));
+        return access != 0;
+    }
+
+    int driver_version() {
+        int version = 0;
+        cudaError_t err = cudaDriverGetVersion(&version);
+        TORCH_CHECK(err == cudaSuccess, "cudaDriverGetVersion failed: ", cudaGetErrorString(err));
+        return version;
+    }
+};
+
 PYBIND11_MODULE(afd_ipc_cpp, m) {
     m.doc() = "High-performance C++ IPC communication for AF disaggregation";
+
+    py::class_<PyCudaIpcMemory>(m, "CudaIpcMemory")
+        .def(py::init<>())
+        .def("export_handle", &PyCudaIpcMemory::export_handle)
+        .def("open_handle", &PyCudaIpcMemory::open_handle)
+        .def("close_handle", &PyCudaIpcMemory::close_handle)
+        .def("copy_peer_async", &PyCudaIpcMemory::copy_peer_async)
+        .def("synchronize", &PyCudaIpcMemory::synchronize)
+        .def("can_access_peer", &PyCudaIpcMemory::can_access_peer)
+        .def("driver_version", &PyCudaIpcMemory::driver_version);
 
     py::class_<PyAfdIpcComm>(m, "AfdIpcComm")
         .def(py::init<bool, int, int, int, int, const std::string&>(),

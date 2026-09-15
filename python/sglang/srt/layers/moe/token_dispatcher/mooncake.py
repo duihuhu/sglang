@@ -10,6 +10,7 @@ import torch.distributed as dist
 
 from sglang.srt.elastic_ep.elastic_ep import ElasticEPStateManager
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
+from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.dp_attention import get_is_extend_in_batch
 from sglang.srt.layers.moe.token_dispatcher.base import (
     BaseDispatcher,
@@ -160,7 +161,11 @@ class _MooncakeEPDispatcherImpl:
         hidden_states, masked_m, event, hook = self._dispatch_core(
             hidden_states,
             topk_ids,
-            use_fp8=True,
+            # DeepGEMM consumes Mooncake's packed FP8 representation.  On
+            # architectures where DeepGEMM is unavailable (for example SM80),
+            # keep activations in BF16/FP16 for the Triton masked-layout
+            # adapter instead.
+            use_fp8=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM,
         )
         return (
             hidden_states,

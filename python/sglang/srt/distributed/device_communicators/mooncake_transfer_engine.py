@@ -4,9 +4,47 @@ import os
 from typing import List, Optional
 
 from sglang.srt.environ import envs
+from sglang.srt.utils.comm_ledger import record_comm
 from sglang.srt.utils.network import NetworkAddress, get_free_port
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_MOONCAKE_TRANSPORTS = ("nvlink", "rdma", "tcp")
+MOONCAKE_TRANSPORT_ENV = "SGLANG_MOONCAKE_TRANSPORT"
+
+
+def resolve_mooncake_transport(transport: Optional[str] = None) -> str:
+    """Resolve and validate the Mooncake transport, preserving RDMA by default."""
+    value = transport or os.environ.get(MOONCAKE_TRANSPORT_ENV)
+    if not value:
+        if os.environ.get("MC_FORCE_MNNVL"):
+            value = "nvlink"
+        elif os.environ.get("MC_FORCE_TCP"):
+            value = "tcp"
+        else:
+            value = "rdma"
+    value = value.strip().lower()
+    if value not in SUPPORTED_MOONCAKE_TRANSPORTS:
+        raise ValueError(
+            f"Unsupported Mooncake transport {value!r}; expected one of "
+            f"{', '.join(SUPPORTED_MOONCAKE_TRANSPORTS)}."
+        )
+    return value
+
+
+def configure_mooncake_transport_env(transport: str) -> None:
+    """Apply Mooncake's selector flags before TransferEngine.initialize()."""
+    transport = resolve_mooncake_transport(transport)
+    if transport == "nvlink":
+        os.environ["MC_FORCE_MNNVL"] = "true"
+        os.environ.pop("MC_FORCE_TCP", None)
+    elif transport == "tcp":
+        os.environ["MC_FORCE_TCP"] = "1"
+        os.environ.pop("MC_FORCE_MNNVL", None)
+    else:
+        os.environ.pop("MC_FORCE_TCP", None)
+        os.environ.pop("MC_FORCE_MNNVL", None)
+
 
 # Module-level shared engine instance, set by init_mooncake_transfer_engine().
 _mooncake_transfer_engine: Optional["MooncakeTransferEngine"] = None
@@ -98,6 +136,7 @@ class MooncakeTransferEngine:
         hostname: str,
         gpu_id: Optional[int] = None,
         ib_device: Optional[str] = None,
+        transport: Optional[str] = None,
     ):
         try:
             from mooncake.engine import TransferEngine
@@ -112,6 +151,7 @@ class MooncakeTransferEngine:
         self.hostname = hostname
         self.gpu_id = gpu_id if gpu_id is not None else 0
         self.ib_device = get_ib_devices_for_gpu(ib_device, self.gpu_id)
+        self.transport = resolve_mooncake_transport(transport)
 
         self.initialize(
             hostname=self.hostname,
@@ -130,6 +170,7 @@ class MooncakeTransferEngine:
 
         if ret_value != 0:
             logger.debug("Mooncake memory registration %s failed.", ptr)
+        return ret_value
 
     def deregister(self, ptr):
         try:
@@ -140,6 +181,7 @@ class MooncakeTransferEngine:
 
         if ret_value != 0:
             logger.debug("Mooncake memory deregistration %s failed.", ptr)
+        return ret_value
 
     def batch_register(self, ptrs: List[int], lengths: List[int]) -> int:
         """Batch register multiple memory regions."""
@@ -189,10 +231,16 @@ class MooncakeTransferEngine:
                 device_name if device_name is not None else "",
             )
         else:
+            # Mooncake selects MNNVL and TCP through these flags even when its
+            # Python initialize protocol is ``rdma``.  Keep that protocol for
+            # nvlink to support Mooncake releases where direct ``nvlink`` is
+            # not exposed by the Python binding.
+            configure_mooncake_transport_env(self.transport)
+            protocol = "tcp" if self.transport == "tcp" else "rdma"
             ret_value = self.engine.initialize(
                 hostname,
                 "P2PHANDSHAKE",
-                "rdma",
+                protocol,
                 device_name if device_name is not None else "",
             )
         if ret_value != 0:
@@ -216,6 +264,14 @@ class MooncakeTransferEngine:
                 buffer,
                 session_id,
                 peer_buffer_address,
+            )
+        elif self.transport == "tcp":
+            record_comm(
+                "mooncake_tcp",
+                logical_tx_bytes=length,
+                expected_d2h_bytes=length,
+                expected_h2d_bytes=length,
+                tx_calls=1,
             )
 
         return ret
@@ -249,6 +305,15 @@ class MooncakeTransferEngine:
                 session_id,
                 peer_buffer_addresses,
             )
+        elif self.transport == "tcp":
+            total = sum(int(length) for length in lengths)
+            record_comm(
+                "mooncake_tcp",
+                logical_tx_bytes=total,
+                expected_d2h_bytes=total,
+                expected_h2d_bytes=total,
+                tx_calls=1,
+            )
         return ret
 
     def get_session_id(self):
@@ -265,6 +330,7 @@ def init_mooncake_transfer_engine(
     hostname: str,
     gpu_id: Optional[int] = None,
     ib_device: Optional[str] = None,
+    transport: Optional[str] = None,
 ) -> MooncakeTransferEngine:
     """
     Initialize the shared MooncakeTransferEngine. Note: if already
@@ -276,7 +342,7 @@ def init_mooncake_transfer_engine(
     if _mooncake_transfer_engine is not None:
         return _mooncake_transfer_engine
     _mooncake_transfer_engine = MooncakeTransferEngine(
-        hostname=hostname, gpu_id=gpu_id, ib_device=ib_device
+        hostname=hostname, gpu_id=gpu_id, ib_device=ib_device, transport=transport
     )
     return _mooncake_transfer_engine
 

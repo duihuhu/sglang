@@ -170,10 +170,15 @@ class DeepEPBuffer:
                     config.get_nvl_buffer_size_hint(hidden_bytes, group.size()),
                     num_nvl_bytes,
                 )
-                num_rdma_bytes = max(
-                    config.get_rdma_buffer_size_hint(hidden_bytes, group.size()),
-                    num_rdma_bytes,
-                )
+                # DeepEP's legacy intranode path uses no RDMA buffer while
+                # the entire EP group fits in one eight-GPU NVLink domain.
+                # Its official SM80 build disables NVSHMEM and intentionally
+                # rejects RDMA hint queries, so avoid that unsupported call.
+                if group.size() > 8:
+                    num_rdma_bytes = max(
+                        config.get_rdma_buffer_size_hint(hidden_bytes, group.size()),
+                        num_rdma_bytes,
+                    )
         if deepep_mode.enable_low_latency():
             assert num_max_dispatch_tokens_per_rank != -1
             assert num_experts != -1 and num_experts % group.size() == 0
@@ -225,7 +230,7 @@ class DeepEPBuffer:
             low_latency_mode=deepep_mode.enable_low_latency(),
             num_qps_per_rank=num_qps_per_rank,
             # TODO can be false when unneeded
-            allow_mnnvl=True,
+            allow_mnnvl=False,
         )
         return cls._buffer
 
@@ -387,6 +392,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         if (
             deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
             and not get_moe_runner_backend().is_cutlass()
+            and not get_moe_runner_backend().is_triton()
             and not envs.SGLANG_DEEPEP_BF16_DISPATCH.get()
         ):
             # TODO hard code 128 block quant,use fp8 communication
@@ -466,7 +472,12 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             previous_event=previous_event,
             async_finish=self.async_finish,
             allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
-            expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
+            expert_alignment=(
+                128
+                if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                and not get_moe_runner_backend().is_triton()
+                else 1
+            ),
             config=DeepEPConfig.get_instance().normal_dispatch_config,
         )
         get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
@@ -491,26 +502,39 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         topk_weights: torch.Tensor,
     ):
 
-        if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM or _use_aiter or _is_npu:
+        if (
+            deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+            or get_moe_runner_backend().is_triton()
+            or _use_aiter
+            or _is_npu
+        ):
             output = hidden_states
         else:
-            raise NotImplementedError()  # triton runner was supported but it's temporarily disabled
+            raise NotImplementedError(
+                f"DeepEP normal combine does not support runner backend "
+                f"{get_moe_runner_backend().value}."
+            )
 
         previous_event = Buffer.capture() if self.async_finish else None
-        return output, previous_event
+        return output, topk_weights, previous_event
 
-    def combine_b(self, output, previous_event):
-        hidden_states, event = self._combine_core(output, previous_event)
+    def combine_b(self, output, topk_weights, previous_event):
+        hidden_states, event = self._combine_core(
+            output, topk_weights, previous_event
+        )
         event.current_stream_wait() if self.async_finish else ()
         self.handle = None
         self.src2dst = None
         return hidden_states
 
-    def _combine_core(self, x: torch.Tensor, previous_event):
+    def _combine_core(
+        self, x: torch.Tensor, topk_weights: torch.Tensor, previous_event
+    ):
         buffer = self._get_buffer()
         combined_x, _, event = buffer.combine(
             x,
             self.handle,
+            topk_weights=topk_weights,
             async_finish=self.async_finish,
             previous_event=previous_event,
             allocate_on_comm_stream=previous_event is not None,

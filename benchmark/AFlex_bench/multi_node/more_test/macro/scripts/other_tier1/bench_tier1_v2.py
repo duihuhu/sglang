@@ -312,7 +312,7 @@ def deploy(cfg):
     # Pre-warm JIT compilation on both nodes (avoid file lock contention)
     jit_warmup_cmd = (
         f"CUDA_VISIBLE_DEVICES=0 {RMB.PYTHON} -c "
-        "\"import sys; sys.path.insert(0,'/workspace/sglang/python'); "
+        f"\"import sys; sys.path.insert(0,'{RMB.CONTAINER_ROOT}/python'); "
         "from sglang.srt.layers.afd_ipc_cpp import get_module; get_module(); "
         "print('JIT_WARM_OK')\""
     )

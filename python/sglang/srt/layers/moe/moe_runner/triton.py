@@ -22,6 +22,16 @@ from sglang.srt.layers.moe.utils import MoeRunnerBackend
 from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip, is_xpu
 
 if TYPE_CHECKING:
+    from sglang.srt.layers.moe.token_dispatcher.deepep import (
+        DeepEPLLCombineInput,
+        DeepEPLLDispatchOutput,
+        DeepEPNormalCombineInput,
+        DeepEPNormalDispatchOutput,
+    )
+    from sglang.srt.layers.moe.token_dispatcher.flashinfer import (
+        FlashinferCombineInput,
+        FlashinferDispatchOutput,
+    )
     from sglang.srt.layers.moe.token_dispatcher.standard import (
         StandardCombineInput,
         StandardDispatchOutput,
@@ -482,4 +492,326 @@ def post_permute_triton_to_standard(
 
     return StandardCombineInput(
         hidden_states=runner_output.hidden_states,
+    )
+
+
+def _map_global_expert_ids_to_local(
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    runner_config: MoeRunnerConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map global routed expert ids to this EP rank's local weight indices."""
+    from sglang.srt.distributed.parallel_state import get_moe_expert_parallel_rank
+
+    if topk_ids.shape != topk_weights.shape:
+        raise ValueError(
+            f"topk ids/weights shapes differ: {tuple(topk_ids.shape)} vs "
+            f"{tuple(topk_weights.shape)}."
+        )
+    num_local_experts = runner_config.num_local_experts
+    if not num_local_experts:
+        raise ValueError("num_local_experts must be positive for EP dispatch.")
+    local_start = get_moe_expert_parallel_rank() * num_local_experts
+    local_end = local_start + num_local_experts
+    valid = (topk_ids >= local_start) & (topk_ids < local_end)
+    local_ids = torch.where(valid, topk_ids - local_start, -1).to(torch.int32)
+    local_weights = torch.where(valid, topk_weights, 0.0)
+    return local_ids, local_weights
+
+
+@register_pre_permute("flashinfer", "triton")
+def pre_permute_flashinfer_to_triton(
+    dispatch_output: FlashinferDispatchOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> TritonRunnerInput:
+    """Adapt FlashInfer's fixed-slot global routing layout to local Triton MoE."""
+    from sglang.srt.layers.moe.token_dispatcher.standard import StandardDispatchOutput
+    from sglang.srt.layers.moe.topk import StandardTopKOutput
+
+    hidden_states, hidden_states_scale, topk_output, moe_output = dispatch_output
+    if hidden_states_scale is not None or hidden_states.dtype not in (
+        torch.bfloat16,
+        torch.float16,
+    ):
+        raise ValueError(
+            "Flashinfer A2A with Triton requires BF16/FP16 dispatch output."
+        )
+    if hidden_states.ndim != 2:
+        raise ValueError(
+            f"Expected token-major [M, H] hidden states, got {tuple(hidden_states.shape)}."
+        )
+    if moe_output is not None:
+        raise ValueError(
+            "Flashinfer workspace output is reserved for the CUTLASS runner and "
+            "must be disabled for Triton."
+        )
+    if runner_config.no_combine:
+        raise NotImplementedError(
+            "Flashinfer A2A with Triton requires local expert contributions to "
+            "be combined before communication combine."
+        )
+    local_ids, local_weights = _map_global_expert_ids_to_local(
+        topk_output.topk_ids, topk_output.topk_weights, runner_config
+    )
+    if local_ids.shape[0] != hidden_states.shape[0]:
+        raise ValueError(
+            f"Received {hidden_states.shape[0]} hidden rows but "
+            f"{local_ids.shape[0]} routing rows."
+        )
+    standard_dispatch_output = StandardDispatchOutput(
+        hidden_states=hidden_states,
+        hidden_states_scale=None,
+        topk_output=StandardTopKOutput(
+            topk_weights=local_weights,
+            topk_ids=local_ids,
+            router_logits=hidden_states.new_empty((hidden_states.shape[0], 0)),
+        ),
+    )
+    running_state["flashinfer_hidden_states_shape"] = hidden_states.shape
+    return pre_permute_standard_to_triton(
+        standard_dispatch_output, quant_info, runner_config, running_state
+    )
+
+
+@register_post_permute("triton", "flashinfer")
+def post_permute_triton_to_flashinfer(
+    runner_output: TritonRunnerOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> FlashinferCombineInput:
+    from sglang.srt.layers.moe.token_dispatcher.flashinfer import (
+        FlashinferCombineInput,
+    )
+
+    if (
+        runner_output.hidden_states.shape
+        != running_state["flashinfer_hidden_states_shape"]
+    ):
+        raise ValueError(
+            f"Triton output shape {tuple(runner_output.hidden_states.shape)} does "
+            "not preserve Flashinfer fixed-slot shape "
+            f"{tuple(running_state['flashinfer_hidden_states_shape'])}."
+        )
+    return FlashinferCombineInput(hidden_states=runner_output.hidden_states)
+
+
+@register_pre_permute("deepep_normal", "triton")
+def pre_permute_deepep_normal_to_triton(
+    dispatch_output: DeepEPNormalDispatchOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> TritonRunnerInput:
+    """Adapt token-major DeepEP normal output to the generic Triton runner."""
+    from sglang.srt.layers.moe.token_dispatcher.standard import StandardDispatchOutput
+    from sglang.srt.layers.moe.topk import StandardTopKOutput
+
+    (
+        hidden_states,
+        hidden_states_scale,
+        topk_ids,
+        topk_weights,
+        num_recv_tokens_per_expert,
+    ) = dispatch_output
+    if hidden_states_scale is not None or hidden_states.dtype not in (
+        torch.bfloat16,
+        torch.float16,
+    ):
+        raise ValueError(
+            "The Triton deepep_normal adapter requires BF16/FP16 dispatch "
+            "output; disable FP8 dispatch for the selected A2A backend."
+        )
+    if hidden_states.ndim != 2:
+        raise ValueError(
+            "Expected token-major hidden states with shape [num_tokens, "
+            f"hidden_size], got {tuple(hidden_states.shape)}."
+        )
+    if topk_ids.shape != topk_weights.shape:
+        raise ValueError(
+            f"topk ids/weights shapes differ: {tuple(topk_ids.shape)} vs "
+            f"{tuple(topk_weights.shape)}."
+        )
+    if topk_ids.shape[0] != hidden_states.shape[0]:
+        raise ValueError(
+            f"Received {hidden_states.shape[0]} hidden-state rows but "
+            f"{topk_ids.shape[0]} routing rows."
+        )
+    if len(num_recv_tokens_per_expert) != runner_config.num_local_experts:
+        raise ValueError(
+            f"Received counts for {len(num_recv_tokens_per_expert)} experts, "
+            f"expected {runner_config.num_local_experts}."
+        )
+    if runner_config.no_combine:
+        raise NotImplementedError(
+            "The deepep_normal Triton adapter requires the runner to combine "
+            "local expert results before DeepEP combine."
+        )
+
+    local_topk_ids, local_topk_weights = _map_global_expert_ids_to_local(
+        topk_ids, topk_weights, runner_config
+    )
+    standard_dispatch_output = StandardDispatchOutput(
+        hidden_states=hidden_states,
+        hidden_states_scale=None,
+        topk_output=StandardTopKOutput(
+            topk_weights=local_topk_weights,
+            topk_ids=local_topk_ids,
+            router_logits=hidden_states.new_empty((hidden_states.shape[0], 0)),
+        ),
+    )
+    running_state["deepep_normal_hidden_states_shape"] = hidden_states.shape
+    running_state["deepep_normal_topk_ids"] = topk_ids
+    running_state["deepep_normal_topk_weights"] = topk_weights
+    return pre_permute_standard_to_triton(
+        standard_dispatch_output, quant_info, runner_config, running_state
+    )
+
+
+@register_post_permute("triton", "deepep_normal")
+def post_permute_triton_to_deepep_normal(
+    runner_output: TritonRunnerOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> DeepEPNormalCombineInput:
+    """Keep token order and routing metadata expected by normal combine."""
+    from sglang.srt.layers.moe.token_dispatcher.deepep import DeepEPNormalCombineInput
+
+    if (
+        runner_output.hidden_states.shape
+        != running_state["deepep_normal_hidden_states_shape"]
+    ):
+        raise ValueError(
+            f"Triton output shape {tuple(runner_output.hidden_states.shape)} does "
+            "not match the DeepEP normal dispatch shape "
+            f"{tuple(running_state['deepep_normal_hidden_states_shape'])}."
+        )
+
+    return DeepEPNormalCombineInput(
+        hidden_states=runner_output.hidden_states,
+        topk_ids=running_state["deepep_normal_topk_ids"],
+        topk_weights=running_state["deepep_normal_topk_weights"],
+    )
+
+
+@register_pre_permute("deepep_ll", "triton")
+def pre_permute_deepep_ll_to_triton(
+    dispatch_output: DeepEPLLDispatchOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> TritonRunnerInput:
+    """Adapt the expert-major DeepEP/Mooncake LL layout to Triton MoE.
+
+    Low-latency dispatch returns one padded token matrix per local expert.  The
+    regular Triton runner can consume the same data after flattening it and
+    assigning each row to that local expert.  Invalid padded rows are marked
+    with expert id ``-1`` and zero routing weight.
+
+    This is a BF16/FP16 compatibility path for GPUs where DeepGEMM is
+    unavailable (for example, SM80).  Routing weights remain in the dispatcher
+    and are applied exactly once by the subsequent LL combine.
+    """
+    from sglang.srt.layers.moe.token_dispatcher.standard import (
+        StandardDispatchOutput,
+    )
+    from sglang.srt.layers.moe.topk import StandardTopKOutput
+
+    (
+        hidden_states,
+        hidden_states_scale,
+        origin_topk_ids,
+        origin_topk_weights,
+        masked_m,
+        _,
+    ) = dispatch_output
+
+    if hidden_states_scale is not None or hidden_states.dtype not in (
+        torch.bfloat16,
+        torch.float16,
+    ):
+        raise ValueError(
+            "The Triton deepep_ll adapter requires BF16/FP16 dispatch output; "
+            "disable FP8 dispatch for the selected A2A backend."
+        )
+    if hidden_states.ndim != 3:
+        raise ValueError(
+            "Expected expert-major hidden states with shape "
+            f"[num_local_experts, token_capacity, hidden_size], got "
+            f"{tuple(hidden_states.shape)}."
+        )
+    if runner_config.apply_router_weight_on_input:
+        raise NotImplementedError(
+            "The deepep_ll Triton adapter does not support "
+            "apply_router_weight_on_input."
+        )
+    if runner_config.no_combine:
+        raise NotImplementedError(
+            "The deepep_ll Triton adapter requires the runner to combine its "
+            "single local expert result per dispatched row."
+        )
+
+    num_local_experts, token_capacity, hidden_size = hidden_states.shape
+    if masked_m.numel() != num_local_experts:
+        raise ValueError(
+            f"masked_m has {masked_m.numel()} entries, expected "
+            f"{num_local_experts}."
+        )
+
+    token_offsets = torch.arange(token_capacity, device=hidden_states.device)
+    valid_rows = token_offsets.unsqueeze(0) < masked_m.reshape(-1, 1)
+    local_expert_ids = torch.arange(
+        num_local_experts, dtype=torch.int32, device=hidden_states.device
+    ).unsqueeze(1)
+    local_expert_ids = local_expert_ids.expand(-1, token_capacity)
+    local_expert_ids = local_expert_ids.masked_fill(~valid_rows, -1).reshape(-1, 1)
+
+    local_topk_weights = valid_rows.reshape(-1, 1).to(torch.float32)
+    if runner_config.routed_scaling_factor not in (None, 1.0):
+        local_topk_weights.div_(runner_config.routed_scaling_factor)
+
+    flat_hidden_states = hidden_states.reshape(-1, hidden_size)
+    local_topk_output = StandardTopKOutput(
+        topk_weights=local_topk_weights,
+        topk_ids=local_expert_ids,
+        router_logits=flat_hidden_states.new_empty((flat_hidden_states.shape[0], 0)),
+    )
+    standard_dispatch_output = StandardDispatchOutput(
+        hidden_states=flat_hidden_states,
+        hidden_states_scale=None,
+        topk_output=local_topk_output,
+    )
+
+    running_state["deepep_ll_hidden_states_shape"] = hidden_states.shape
+    running_state["deepep_ll_origin_topk_ids"] = origin_topk_ids
+    running_state["deepep_ll_origin_topk_weights"] = origin_topk_weights
+    return pre_permute_standard_to_triton(
+        standard_dispatch_output,
+        quant_info,
+        runner_config,
+        running_state,
+    )
+
+
+@register_post_permute("triton", "deepep_ll")
+def post_permute_triton_to_deepep_ll(
+    runner_output: TritonRunnerOutput,
+    quant_info: TritonMoeQuantInfo,
+    runner_config: MoeRunnerConfig,
+    running_state: dict,
+) -> DeepEPLLCombineInput:
+    """Restore the expert-major layout expected by LL combine."""
+    from sglang.srt.layers.moe.token_dispatcher.deepep import (
+        DeepEPLLCombineInput,
+    )
+
+    return DeepEPLLCombineInput(
+        hidden_states=runner_output.hidden_states.reshape(
+            running_state["deepep_ll_hidden_states_shape"]
+        ),
+        topk_ids=running_state["deepep_ll_origin_topk_ids"],
+        topk_weights=running_state["deepep_ll_origin_topk_weights"],
     )

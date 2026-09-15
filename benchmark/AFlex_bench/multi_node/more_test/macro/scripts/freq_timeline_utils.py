@@ -17,7 +17,7 @@ FREQ_TIMELINE_DIR = HERE / "results" / "freq_timelines"
 TIMELINE_DIR = HERE / "timeline"
 # Bind-mounted path visible inside operator_test on both nodes.
 CONTAINER_LOG_ROOT = (
-    "/workspace/sglang/benchmark/AFlex_bench/multi_node/"
+    f"{RMB.CONTAINER_ROOT}/benchmark/AFlex_bench/multi_node/"
     "more_test/macro/scripts/timeline/logs"
 )
 HOST_LOG_ROOT = TIMELINE_DIR / "logs"

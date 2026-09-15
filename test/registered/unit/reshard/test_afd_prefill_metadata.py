@@ -515,6 +515,7 @@ class TestAFDAuthoritativePrefillBatchConstruction(CustomTestCase):
             _afd_current_metadata=metadata,
             _afd_req_ids=list(req_ids),
             _afd_batchsize_attn=len(req_ids),
+            _afd_forward_mode=ForwardMode.EXTEND,
             _afd_ffn_authoritative_waiting=True,
             waiting_queue=reqs,
             req_to_token_pool=pool,

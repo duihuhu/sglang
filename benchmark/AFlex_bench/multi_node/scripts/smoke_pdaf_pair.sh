@@ -17,11 +17,13 @@ fi
 : "${PREFILL_IP:?PREFILL_IP required}"
 : "${DECODE_IP:?DECODE_IP required}"
 
-CONTAINER="operator_test"
-PYTHON="/usr/bin/python3"
-MODEL="/models/Qwen3-32B/"
-LOGDIR="/workspace/sglang/benchmark/AFlex_bench/multi_node/logs"
-HLOGDIR="/mnt/workspace/lt/sglang/benchmark/AFlex_bench/multi_node/logs"
+CONTAINER="${CONTAINER:-moe-energy}"
+PYTHON="${PYTHON:-/usr/bin/python3}"
+MODEL="${MODEL:-/models/Qwen3-32B/}"
+CONTAINER_ROOT="${CONTAINER_ROOT:-/workspace/moe-tier}"
+HOST_ROOT="${HOST_ROOT:-/mnt/workspace/lt/moe-tier}"
+LOGDIR="$CONTAINER_ROOT/benchmark/AFlex_bench/multi_node/logs"
+HLOGDIR="$HOST_ROOT/benchmark/AFlex_bench/multi_node/logs"
 TAG="${PREFILL_IP##*.}_${DECODE_IP##*.}"
 HEALTH_TIMEOUT="${SMOKE_HEALTH_TIMEOUT:-180}"
 HEALTH_INTERVAL="${SMOKE_HEALTH_INTERVAL:-2}"
@@ -36,7 +38,7 @@ dd() { ssh -o StrictHostKeyChecking=no -o BatchMode=yes "$DECODE_IP" "$@"; }
 dpp() { dp "docker exec $CONTAINER bash -lc \"$1\""; }
 dpd() { dd "docker exec $CONTAINER bash -lc \"$1\""; }
 
-CLEANUP="/workspace/sglang/benchmark/AFlex_bench/multi_node/scripts/cleanup_node.sh"
+CLEANUP="$CONTAINER_ROOT/benchmark/AFlex_bench/multi_node/scripts/cleanup_node.sh"
 
 ports_busy() {
   local ip=$1
@@ -81,7 +83,13 @@ wait_svc() {
 
 echo "=== PDAF pair smoke: prefill=$PREFILL_IP decode=$DECODE_IP ib=$IB_DEV tp=$TP ==="
 
-echo "=== [0] cleanup + verify ports ==="
+echo "=== [0] prepare logs + cleanup + verify ports ==="
+dp "mkdir -p '$HLOGDIR'" || { echo "FAIL: cannot create prefill log directory $HLOGDIR"; exit 1; }
+dd "mkdir -p '$HLOGDIR'" || { echo "FAIL: cannot create decode log directory $HLOGDIR"; exit 1; }
+for logfile in pf pa df da router; do
+  dp "rm -f '$HLOGDIR/${logfile}_${TAG}.log'" || true
+  dd "rm -f '$HLOGDIR/${logfile}_${TAG}.log'" || true
+done
 for attempt in 1 2 3; do
   cleanup_nodes
   busy_p=$(ports_busy "$PREFILL_IP")

@@ -38,6 +38,7 @@ from sglang.srt.utils import (
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
         CombineInput,
+        DispatchOutput,
         StandardDispatchOutput,
     )
 
@@ -343,8 +344,24 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
     def apply(
         self,
         layer: torch.nn.Module,
-        dispatch_output: StandardDispatchOutput,
+        dispatch_output: DispatchOutput,
     ) -> CombineInput:
+        from sglang.srt.layers.moe.token_dispatcher import DispatchOutputChecker
+
+        if not DispatchOutputChecker.format_is_standard(dispatch_output):
+            if not self.runner.runner_backend.is_triton():
+                raise NotImplementedError(
+                    "Unquantized non-standard dispatch currently requires the "
+                    f"Triton runner, got {self.runner.runner_backend}."
+                )
+            quant_info = TritonMoeQuantInfo(
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                b13=getattr(layer, "w13_weight_bias", None),
+                b2=getattr(layer, "w2_weight_bias", None),
+            )
+            return self.runner.run(dispatch_output, quant_info)
+
         return self.forward(
             layer=layer,
             dispatch_output=dispatch_output,

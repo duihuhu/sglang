@@ -118,11 +118,103 @@ class SchedulerOutputProcessorMixin:
                     elem = elem.copy()
                 req.customized_info[k].append(elem)
 
+    def process_batch_result_afd_ffn_null(
+        self: Scheduler,
+        batch: ScheduleBatch,
+        result: Union[GenerationBatchResult, EmbeddingBatchResult],
+    ):
+        """Retire a pure-AF FFN forward without committing its dummy output.
+
+        In NULL disaggregation mode the Attention scheduler is the sole owner of
+        generated tokens and request completion. The FFN worker still runs a
+        mirrored batch, but ``next_token_ids`` is only a shape-compatible dummy.
+        Leave Req/cache/grammar/streaming state untouched and invalidate every
+        ledger reference to that dummy tensor. The following AFDReqInput will
+        restore Req output IDs and the batch-level decode input authoritatively.
+        """
+        assert self._is_afd_ffn_null_non_authoritative_output(), (
+            "AFD FFN bookkeeping-only output processor used outside NULL mode"
+        )
+        if result.copy_done is not None:
+            result.copy_done.synchronize()
+
+        dummy_output_ids = getattr(result, "next_token_ids", None)
+        assert dummy_output_ids is not None, (
+            "NULL-mode AFD FFN result must carry a non-authoritative dummy token tensor"
+        )
+
+        # In overlap mode ``batch`` is a copy, while last_batch/cur_batch retain
+        # the original ScheduleBatch. They share the same output tensor, so clear
+        # all aliases by identity without touching a newer authoritative tensor.
+        for mirror_batch in (
+            batch,
+            getattr(self, "cur_batch", None),
+            getattr(self, "last_batch", None),
+            getattr(self, "running_batch", None),
+        ):
+            if (
+                mirror_batch is not None
+                and getattr(mirror_batch, "output_ids", None) is dummy_output_ids
+            ):
+                mirror_batch.output_ids = None
+
+        assert getattr(batch, "output_ids", None) is None, (
+            "NULL-mode AFD FFN dummy token escaped into the authoritative "
+            "output lifecycle"
+        )
+
+        # Native prefill result processing eventually lets get_next_batch_to_run
+        # merge last_batch into running_batch. The NULL FFN path bypasses both
+        # pieces, so explicitly maintain an equivalent no-KV mirror here. Use
+        # the event-loop-owned batch when overlap result processing handed us a
+        # copy, and never merge the non-authoritative output tensor.
+        result_req_ids = [req.rid for req in batch.reqs]
+        mirror = batch
+        for candidate in (
+            getattr(self, "last_batch", None),
+            getattr(self, "cur_batch", None),
+        ):
+            if candidate is None or candidate is batch:
+                continue
+            if [req.rid for req in getattr(candidate, "reqs", ())] == result_req_ids:
+                mirror = candidate
+                break
+        mirror.output_ids = None
+
+        running = getattr(self, "running_batch", None)
+        if batch.forward_mode.is_extend():
+            if running is None or running.is_empty():
+                self.running_batch = mirror
+            elif running is not mirror:
+                running_rids = {req.rid for req in running.reqs}
+                keep_indices = [
+                    i for i, req in enumerate(mirror.reqs) if req.rid not in running_rids
+                ]
+                if keep_indices:
+                    if len(keep_indices) != len(mirror.reqs):
+                        mirror.filter_batch(keep_indices=keep_indices)
+                    mirror.output_ids = None
+                    running.merge_batch(mirror)
+                    running.output_ids = None
+        else:
+            # DECODE mirrors remain live until a later Attention snapshot omits
+            # their rid. Prefer the canonical running batch over an overlap copy.
+            if running is None or running.is_empty():
+                self.running_batch = mirror
+            elif not all(
+                req.rid in {r.rid for r in running.reqs} for req in batch.reqs
+            ):
+                self.running_batch = mirror
+            self.running_batch.output_ids = None
+
     def process_batch_result_prefill(
         self: Scheduler,
         batch: ScheduleBatch,
         result: Union[GenerationBatchResult, EmbeddingBatchResult],
     ):
+        assert not self._is_afd_ffn_null_non_authoritative_output(), (
+            "NULL-mode AFD FFN dummy token must use bookkeeping-only result processing"
+        )
         skip_stream_req = None
 
         if self.is_generation:
@@ -358,6 +450,9 @@ class SchedulerOutputProcessorMixin:
         batch: ScheduleBatch,
         result: GenerationBatchResult,
     ):
+        assert not self._is_afd_ffn_null_non_authoritative_output(), (
+            "NULL-mode AFD FFN dummy token must use bookkeeping-only result processing"
+        )
         if result.copy_done is not None:
             result.copy_done.synchronize()
 
@@ -894,9 +989,9 @@ class SchedulerOutputProcessorMixin:
         is_idle_batch: bool = False,
     ):
         # FFN perspective produces dummy logits; skip detokenizer entirely.
-        from sglang.srt.layers.afd import afd_is_ffn
-
-        if afd_is_ffn():
+        # Scheduler-local role is authoritative when multiple AF replicas share
+        # a process and the compatibility global perspective is stale.
+        if self._afd_scheduler_is_ffn():
             return
 
         rids = []

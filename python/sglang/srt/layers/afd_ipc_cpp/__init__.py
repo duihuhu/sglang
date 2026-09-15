@@ -4,8 +4,8 @@ Provides lazy compilation of the C++ IPC library on first import.
 Falls back to the pre-built .so if available.
 """
 
-import os
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,7 @@ def get_module():
             "-gencode=arch=compute_89,code=sm_89",
             "-gencode=arch=compute_90,code=sm_90",
         ],
-        extra_ldflags=["-lpthread", "-lrt"],
+        extra_ldflags=["-lcuda", "-lpthread", "-lrt"],
         verbose=False,
     )
     logger.info("[afd_ipc] JIT compilation complete")

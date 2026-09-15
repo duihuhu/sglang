@@ -1,0 +1,29 @@
+﻿Category,Related Work,Scheduler,DVFS/Power Control,Non-Disaggregated,Disaggregated,Dense Model Size,MoE Model Size,Datacenter Hardware,Edge Hardware,Network,Datasets/Traces
+Energy-Saving With SLO,DynamoLLM (HPCA’25),Yes,DVFS,Yes,—,Middle; Large,Middle; Large,H100,—,NVLink,Azure
+Energy-Saving With SLO,BiScale (arXiv’26),Yes,DVFS,—,PDD,Large,—,H100,—,InfiniBand,Azure; ShareGPT
+Energy-Saving With SLO,throttLL’eM (HPCA’25),Yes,DVFS,Yes,—,Small; Middle; Large,Middle,A100; A10G,—,NVLink,Azure
+Energy-Saving With SLO,GreenLLM (DAC’26),Yes,DVFS,—,PDD,Middle,Middle,A100,—,NVLink/NVSwitch,Alibaba; Azure
+Energy-Saving With SLO,PALS (arXiv’26),Yes,Power cap,Yes,—,Small,Small; Middle,A100,—,NVLink; InfiniBand,HellaSwag; GSM8K
+Energy-Saving With SLO,AFlex (arXiv’26),Yes,DVFS,—,PDD + AFD,Middle,Middle,A800,—,NVLink; RDMA,Azure
+Energy-Saving With SLO,EcoInfer (Electronics’26),Yes,DVFS,Yes,—,Small; Middle,Middle,A100,—,NVLink,ShareGPT; GSM8K
+Energy-Saving With SLO,PowerSlider (arXiv’26),Yes,DVFS + Power cap,—,Stage Disagg.,Middle; Large,—,A100; GH200,—,InfiniBand,Azure; Magpie; S1K
+Energy-Saving With SLO,TAPAS (ASPLOS’25),Yes,DVFS + Power cap,Yes,—,Small; Middle; Large,—,A100; H100,—,Not reported,Azure
+Energy-Saving With SLO,GreenCache (PACM’26),Yes,No,Yes,—,Small; Large,—,L40,—,Not reported,ShareGPT; TriviaQA; Azure
+Energy-Saving With SLO,EcoServe (arXiv’25),Yes,No,Yes,PDD (optional),Small; Middle; Large,Middle,H100; A100; A6000; L4; A40,—,PCIe,ShareGPT; LongBench; Azure
+Energy-Saving With SLO,NeuScale (arXiv’26),Yes,No,Yes,—,Large,Large,TPUv4/v5e/v6e,—,ICI; InfiniBand/Ethernet,Azure; LVEval; OpenThoughts
+Energy-Saving With SLO,Energy-Aware Edge LLM Inference,Yes,DVFS,Yes,—,Small,—,—,Jetson; Raspberry Pi; Xiaomi Tablet,N/A,Synthetic
+Energy-Saving With SLO,Layered Prefill (MLSys’26),Yes,No,Yes,—,—,Middle; Large,H100; A100,—,NVLink,ShareGPT; arXiv
+Energy-Saving With SLO,Providing Load Flexibility (AAE’25),Yes,DVFS,Yes,—,Middle,—,A800,—,Not reported,Azure; Solar/Wind
+Energy-Measurement,Req-Token Energy (arXiv’26),No,No,Yes,—,Small,Small; Middle,H100; H200,—,N/A,MATH-500; ARC
+Energy-Measurement,Performance–Energy Trade-offs (SIGMETRICS’26),No,Power cap,Yes,—,Small,—,A100,—,N/A,Workflow benchmarks
+Energy-Measurement,Attention to Detail (arXiv’26),No,No,Yes,—,Small; Middle,—,A100,—,Not reported,AssistantTraces; EvoEval; LongBench
+Energy-Measurement,Distributed-Training Energy (EuroMLSys’26),No,DVFS,Yes,—,Small,Small,GH200; A100,—,Not reported,Training workloads
+Energy-Measurement,Execution-Idle Energy (arXiv’26),No,Power cap (evaluated),Yes,—,Middle,—,A6000; L40; A100; H100; B200,—,InfiniBand; NVLink/PCIe,Cluster telemetry; Azure
+Disaggregated LLM,OPSCALE (arXiv’26),Yes,No,—,OPD,Small; Middle; Large,Middle; Large,A100; GB200,—,NVLink; InfiniBand,Azure; Mooncake
+Disaggregated LLM,AFD-Ledger (arXiv’26),Provisioning,No,Yes,AFD,—,Large,H100/H200/A100/L40S/L4; Ascend 910C,—,Not reported,Synthetic decode
+Disaggregated LLM,MegaScale-Infer (SIGCOMM’25),Yes,No,—,AFD,—,Large,A100; H20; L40S,—,NVLink; InfiniBand; PCIe,Production
+Disaggregated LLM,JANUS (arXiv’26),Yes,No,—,AFD,—,Large,H100,—,NVLink; InfiniBand,ShareGPT; BurstGPT
+Other LLM Systems,Flying Serving (ICS’26),Yes,No,Yes,DP↔TP switching,Small; Large,Large,H200,—,NVLink,ShareGPT; HumanEval
+Other LLM Systems,Patterns behind Chaos (ISCA’26),No,No,Yes,—,—,Large,H100; H20; H800,—,NVLink; Mesh,MMLU; LiveCodeBench
+Other Devices,Analytical Performance/Power Model (ASPLOS’25),Yes,DVFS,Yes,—,Small; Middle,—,Ascend NPU,—,Not reported,Operator traces
+Other Devices,eNPU (MICRO’26),Yes,DVFS,—,PDD,Large,Large,TPU-class NPU,—,3D-torus ICI,Azure

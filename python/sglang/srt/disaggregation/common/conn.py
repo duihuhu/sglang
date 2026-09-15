@@ -591,6 +591,7 @@ class CommonKVReceiver(BaseKVReceiver):
 
     def _setup_bootstrap_infos(self):
         all_bootstrap_infos = []
+        used_cached_bootstrap = False
         # NOTE: key distinguished by bootstrap_addr, prefill_dp_rank, prefill_cp_rank, and target_tp_rank
         for target_cp_rank in self.target_cp_ranks:
             bootstrap_key = f"{self.bootstrap_addr}_{self.prefill_dp_rank}_{target_cp_rank}_{self.target_tp_rank}"
@@ -633,15 +634,19 @@ class CommonKVReceiver(BaseKVReceiver):
                 self.bootstrap_infos = bootstrap_infos
                 self.kv_mgr.connection_pool[bootstrap_key] = self.bootstrap_infos
 
-                # Register kv_args only once to prefill KVManager according to the info fetched from the bootstrap server
+                # Register kv_args once when discovering a route. Backends may
+                # opt into replaying registration on cached routes below.
                 self._register_kv_args()
             else:
                 self.bootstrap_infos = self.kv_mgr.connection_pool[bootstrap_key]
+                used_cached_bootstrap = True
 
             assert len(self.bootstrap_infos) > 0
             all_bootstrap_infos.extend(self.bootstrap_infos)
 
         self.bootstrap_infos = all_bootstrap_infos
+        if used_cached_bootstrap and self._replay_registration_on_cached_route():
+            self._register_kv_args()
 
     def _get_bootstrap_info_from_server(
         self, prefill_dp_rank, prefill_cp_rank, target_tp_rank, target_pp_rank
@@ -707,6 +712,9 @@ class CommonKVReceiver(BaseKVReceiver):
 
     def _register_kv_args(self):
         pass
+
+    def _replay_registration_on_cached_route(self) -> bool:
+        return False
 
     def failure_exception(self):
         raise Exception("Fake KVReceiver Exception")

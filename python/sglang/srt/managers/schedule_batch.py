@@ -587,6 +587,13 @@ class Req(ReqDllmMixin):
         self.lora_id = lora_id
         self.routing_key = routing_key
 
+        # Shared AFD control-plane affinity. These remain attached to the Req
+        # across prefill/decode batches until its coordinator lease is released.
+        self.afd_pa_instance_id: Optional[str] = None
+        self.afd_pf_instance_id: Optional[str] = None
+        self.afd_lease_id: Optional[str] = None
+        self.afd_pair_epoch: int = 0
+
         # Memory pool info
         self.req_pool_idx: Optional[int] = None
         self.mamba_pool_idx: Optional[torch.Tensor] = None  # shape (1)
@@ -1276,6 +1283,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     tbo_split_seq_index: Optional[int] = None
     afd_split_seq_index: Optional[List[int]] = None
     afd_pf_group_ids: Optional[List[int]] = None
+    afd_peer_id: Optional[str] = None
+    afd_lease_id: Optional[str] = None
+    afd_lease_ids: Optional[List[str]] = None
+    afd_pair_epoch: int = 0
+    # Coordinator identity is distinct from the local integer data-plane id.
+    afd_dispatch_identity: Optional[str] = None
+    afd_lease_rid: Optional[str] = None
     global_forward_mode: Optional[ForwardMode] = None
 
     # For processing logprobs
@@ -2125,8 +2139,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.reqs = []
             return
 
-        if len(keep_indices) == len(self.reqs):
-            # No need to filter
+        if keep_indices == list(range(len(self.reqs))):
+            # No filtering or reordering is needed.
             return
 
         keep_indices_device = torch.tensor(
@@ -2282,6 +2296,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             tbo_split_seq_index=self.tbo_split_seq_index,
             afd_split_seq_index=self.afd_split_seq_index,
             afd_pf_group_ids=self.afd_pf_group_ids,
+            afd_peer_id=self.afd_peer_id,
+            afd_lease_id=self.afd_lease_id,
+            afd_pair_epoch=self.afd_pair_epoch,
             global_forward_mode=self.global_forward_mode,
             extend_num_tokens=self.extend_num_tokens,
             extend_seq_lens=extend_seq_lens,
@@ -2345,6 +2362,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             is_prefill_only=self.is_prefill_only,
             seq_lens_cpu=self.seq_lens_cpu,
             enable_overlap=self.enable_overlap,
+            afd_peer_id=self.afd_peer_id,
+            afd_lease_id=self.afd_lease_id,
+            afd_lease_ids=self.afd_lease_ids,
+            afd_pair_epoch=self.afd_pair_epoch,
+            afd_dispatch_identity=self.afd_dispatch_identity,
+            afd_lease_rid=self.afd_lease_rid,
             mamba_track_indices=self.mamba_track_indices,
             mamba_track_mask=self.mamba_track_mask,
             mamba_track_seqlens=self.mamba_track_seqlens,
@@ -2450,6 +2473,9 @@ class ModelWorkerBatch:
     tbo_split_seq_index: Optional[int]
     afd_split_seq_index: Optional[List[int]]
     afd_pf_group_ids: Optional[List[int]]
+    afd_peer_id: Optional[str]
+    afd_lease_id: Optional[str]
+    afd_pair_epoch: int
     global_forward_mode: Optional[ForwardMode]
 
     # For extend

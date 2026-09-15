@@ -413,111 +413,9 @@ class SchedulerDisaggregationPrefillMixin:
         """Prepare exactly the PA-selected PF batch or fail before forwarding."""
         from sglang.srt.managers.scheduler_afd_mixin import SchedulerAFDMixin
 
-        metadata = self._afd_current_metadata
-        dispatch_id = metadata["dispatch_id"] if metadata is not None else None
-        expected_rids = list(self._afd_req_ids or ())
-        local_rids = [req.rid for req in self.waiting_queue]
-        if (
-            metadata is None
-            or expected_rids != list(metadata["req_ids"])
-            or local_rids != expected_rids
-            or self._afd_batchsize_attn != len(expected_rids)
-        ):
-            raise RuntimeError(
-                f"Invalid authoritative AFD PF state dispatch={dispatch_id}: "
-                f"batch_size={self._afd_batchsize_attn}, "
-                f"expected_rids={expected_rids}, local_rids={local_rids}"
-            )
-
-        reqs = list(self.waiting_queue)
-        req_pool_available = self.req_to_token_pool.available_size()
-        req_pool_needed = sum(req.req_pool_idx is None for req in reqs)
-        token_available = self.token_to_kv_pool_allocator.available_size()
-        token_needed = sum(metadata["extend_lens"])
-        logger.info(
-            "AFD PF authoritative prepare dispatch=%s rank=%s flag=%s bs=%d "
-            "req_pool_needed=%d req_pool_available=%d token_needed=%d "
-            "token_available=%d rids=%s",
-            dispatch_id,
-            getattr(self, "tp_rank", -1),
-            self._afd_ffn_authoritative_waiting,
-            len(reqs),
-            req_pool_needed,
-            req_pool_available,
-            token_needed,
-            token_available,
-            expected_rids,
+        return SchedulerAFDMixin._afd_build_authoritative_extend_batch(
+            self, require_exact_waiting=True
         )
-
-        capacity = {
-            "dispatch_id": dispatch_id,
-            "rank": getattr(self, "tp_rank", -1),
-            "req_pool_needed": req_pool_needed,
-            "req_pool_available": req_pool_available,
-            "token_needed": token_needed,
-            "token_available": token_available,
-            "req_ids": expected_rids,
-        }
-        capacities = [capacity]
-        if getattr(self, "tp_size", 1) > 1:
-            import torch.distributed as dist
-
-            capacities = [None] * self.tp_size
-            dist.all_gather_object(
-                capacities, capacity, group=self.tp_cpu_group
-            )
-        failures = [
-            item
-            for item in capacities
-            if item["req_pool_needed"] > item["req_pool_available"]
-            or item["token_needed"] > item["token_available"]
-        ]
-        if failures:
-            raise RuntimeError(
-                f"AFD PF authoritative batch capacity failure "
-                f"dispatch={dispatch_id}: failures={failures}"
-            )
-
-        # init_next_round_input still initializes request/cache bookkeeping, but
-        # PA geometry is restored immediately so local cache history cannot alter
-        # the collective tensor shape.
-        for req in reqs:
-            req.init_next_round_input(self.tree_cache)
-            SchedulerAFDMixin.afd_restore_req_geometry(self, req)
-
-        batch = ScheduleBatch.init_new(
-            reqs,
-            self.req_to_token_pool,
-            self.token_to_kv_pool_allocator,
-            self.tree_cache,
-            self.model_config,
-            self.enable_overlap,
-            self.spec_algorithm,
-        )
-        try:
-            batch.prepare_for_extend()
-        except Exception as exc:
-            raise RuntimeError(
-                f"AFD PF authoritative batch allocation failed "
-                f"dispatch={dispatch_id} rank={getattr(self, 'tp_rank', -1)} "
-                f"req_ids={expected_rids}: {exc}"
-            ) from exc
-
-        from sglang.srt.observability.scheduler_metrics_mixin import PrefillStats
-
-        batch.prefill_stats = PrefillStats.from_authoritative(
-            reqs=reqs,
-            extend_lens=metadata["extend_lens"],
-            seq_lens=metadata["seq_lens"],
-            new_token_ratio=self.new_token_ratio,
-            running_reqs=self.running_batch.reqs,
-            enable_priority_scheduling=self.enable_priority_scheduling,
-        )
-        self.waiting_queue = []
-        batch = self.maybe_prepare_mlp_sync_batch(batch)
-        SchedulerAFDMixin.afd_validate_prefill_batch(self, batch)
-        set_schedule_time_batch(batch)
-        return batch
 
     @torch.no_grad()
     def event_loop_normal_disagg_prefill(self: Scheduler) -> None:
@@ -565,9 +463,9 @@ class SchedulerDisaggregationPrefillMixin:
         # NOTE: interleaved schedule (--afd-async-schedule) uses the same
         # single shared channel — no per-mb channels needed.
         if SchedulerAFDMixin.afd_component_should_eager_init_data_plane(self):
-            from sglang.srt.layers.afd import get_async_communicator
+            from sglang.srt.layers.afd import initialize_afd_data_plane
             try:
-                get_async_communicator()
+                initialize_afd_data_plane()
                 logger.info(
                     "event_loop_afd_disagg_prefill: UCX communicator ready (async=%s)",
                     getattr(self.server_args, "afd_async_schedule", False),

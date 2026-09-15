@@ -38,6 +38,7 @@ from sglang.srt.layers.quantization.compressed_tensors.schemes import (
 from sglang.srt.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from sglang.srt.layers.quantization.fp8_kernel import is_fp8_fnuz
 from sglang.srt.layers.quantization.quark.schemes import QuarkW4A4MXFp4MoE
+from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
 from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config, W4AFp8MoEMethod
 from sglang.srt.utils import get_bool_env_var, is_hip, is_npu
 
@@ -104,11 +105,19 @@ class DeepEPMoE(FusedMoE):
             routed_scaling_factor=routed_scaling_factor,
             **kwargs,
         )
+        self.deepep_mode = get_deepep_mode()
         if _use_aiter or _is_npu:
             self.deprecate_flag = False
         elif deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and isinstance(
             quant_config, Fp8Config
         ):
+            self.deprecate_flag = True
+        elif (
+            isinstance(self.quant_method, UnquantizedFusedMoEMethod)
+            and self.quant_method.runner.runner_backend.is_triton()
+        ):
+            # Reuse the generic runner pipeline. Its DeepEP normal/LL adapters
+            # provide a BF16/FP16 fallback on GPUs without DeepGEMM.
             self.deprecate_flag = True
         else:
             self.deprecate_flag = False
@@ -129,8 +138,6 @@ class DeepEPMoE(FusedMoE):
             self.use_w4afp8 = False
             self.use_fp8_w8a8 = False
             self.use_block_quant = False
-
-        self.deepep_mode = get_deepep_mode()
 
         if (
             self.deepep_mode.enable_low_latency()

@@ -1,0 +1,42 @@
+\section{Related Work}
+
+\noindent{\textbf{LLM serving and resource management.}}
+Modern serving systems improve throughput and latency through iteration-level scheduling, continuous or hybrid batching, request migration, and SLO-aware resource allocation~\cite{yu2022orca,kwon2023vllm,agrawal2024sarathi,sun2024llumnix,duan2024muxserve,hong2025sola}. Constraint-aware schedulers select batch sizes and parallel configurations from workload distributions, while simulation frameworks use operator profiles to explore large deployment spaces~\cite{agrawal2024vidur}. Recent systems further adapt model sharding across prefill and decode or optimize placement over heterogeneous GPUs and networks~\cite{su2025seesaw,jiang2025thunderserve,mei2025helix}. These systems primarily optimize goodput, latency, utilization, or monetary cost; energy is rarely the principal comparison boundary.
+
+\noindent{\textbf{Disaggregated inference.}}
+P/D systems isolate compute-intensive prefill from memory-intensive decode so that each phase can use an independent parallel plan and resource pool. DistServe co-optimizes phase placement and goodput under TTFT/TPOT objectives, while Splitwise studies homogeneous and heterogeneous phase-specific clusters~\cite{zhong2024distserve,patel2024splitwise}. DejaVu streams KV state to support disaggregation and fault tolerance, and Mooncake builds a KVCache-centric transfer and storage substrate~\cite{strati2024dejavu,qin2024mooncake}. Other systems combine disaggregation with chunked prefill, dynamic re-sharding, or data-reduced orchestration to reduce phase interference and transfer pressure~\cite{su2025seesaw}. Beyond P/D, Infinite-LLM separates attention and non-attention execution for distributed long-context serving, MegaScale-Infer disaggregates attention and experts, and OPSCALE provisions individual operators~\cite{lin2024infinitellm,zhu2025megascale,cui2026opscale}. This literature establishes that the disaggregation boundary changes utilization and communication, but does not systematically compare the resulting energy behavior across Native, PD, and AF.
+
+\noindent{\textbf{KV-cache and long-context optimization.}}
+KV-cache work spans paging, compression, sparsity, offloading, streaming, and reuse. PagedAttention reduces fragmentation, RadixAttention reuses shared prefixes, Marconi manages prefix state for hybrid models, and CacheBlend selectively recomputes reusable caches for RAG contexts~\cite{kwon2023vllm,zheng2024sglang,pan2025marconi,yao2025cacheblend}. Quantization and selective-attention methods reduce cache bytes or accessed pages, while unified sparse attention addresses both long-prefill computation and decode KV traffic~\cite{zhang2023h2o,xiao2024streamingllm,li2024snapkv,chen2024arkvale,lin2025qserve,yang2025lserve,gao2025rethinkingkv}. Offloading systems prefetch selected KV entries from CPU memory or exploit memory elsewhere in a scale-up GPU domain~\cite{lee2024infinigen,kumar2025aqua}. CacheGen compresses KV state for network streaming, making it directly relevant to disaggregated transfer cost~\cite{liu2024cachegen}. Long-context systems additionally use elastic sequence parallelism and customizable attention kernels to balance computation, memory, and communication~\cite{wu2024loongserve,ye2025flashinfer}. These methods alter the amount and location of state moved by PD and AF, yet their deployment-level energy consequences remain underexplored.
+
+\noindent{\textbf{Power management and energy-efficient serving.}}
+A growing body of work coordinates runtime decisions with GPU power controls. DynamoLLM profiles model and request-class energy behavior, maintains differently configured instance pools, and uses hierarchical controllers to resize pools and select tensor-parallel and GPU-frequency configurations under latency SLOs~\cite{stojkovic2025dynamollm}. throttLL'eM predicts future batch and KV-cache states and selects an energy-efficient frequency and engine configuration~\cite{kakolyris2025throttll}. GreenLLM applies phase-aware frequency scaling, BiScale combines P/D placement with fine-grained DVFS, and PALS jointly controls GPU power caps and batch size for MoE serving~\cite{liu2025greenllm,basit2026biscale,hankendi2026pals}. AFlex combines P/D and A/F disaggregation into independently provisioned PA, PF, DA, and DF pools with operator--phase-specific frequency control~\cite{hu2026energy}. Fine-grained accelerator models and recent inference-energy benchmarks broaden the available control and measurement methodology~\cite{wang2025using,chung2025mlenergy}. These approaches optimize particular architectures or knobs; our goal is to characterize how the architecture itself changes the available energy trade-off.
+
+\noindent{\textbf{Characterizing performance and energy.}}
+Measurement work shows that power, runtime, and energy must be evaluated together. Distributed-training studies demonstrate that parallel configuration and GPU frequency interact through different computation--communication ratios~\cite{zhang2026distributedenergy}. For inference, recent studies characterize multi-request workflows, request- and token-level costs, and cross-model or cross-hardware behavior~\cite{ifath2026characterizing,vellaisamy2026characterization,chung2025mlenergy}. Hardware benchmarks likewise expose substantial performance variation across GPU and accelerator families~\cite{agrawal2024vidur}. However, these studies focus on training, monolithic inference, application workflows, or broad benchmark coverage. They do not isolate the energy impact of alternative disaggregation boundaries under matched workloads, networks, parallel plans, and GPU characteristics.
+
+\noindent{\textbf{Comparison with existing work.}}
+Table~\ref{tab:related-comparison} summarizes the scope of representative studies. Existing measurement work mainly considers monolithic inference or distributed training, whereas disaggregated-serving work primarily targets performance and resource efficiency. Energy-aware serving systems optimize a particular architecture or control mechanism. In contrast, our study uses a common measurement methodology to compare Native, PD, and AF serving across multiple GPU classes, interconnects, and parallel deployment paradigms.
+
+\begin{table*}[t]
+  \caption{Scope comparison with representative existing work. ``Energy'' denotes direct energy measurement or optimization.}
+  \label{tab:related-comparison}
+  \centering
+  \small
+  \setlength{\tabcolsep}{4pt}
+  \begin{tabular}{lccccccc}
+    \toprule
+    Work & Energy & Native & PD & AF & Multiple GPU classes & Network effects & DP/TP/EP \\
+    \midrule
+    DistServe~\cite{zhong2024distserve} & -- & -- & Yes & -- & -- & -- & -- \\
+    MegaScale-Infer~\cite{zhu2025megascale} & -- & -- & -- & Yes & Yes & Yes & Yes \\
+    DynamoLLM~\cite{stojkovic2025dynamollm} & Yes & Yes & -- & -- & -- & -- & TP \\
+    BiScale~\cite{basit2026biscale} & Yes & -- & Yes & -- & -- & Yes & -- \\
+    throttLL'eM~\cite{kakolyris2025throttll} & Yes & Yes & -- & -- & Yes & -- & TP \\
+    Req-Token Energy~\cite{vellaisamy2026characterization} & Yes & Yes & -- & -- & Yes & -- & -- \\
+    Zhang et al.~\cite{zhang2026distributedenergy} & Yes & -- & -- & -- & Yes & Yes & Yes \\
+    \textbf{This work} & Yes & Yes & Yes & Yes & Yes & Yes & Yes \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+

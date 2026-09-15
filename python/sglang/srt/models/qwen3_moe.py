@@ -35,6 +35,7 @@ from sglang.srt.distributed import (
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.eplb.expert_location_dispatch import ExpertLocationDispatchInfo
+from sglang.srt.layers.afd import afd_is_ffn
 from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
 from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.layers.layernorm import RMSNorm
@@ -43,7 +44,7 @@ from sglang.srt.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from sglang.srt.layers.logits_processor import LogitsProcessor
+from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.moe import (
     get_moe_a2a_backend,
     should_use_flashinfer_cutlass_moe_fp4_allgather,
@@ -261,7 +262,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             prefix=add_prefix("gate", prefix),
         )
 
-        if get_moe_a2a_backend().is_deepep():
+        if (
+            get_moe_a2a_backend().is_deepep()
+            or get_moe_a2a_backend().is_mooncake()
+            or get_moe_a2a_backend().is_flashinfer()
+        ):
             # TODO: we will support tp < ep in the future
             self.ep_size = get_moe_expert_parallel_world_size()
             self.num_experts = (
@@ -277,9 +282,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         use_reduce_scatter: bool = False,
     ) -> torch.Tensor:
 
-        if (
-            not get_moe_a2a_backend().is_deepep()
-            and not get_moe_a2a_backend().is_ascend_fuseep()
+        if not (
+            get_moe_a2a_backend().is_deepep()
+            or get_moe_a2a_backend().is_mooncake()
+            or get_moe_a2a_backend().is_flashinfer()
+            or get_moe_a2a_backend().is_ascend_fuseep()
         ):
             return self.forward_normal(
                 hidden_states, should_allreduce_fusion, use_reduce_scatter
@@ -986,6 +993,16 @@ class Qwen3MoeForCausalLM(nn.Module):
             hidden_states, aux_hidden_states = hidden_states
 
         if self.pp_group.is_last_rank:
+            if afd_is_ffn():
+                dummy = torch.zeros(
+                    forward_batch.batch_size,
+                    self.config.vocab_size,
+                    dtype=hidden_states.dtype,
+                    device=hidden_states.device,
+                )
+                return LogitsProcessorOutput(
+                    next_token_logits=dummy, hidden_states=None
+                )
             return self.logits_processor(
                 input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
             )
