@@ -1,0 +1,3387 @@
+{
+  "complete": false,
+  "stage": "inspect",
+  "manifest": {
+    "stage": "inspect",
+    "source_hashes": {
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+      "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+      "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+      "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+      "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+      "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c"
+    },
+    "gpus": [
+      [
+        {
+          "index": 0,
+          "uuid": "GPU-eecbbf51-ea12-9acb-ed58-3abedfd67a96",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-e557aebd-3ac2-78ab-e105-86b66532aedb",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        }
+      ],
+      [
+        {
+          "index": 0,
+          "uuid": "GPU-eecbbf51-ea12-9acb-ed58-3abedfd67a96",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        },
+        {
+          "index": 1,
+          "uuid": "GPU-e557aebd-3ac2-78ab-e105-86b66532aedb",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        }
+      ]
+    ],
+    "frozen_plan": null,
+    "created_unix_s": 1789543345.922649
+  },
+  "rows": [
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "experiment": {
+        "run_id": "m2pool-static-natural-mixed-4096-cap485-rep21-inspect",
+        "pool": "static-natural",
+        "mode": "mixed-4096",
+        "rep": 21,
+        "cap": 485,
+        "stage": "inspect",
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 22.197713799651904,
+        "p95_jct_s": 27.425659889355302,
+        "mean_queue_s": 7.6035898716435995,
+        "mean_ttft_s": 7.917000345879616,
+        "mean_tpot_s": 0.11244656262812823,
+        "makespan_s": 28.28207972832024,
+        "state_slot_seconds": 8844.698970137164,
+        "peak_active": 485,
+        "peak_kv_tokens": 294881,
+        "peak_state_slots": 485,
+        "blocks": {
+          "prefill_other": 81,
+          "request_limit": 3
+        },
+        "max_arrival_lateness_ms": 1.0761144906282494
+      },
+      "capacity": [
+        485,
+        1458643,
+        485,
+        485
+      ],
+      "payload_fingerprint": "141300ee3a6e35d00ed1fa3e709d45fea937ac8d29007baaaaf28f062b5aaece",
+      "server_initial_audit": {
+        "path": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0006.json",
+        "memory": {
+          "allocated": 73707920384,
+          "reserved": 73788293120,
+          "peak_allocated_since_previous_audit": 73707920384,
+          "peak_reserved_since_previous_audit": 79152807936,
+          "cuda_free": 10039328768,
+          "cuda_total": 85167243264,
+          "cuda_used": 75127914496
+        },
+        "audit_index": 6,
+        "unique_storage_bytes": 73564497988
+      },
+      "server_final_audit": {
+        "path": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0007.json",
+        "memory": {
+          "allocated": 73737353216,
+          "reserved": 79194750976,
+          "peak_allocated_since_previous_audit": 78115962880,
+          "peak_reserved_since_previous_audit": 83596673024,
+          "cuda_free": 4632870912,
+          "cuda_total": 85167243264,
+          "cuda_used": 80534372352
+        },
+        "audit_index": 7,
+        "unique_storage_bytes": 73593915936
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "experiment": {
+        "run_id": "m2pool-unified-old-cap-mixed-4096-cap485-rep21-inspect",
+        "pool": "unified-old-cap",
+        "mode": "mixed-4096",
+        "rep": 21,
+        "cap": 485,
+        "stage": "inspect",
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 23.03365665188449,
+        "p95_jct_s": 28.392318760976195,
+        "mean_queue_s": 7.816342286544636,
+        "mean_ttft_s": 8.171825654200191,
+        "mean_tpot_s": 0.1170222913203488,
+        "makespan_s": 29.250577125698328,
+        "state_slot_seconds": 9223.404146159068,
+        "peak_active": 485,
+        "peak_kv_tokens": 294881,
+        "peak_state_slots": 485,
+        "blocks": {
+          "prefill_other": 81,
+          "request_limit": 3
+        },
+        "max_arrival_lateness_ms": 1.076947733759881
+      },
+      "capacity": [
+        485,
+        1458643,
+        485,
+        485
+      ],
+      "payload_fingerprint": "141300ee3a6e35d00ed1fa3e709d45fea937ac8d29007baaaaf28f062b5aaece",
+      "server_initial_audit": {
+        "path": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0006.json",
+        "memory": {
+          "allocated": 73828745728,
+          "reserved": 73903636480,
+          "peak_allocated_since_previous_audit": 73828754432,
+          "peak_reserved_since_previous_audit": 79295414272,
+          "cuda_free": 9923985408,
+          "cuda_total": 85167243264,
+          "cuda_used": 75243257856
+        },
+        "audit_index": 6,
+        "unique_storage_bytes": 73679497936
+      },
+      "server_final_audit": {
+        "path": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0007.json",
+        "memory": {
+          "allocated": 73883387904,
+          "reserved": 79383494656,
+          "peak_allocated_since_previous_audit": 78246730240,
+          "peak_reserved_since_previous_audit": 83718307840,
+          "cuda_free": 4444127232,
+          "cuda_total": 85167243264,
+          "cuda_used": 80723116032
+        },
+        "audit_index": 7,
+        "unique_storage_bytes": 73732127108
+      }
+    }
+  ],
+  "means": [
+    {
+      "arm": "static-natural",
+      "mode": "mixed-4096",
+      "cap": 485,
+      "n": 1,
+      "mean": {
+        "mean_jct_s": 22.197713799651904,
+        "p95_jct_s": 27.425659889355302,
+        "mean_queue_s": 7.6035898716435995,
+        "mean_ttft_s": 7.917000345879616,
+        "mean_tpot_s": 0.11244656262812823,
+        "makespan_s": 28.28207972832024,
+        "state_slot_seconds": 8844.698970137164,
+        "peak_active": 485.0,
+        "peak_kv_tokens": 294881.0,
+        "peak_state_slots": 485.0,
+        "max_arrival_lateness_ms": 1.0761144906282494
+      },
+      "min": {
+        "mean_jct_s": 22.197713799651904,
+        "p95_jct_s": 27.425659889355302,
+        "mean_queue_s": 7.6035898716435995,
+        "mean_ttft_s": 7.917000345879616,
+        "mean_tpot_s": 0.11244656262812823,
+        "makespan_s": 28.28207972832024,
+        "state_slot_seconds": 8844.698970137164,
+        "peak_active": 485,
+        "peak_kv_tokens": 294881,
+        "peak_state_slots": 485,
+        "max_arrival_lateness_ms": 1.0761144906282494
+      },
+      "max": {
+        "mean_jct_s": 22.197713799651904,
+        "p95_jct_s": 27.425659889355302,
+        "mean_queue_s": 7.6035898716435995,
+        "mean_ttft_s": 7.917000345879616,
+        "mean_tpot_s": 0.11244656262812823,
+        "makespan_s": 28.28207972832024,
+        "state_slot_seconds": 8844.698970137164,
+        "peak_active": 485,
+        "peak_kv_tokens": 294881,
+        "peak_state_slots": 485,
+        "max_arrival_lateness_ms": 1.0761144906282494
+      }
+    },
+    {
+      "arm": "unified-old-cap",
+      "mode": "mixed-4096",
+      "cap": 485,
+      "n": 1,
+      "mean": {
+        "mean_jct_s": 23.03365665188449,
+        "p95_jct_s": 28.392318760976195,
+        "mean_queue_s": 7.816342286544636,
+        "mean_ttft_s": 8.171825654200191,
+        "mean_tpot_s": 0.1170222913203488,
+        "makespan_s": 29.250577125698328,
+        "state_slot_seconds": 9223.404146159068,
+        "peak_active": 485.0,
+        "peak_kv_tokens": 294881.0,
+        "peak_state_slots": 485.0,
+        "max_arrival_lateness_ms": 1.076947733759881
+      },
+      "min": {
+        "mean_jct_s": 23.03365665188449,
+        "p95_jct_s": 28.392318760976195,
+        "mean_queue_s": 7.816342286544636,
+        "mean_ttft_s": 8.171825654200191,
+        "mean_tpot_s": 0.1170222913203488,
+        "makespan_s": 29.250577125698328,
+        "state_slot_seconds": 9223.404146159068,
+        "peak_active": 485,
+        "peak_kv_tokens": 294881,
+        "peak_state_slots": 485,
+        "max_arrival_lateness_ms": 1.076947733759881
+      },
+      "max": {
+        "mean_jct_s": 23.03365665188449,
+        "p95_jct_s": 28.392318760976195,
+        "mean_queue_s": 7.816342286544636,
+        "mean_ttft_s": 8.171825654200191,
+        "mean_tpot_s": 0.1170222913203488,
+        "makespan_s": 29.250577125698328,
+        "state_slot_seconds": 9223.404146159068,
+        "peak_active": 485,
+        "peak_kv_tokens": 294881,
+        "peak_state_slots": 485,
+        "max_arrival_lateness_ms": 1.076947733759881
+      }
+    }
+  ],
+  "memory": [
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0001.json",
+      "pid": 280157,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543402.174146,
+      "memory": {
+        "allocated": 73682693120,
+        "reserved": 74012688384,
+        "peak_allocated_since_previous_audit": 73934342144,
+        "peak_reserved_since_previous_audit": 74012688384,
+        "cuda_free": 9814933504,
+        "cuda_total": 85167243264,
+        "cuda_used": 75352309760
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73539278796,
+      "allocated_minus_visible_storages": 143414324,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 15873724
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0002.json",
+      "pid": 280157,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543402.1993613,
+      "memory": {
+        "allocated": 73695280128,
+        "reserved": 73756835840,
+        "peak_allocated_since_previous_audit": 73695280128,
+        "peak_reserved_since_previous_audit": 74025271296,
+        "cuda_free": 10070786048,
+        "cuda_total": 85167243264,
+        "cuda_used": 75096457216
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73550951820,
+      "allocated_minus_visible_storages": 144328308,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 27546748
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0003.json",
+      "pid": 280157,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543406.7295063,
+      "memory": {
+        "allocated": 73682827776,
+        "reserved": 74341941248,
+        "peak_allocated_since_previous_audit": 74038326784,
+        "peak_reserved_since_previous_audit": 74379689984,
+        "cuda_free": 9485680640,
+        "cuda_total": 85167243264,
+        "cuda_used": 75681562624
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73539411648,
+      "allocated_minus_visible_storages": 143416128,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 16006576
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0004.json",
+      "pid": 280157,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543406.771978,
+      "memory": {
+        "allocated": 73695414784,
+        "reserved": 73756835840,
+        "peak_allocated_since_previous_audit": 73695414784,
+        "peak_reserved_since_previous_audit": 74354524160,
+        "cuda_free": 10070786048,
+        "cuda_total": 85167243264,
+        "cuda_used": 75096457216
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73551084672,
+      "allocated_minus_visible_storages": 144330112,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 27679600
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0005.json",
+      "pid": 280157,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543437.8227859,
+      "memory": {
+        "allocated": 73695333376,
+        "reserved": 79140225024,
+        "peak_allocated_since_previous_audit": 78073253888,
+        "peak_reserved_since_previous_audit": 83569410048,
+        "cuda_free": 4687396864,
+        "cuda_total": 85167243264,
+        "cuda_used": 80479846400
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73552824964,
+      "allocated_minus_visible_storages": 142508412,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 29419892
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0006.json",
+      "pid": 280157,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543441.9249387,
+      "memory": {
+        "allocated": 73707920384,
+        "reserved": 73788293120,
+        "peak_allocated_since_previous_audit": 73707920384,
+        "peak_reserved_since_previous_audit": 79152807936,
+        "cuda_free": 10039328768,
+        "cuda_total": 85167243264,
+        "cuda_used": 75127914496
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73564497988,
+      "allocated_minus_visible_storages": 143422396,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 41092916
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0007.json",
+      "pid": 280157,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543472.326511,
+      "memory": {
+        "allocated": 73737353216,
+        "reserved": 79194750976,
+        "peak_allocated_since_previous_audit": 78115962880,
+        "peak_reserved_since_previous_audit": 83596673024,
+        "cuda_free": 4632870912,
+        "cuda_total": 85167243264,
+        "cuda_used": 80534372352
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73593915936,
+      "allocated_minus_visible_storages": 143437280,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 70510864
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0001.json",
+      "pid": 280238,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543402.174491,
+      "memory": {
+        "allocated": 73682693120,
+        "reserved": 74012688384,
+        "peak_allocated_since_previous_audit": 73934342144,
+        "peak_reserved_since_previous_audit": 74012688384,
+        "cuda_free": 9814933504,
+        "cuda_total": 85167243264,
+        "cuda_used": 75352309760
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73539278796,
+      "allocated_minus_visible_storages": 143414324,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 15873724
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0002.json",
+      "pid": 280238,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543402.1993933,
+      "memory": {
+        "allocated": 73695280128,
+        "reserved": 73756835840,
+        "peak_allocated_since_previous_audit": 73695280128,
+        "peak_reserved_since_previous_audit": 74025271296,
+        "cuda_free": 10070786048,
+        "cuda_total": 85167243264,
+        "cuda_used": 75096457216
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73550951820,
+      "allocated_minus_visible_storages": 144328308,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 27546748
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0003.json",
+      "pid": 280238,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543406.7295132,
+      "memory": {
+        "allocated": 73682827776,
+        "reserved": 74377592832,
+        "peak_allocated_since_previous_audit": 74080294400,
+        "peak_reserved_since_previous_audit": 74392272896,
+        "cuda_free": 9450029056,
+        "cuda_total": 85167243264,
+        "cuda_used": 75717214208
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73539411648,
+      "allocated_minus_visible_storages": 143416128,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 16006576
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0004.json",
+      "pid": 280238,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543406.7720003,
+      "memory": {
+        "allocated": 73695414784,
+        "reserved": 73756835840,
+        "peak_allocated_since_previous_audit": 73695414784,
+        "peak_reserved_since_previous_audit": 74377592832,
+        "cuda_free": 10070786048,
+        "cuda_total": 85167243264,
+        "cuda_used": 75096457216
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73551084672,
+      "allocated_minus_visible_storages": 144330112,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 27679600
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0005.json",
+      "pid": 280238,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543437.4158592,
+      "memory": {
+        "allocated": 73695333376,
+        "reserved": 79140225024,
+        "peak_allocated_since_previous_audit": 78073253888,
+        "peak_reserved_since_previous_audit": 83569410048,
+        "cuda_free": 4687396864,
+        "cuda_total": 85167243264,
+        "cuda_used": 80479846400
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73552824964,
+      "allocated_minus_visible_storages": 142508412,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 29419892
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0006.json",
+      "pid": 280238,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543441.9251246,
+      "memory": {
+        "allocated": 73707920384,
+        "reserved": 73788293120,
+        "peak_allocated_since_previous_audit": 73707920384,
+        "peak_reserved_since_previous_audit": 79152807936,
+        "cuda_free": 10039328768,
+        "cuda_total": 85167243264,
+        "cuda_used": 75127914496
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73564497988,
+      "allocated_minus_visible_storages": 143422396,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 41092916
+      }
+    },
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0007.json",
+      "pid": 280238,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543471.9092803,
+      "memory": {
+        "allocated": 73695333376,
+        "reserved": 79140225024,
+        "peak_allocated_since_previous_audit": 78073253888,
+        "peak_reserved_since_previous_audit": 83596673024,
+        "cuda_free": 4687396864,
+        "cuda_total": 85167243264,
+        "cuda_used": 80479846400
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73552824964,
+      "allocated_minus_visible_storages": 142508412,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "HybridReqToTokenPool",
+          "scalars": {
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null
+          }
+        },
+        "allocator": {
+          "class": "TokenToKVPoolAllocator",
+          "scalars": {
+            "size": 1458643,
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true
+          }
+        },
+        "kv_pool": {
+          "class": "HybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 10.954686641693115
+          }
+        },
+        "mamba_pool": {
+          "class": "MambaPool",
+          "scalars": {
+            "size": 485,
+            "device": "cuda",
+            "debug_memory_pool": false,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "replayssm_is_kda": false,
+            "replayssm_write_pos": null,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "mem_usage": 9.825897216796875,
+            "num_mamba_layers": 20,
+            "conv_slice_axis": 1,
+            "_conv_fuse_ok": true
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 10550482656,
+        "cache_allocator": 11774174416,
+        "other_tensor": 29419892
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0001.json",
+      "pid": 281333,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543540.944124,
+      "memory": {
+        "allocated": 73727950848,
+        "reserved": 74063020032,
+        "peak_allocated_since_previous_audit": 73970027008,
+        "peak_reserved_since_previous_audit": 74063020032,
+        "cuda_free": 9764601856,
+        "cuda_total": 85167243264,
+        "cuda_used": 75402641408
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73582666764,
+      "allocated_minus_visible_storages": 145284084,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22379714176,
+        "cache_allocator": 0,
+        "other_tensor": 4204588
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0002.json",
+      "pid": 281333,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543540.9679694,
+      "memory": {
+        "allocated": 73751028224,
+        "reserved": 73794584576,
+        "peak_allocated_since_previous_audit": 73751036928,
+        "peak_reserved_since_previous_audit": 74086088704,
+        "cuda_free": 10033037312,
+        "cuda_total": 85167243264,
+        "cuda_used": 75134205952
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73604767764,
+      "allocated_minus_visible_storages": 146260460,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22357621352,
+        "cache_allocator": 0,
+        "other_tensor": 48398412
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0003.json",
+      "pid": 281333,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543545.7312834,
+      "memory": {
+        "allocated": 73778511360,
+        "reserved": 74413244416,
+        "peak_allocated_since_previous_audit": 74133981184,
+        "peak_reserved_since_previous_audit": 74438410240,
+        "cuda_free": 9414377472,
+        "cuda_total": 85167243264,
+        "cuda_used": 75752865792
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73631261732,
+      "allocated_minus_visible_storages": 147249628,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22379779824,
+        "cache_allocator": 0,
+        "other_tensor": 52733908
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0004.json",
+      "pid": 281333,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543545.768918,
+      "memory": {
+        "allocated": 73801588736,
+        "reserved": 73859596288,
+        "peak_allocated_since_previous_audit": 73801597440,
+        "peak_reserved_since_previous_audit": 74436313088,
+        "cuda_free": 9968025600,
+        "cuda_total": 85167243264,
+        "cuda_used": 75199217664
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73653362732,
+      "allocated_minus_visible_storages": 148226004,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22357621352,
+        "cache_allocator": 0,
+        "other_tensor": 96993380
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0005.json",
+      "pid": 281333,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543577.8102264,
+      "memory": {
+        "allocated": 73805668352,
+        "reserved": 79295414272,
+        "peak_allocated_since_previous_audit": 78169321984,
+        "peak_reserved_since_previous_audit": 83655393280,
+        "cuda_free": 4532207616,
+        "cuda_total": 85167243264,
+        "cuda_used": 80635035648
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73657396936,
+      "allocated_minus_visible_storages": 148271416,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22382072944,
+        "cache_allocator": 0,
+        "other_tensor": 76575992
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0006.json",
+      "pid": 281333,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543581.8305342,
+      "memory": {
+        "allocated": 73828745728,
+        "reserved": 73903636480,
+        "peak_allocated_since_previous_audit": 73828754432,
+        "peak_reserved_since_previous_audit": 79295414272,
+        "cuda_free": 9923985408,
+        "cuda_total": 85167243264,
+        "cuda_used": 75243257856
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73679497936,
+      "allocated_minus_visible_storages": 149247792,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22357621352,
+        "cache_allocator": 0,
+        "other_tensor": 123128584
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0007.json",
+      "pid": 281333,
+      "tp_rank": 0,
+      "cuda_device": 0,
+      "created_unix_s": 1789543613.447909,
+      "memory": {
+        "allocated": 73883387904,
+        "reserved": 79383494656,
+        "peak_allocated_since_previous_audit": 78246730240,
+        "peak_reserved_since_previous_audit": 83718307840,
+        "cuda_free": 4444127232,
+        "cuda_total": 85167243264,
+        "cuda_used": 80723116032
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73732127108,
+      "allocated_minus_visible_storages": 151260796,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22382072944,
+        "cache_allocator": 0,
+        "other_tensor": 151306164
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0001.json",
+      "pid": 281414,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543540.943598,
+      "memory": {
+        "allocated": 73727950848,
+        "reserved": 74063020032,
+        "peak_allocated_since_previous_audit": 73970027008,
+        "peak_reserved_since_previous_audit": 74063020032,
+        "cuda_free": 9764601856,
+        "cuda_total": 85167243264,
+        "cuda_used": 75402641408
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73582666764,
+      "allocated_minus_visible_storages": 145284084,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22379714176,
+        "cache_allocator": 0,
+        "other_tensor": 4204588
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0002.json",
+      "pid": 281414,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543540.9680662,
+      "memory": {
+        "allocated": 73751028224,
+        "reserved": 73794584576,
+        "peak_allocated_since_previous_audit": 73751036928,
+        "peak_reserved_since_previous_audit": 74086088704,
+        "cuda_free": 10033037312,
+        "cuda_total": 85167243264,
+        "cuda_used": 75134205952
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73604767764,
+      "allocated_minus_visible_storages": 146260460,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22357621352,
+        "cache_allocator": 0,
+        "other_tensor": 48398412
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0003.json",
+      "pid": 281414,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543545.7314086,
+      "memory": {
+        "allocated": 73728151040,
+        "reserved": 74369204224,
+        "peak_allocated_since_previous_audit": 74083620864,
+        "peak_reserved_since_previous_audit": 74415341568,
+        "cuda_free": 9458417664,
+        "cuda_total": 85167243264,
+        "cuda_used": 75708825600
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73582865264,
+      "allocated_minus_visible_storages": 145285776,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22379779824,
+        "cache_allocator": 0,
+        "other_tensor": 4337440
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0004.json",
+      "pid": 281414,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543545.768919,
+      "memory": {
+        "allocated": 73751228416,
+        "reserved": 73794584576,
+        "peak_allocated_since_previous_audit": 73751237120,
+        "peak_reserved_since_previous_audit": 74392272896,
+        "cuda_free": 10033037312,
+        "cuda_total": 85167243264,
+        "cuda_used": 75134205952
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73604966264,
+      "allocated_minus_visible_storages": 146262152,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22357621352,
+        "cache_allocator": 0,
+        "other_tensor": 48596912
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0005.json",
+      "pid": 281414,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543577.3976722,
+      "memory": {
+        "allocated": 73755308032,
+        "reserved": 79266054144,
+        "peak_allocated_since_previous_audit": 78119166464,
+        "peak_reserved_since_previous_audit": 83611353088,
+        "cuda_free": 4561567744,
+        "cuda_total": 85167243264,
+        "cuda_used": 80605675520
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73609000468,
+      "allocated_minus_visible_storages": 146307564,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22382072944,
+        "cache_allocator": 0,
+        "other_tensor": 28179524
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0006.json",
+      "pid": 281414,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543581.8302007,
+      "memory": {
+        "allocated": 73778385408,
+        "reserved": 73840721920,
+        "peak_allocated_since_previous_audit": 73778394112,
+        "peak_reserved_since_previous_audit": 79266054144,
+        "cuda_free": 9986899968,
+        "cuda_total": 85167243264,
+        "cuda_used": 75180343296
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73631101468,
+      "allocated_minus_visible_storages": 147283940,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22357621352,
+        "cache_allocator": 0,
+        "other_tensor": 74732116
+      }
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "file": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0007.json",
+      "pid": 281414,
+      "tp_rank": 1,
+      "cuda_device": 1,
+      "created_unix_s": 1789543613.0296469,
+      "memory": {
+        "allocated": 73755308032,
+        "reserved": 79266054144,
+        "peak_allocated_since_previous_audit": 78119166464,
+        "peak_reserved_since_previous_audit": 83653296128,
+        "cuda_free": 4561567744,
+        "cuda_total": 85167243264,
+        "cuda_used": 80605675520
+      },
+      "request_table_shape": [
+        486,
+        1048580
+      ],
+      "effective_request_cap": 485,
+      "token_capacity": 1458643,
+      "unique_python_visible_storage_bytes": 73609000468,
+      "allocated_minus_visible_storages": 146307564,
+      "device_used_minus_torch_reserved": 1339621376,
+      "pool_attributes": {
+        "request_pool": {
+          "class": "UnifiedHybridReqToTokenPool",
+          "scalars": {
+            "_mamba_sub_pool_name": "mamba",
+            "_shared_mamba_size": 1025,
+            "size": 485,
+            "_alloc_size": 486,
+            "max_context_len": 1048580,
+            "device": "cuda",
+            "mamba_ping_pong_track_buffer_size": 2,
+            "enable_mamba_extra_buffer": false,
+            "enable_mamba_extra_buffer_lazy": false,
+            "enable_memory_saver": false,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "mamba_ckpt_pool": null,
+            "pre_alloc_size": 0
+          }
+        },
+        "allocator": {
+          "class": "UnifiedMambaTokenToKVPoolAllocator",
+          "scalars": {
+            "page_size": 1,
+            "device": "cuda",
+            "need_sort": false,
+            "is_not_in_free_group": true,
+            "lazy_compaction": true
+          }
+        },
+        "kv_pool": {
+          "class": "UnifiedHybridLinearKVPool",
+          "scalars": {
+            "size": 1458643,
+            "device": "cuda",
+            "full_layer_nums": 7,
+            "page_size": 1,
+            "start_layer": 0,
+            "layer_transfer_counter": null,
+            "head_num": 16,
+            "head_dim": 72,
+            "use_mla": true,
+            "mem_usage": 0.0
+          }
+        },
+        "mamba_pool": {
+          "class": "UnifiedMambaPool",
+          "scalars": {
+            "_sub_pool_name": "mamba",
+            "_max_size": 1025,
+            "size": 1025,
+            "device": "cuda",
+            "enable_custom_mem_pool": false,
+            "custom_mem_pool": null,
+            "num_mamba_layers": 20,
+            "enable_linear_replayssm": false,
+            "linear_replayssm_cache_len": 16,
+            "replayssm_write_pos": null,
+            "replayssm_is_kda": false,
+            "enable_linear_replayssm_spec": false,
+            "replayssm_spec_fold": false,
+            "replayssm_cache_base": null,
+            "replayssm_is_flush": null,
+            "debug_memory_pool": false,
+            "conv_shard_groups": null,
+            "conv_slice_axis": 1,
+            "mem_usage": 20.760358452796936,
+            "_conv_fuse_ok": false
+          }
+        }
+      },
+      "scope": "Idle census; Python-visible tensors deduplicated by storage. Non-Torch and invisible allocations remain residuals.",
+      "storage_categories_bytes": {
+        "weights": 49160308480,
+        "request_table": 2038439520,
+        "request_pool": 22382072944,
+        "cache_allocator": 0,
+        "other_tensor": 28179524
+      }
+    }
+  ],
+  "correctness": [
+    {
+      "session": "session-00-static-natural-mixed-4096",
+      "records": [
+        {
+          "repeat": 1,
+          "input_length": 512,
+          "output_ids": [
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821
+          ]
+        },
+        {
+          "repeat": 1,
+          "input_length": 8192,
+          "output_ids": [
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821
+          ]
+        },
+        {
+          "repeat": 2,
+          "input_length": 512,
+          "output_ids": [
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821
+          ]
+        },
+        {
+          "repeat": 2,
+          "input_length": 8192,
+          "output_ids": [
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821
+          ]
+        }
+      ]
+    },
+    {
+      "session": "session-01-unified-old-cap-mixed-4096",
+      "records": [
+        {
+          "repeat": 1,
+          "input_length": 512,
+          "output_ids": [
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821
+          ]
+        },
+        {
+          "repeat": 1,
+          "input_length": 8192,
+          "output_ids": [
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821
+          ]
+        },
+        {
+          "repeat": 2,
+          "input_length": 512,
+          "output_ids": [
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821
+          ]
+        },
+        {
+          "repeat": 2,
+          "input_length": 8192,
+          "output_ids": [
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821,
+            1821
+          ]
+        }
+      ]
+    }
+  ],
+  "counts": {
+    "runs": 2,
+    "requests": 1214,
+    "warmups": 2,
+    "warmup_requests": 1214
+  },
+  "artifact_sha256": {
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/m2pool-static-natural-mixed-4096-cap485-rep21-inspect.json": "07b839d455db2a4acceb1f325350bbecaf5a767b5edfb7606b5b705d449c4b17",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/m2pool-static-natural-mixed-4096-cap485-rep21-warmup.json": "eb95e25a0dad8fb2c9f174434854be8b8f5ac58583088b497591aa1c8ce454f9",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0001.json": "a189749a13905cc77d1df4cc5a2bd7566f5d1b8a9b5cf6429a16cc4d56959147",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0002.json": "5f5588bcc6d23d55a60ef97c905628cf8b214218188281d5d2e498253d282a19",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0003.json": "82f59e470115a7ef59ea3bb2c52daa5ec8ea46828cac28fd9e09e4ed5acc0c9b",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0004.json": "d647edf729a900729037a12e35d786227e8fe804e3094741d31cf097c2711482",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0005.json": "e35d8d235f2b827c4f70f7c8c307b99fe14f95d453340aca177beaec72f22ef4",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0006.json": "54dfbe57707a0def420b64cfa0be85cc76dc89719709d901c7fd47d123232cbd",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank0-0007.json": "9520a545aba046f96386f9ce25f169bd224ccc5267f9e0376ca7acdc5bdaaf5d",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0001.json": "5edb135130624d37c1b7c57c4fd7a9a48133df68f296488001a7252bd59b5c35",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0002.json": "dae3666fd158a319fdfc8397ba7c0e1b9ff0feaed983bd72a8245e5e38706ad7",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0003.json": "ebe09be5e0f81e9d794b562871e21a1dc10cfa8b61d63b710c604f55c61bdb61",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0004.json": "3c85e4e3bca2b9e1e34ea5e2767dc351c4888a3e32b8a10e1cdc8765e02285fd",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0005.json": "b90248866b533a985b3bf0356f489b51bb1a4061d096e0824ffab8a048eeae8c",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0006.json": "b03da838a2b02c6edfc5c1b781b752891ad93af43b552f4f1daefd61346ce20c",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/memory/rank1-0007.json": "3afac7fe410b334f62c6d171800e573c60af149aecd90d2ae00648a82327c1d5",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-00-static-natural-mixed-4096/correctness-static-natural.json": "91b067d4d70ca3fe3fb4b94660fe1555d36ec15652ef18249c1935412c994a31",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/m2pool-unified-old-cap-mixed-4096-cap485-rep21-inspect.json": "0a586654f4b9fad65af583985e8e75a0de402e7bf82c3ea980b07bd0877dc699",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/m2pool-unified-old-cap-mixed-4096-cap485-rep21-warmup.json": "82659e80adfc2fa73a7b05081017b3f909a556a260b87af912883b019bfb3497",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0001.json": "41b0b3bf1bcaf9cfa7862a338e1f9015a060b1fe7fdb6eda828c95ea3c8449bb",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0002.json": "3994db12cbc2f9fa4691aef084950d6b2e9cb89adf16cf452a3dd3742ac3699e",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0003.json": "56992299cf7b1bcf7d79cc7aa488cabbe4ab50a83df359eed0a81a36f63779e5",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0004.json": "6a86d4ea34659f7419981ce985290c4d5a1b265175d8348c1491bed5b88d2abe",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0005.json": "0422709fa126b7095a1573d8c18bf6b305acfd45169eacc34e864f28f0bac7c7",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0006.json": "fa11484cfd9fccb968c3c5bae2c40c9e3bab841301126d9db779e35796ae407a",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank0-0007.json": "8206e72a41f575868a5a3d999dd290f9e02bf7e8dce6b997559ce8a2faeba760",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0001.json": "61770b38af3a1eff4b2c48570cf5c709169bf060bc0d9b73ca287b77a253b5e0",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0002.json": "30f9086a9e27e0613c445d1e6818384ba26835cd445fc25773ead8561ba766ca",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0003.json": "19607fde754b44e470256784c56b1c12043b1443ad2d927242358278e4e8ff14",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0004.json": "4535f38902800c378d083520e88bd601de01fcfec14f29c69abe5dc0d22559b3",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0005.json": "4ad3a610afa2bb3214df15d4d7bb38ca1e9174914369c0f0f8e3618937f51d50",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0006.json": "8184010461566a28a1e5e7aaa17fcbf2f2190705aac4e2abddf2d73f9bd9bf4d",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/memory/rank1-0007.json": "424d7703022c33acaa2fc5cdd808e613d08afd15432353fd03ce0d49492b4e86",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/live_inspect01/session-01-unified-old-cap-mixed-4096/correctness-unified-old-cap.json": "b911de383affaab06b027b9b1ddb7228cd1ca300e0ef7e5a279b9dd49e6cca9e"
+  },
+  "scope": "Same-model workload-specific pool/cap test; inspect timing is diagnostic, not a formal performance comparison."
+}

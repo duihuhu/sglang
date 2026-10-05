@@ -257,6 +257,10 @@ from sglang.srt.managers.scheduler_components.recv_skipper import (
 from sglang.srt.managers.scheduler_components.request_receiver import (
     SchedulerRequestReceiver,
 )
+from sglang.srt.managers.scheduler_components.tenant_resource_tracker import (
+    TenantBatchTracker,
+    TenantResourceTracker,
+)
 from sglang.srt.managers.scheduler_components.weight_updater import (
     SchedulerWeightUpdaterManager,
 )
@@ -352,6 +356,9 @@ def _prewarm_hccl_group(device, group, device_module):
 TEST_RETRACT = envs.SGLANG_TEST_RETRACT.get()
 TEST_RETRACT_INTERVAL = envs.SGLANG_TEST_RETRACT_INTERVAL.get()
 TEST_RETRACT_NO_PREFILL_BS = envs.SGLANG_TEST_RETRACT_NO_PREFILL_BS.get()
+ENABLE_TENANT_RESOURCE_TRACKING = get_bool_env_var(
+    "SGLANG_ENABLE_TENANT_RESOURCE_TRACKING"
+)
 
 
 STEP_MAX_US = 2_000_000
@@ -584,6 +591,7 @@ class Scheduler(
 
         # Init running status
         self.init_running_status()
+        self.init_tenant_resource_tracker()
 
         # Init chunked prefill
         self.init_chunked_prefill()
@@ -1157,6 +1165,56 @@ class Scheduler(
         self.forward_sleep_time = None
         self._engine_paused = False
 
+    def init_tenant_resource_tracker(self) -> None:
+        is_primary_scheduler = (
+            self.ps.pp_rank == 0
+            and self.ps.attn_tp_rank == 0
+            and self.ps.attn_cp_rank == 0
+        )
+        is_resource_policy = self.schedule_policy in (
+            "tenant-instant-share",
+            "tenant-vector-debt",
+            "tenant-lifecycle-cost",
+        )
+        tracking_enabled = ENABLE_TENANT_RESOURCE_TRACKING or is_resource_policy
+        self.tenant_resource_tracker = (
+            TenantResourceTracker(
+                lazy_extra_buffer=bool(
+                    getattr(
+                        self.req_to_token_pool,
+                        "enable_mamba_extra_buffer_lazy",
+                        False,
+                    )
+                )
+            )
+            if tracking_enabled and is_primary_scheduler
+            else None
+        )
+        self.tenant_batch_tracker = (
+            TenantBatchTracker() if tracking_enabled and is_primary_scheduler else None
+        )
+
+    def observe_tenant_resources(self, *batches: Optional[ScheduleBatch]) -> None:
+        tracker = self.tenant_resource_tracker
+        if tracker is None:
+            return
+
+        reqs = []
+        for candidate in (
+            self.running_batch,
+            self.last_batch,
+            self.cur_batch_for_debug,
+            *batches,
+        ):
+            if candidate is not None:
+                reqs.extend(candidate.reqs)
+        if self.chunked_req is not None:
+            reqs.append(self.chunked_req)
+        if self.enable_overlap and hasattr(self, "result_queue"):
+            for pending_batch, _ in self.result_queue:
+                reqs.extend(pending_batch.reqs)
+        tracker.observe(reqs)
+
     def init_chunked_prefill(self):
         self.chunked_prefill_size = get_schedule().chunked_prefill_size
         uses_transformers_backend = (
@@ -1216,6 +1274,11 @@ class Scheduler(
             self.enable_hierarchical_cache,
             self.enable_priority_scheduling,
             self.schedule_low_priority_values_first,
+            tenant_resource_tracker=self.tenant_resource_tracker,
+            state_capacity=int(
+                getattr(getattr(self.req_to_token_pool, "mamba_pool", None), "size", 1)
+            ),
+            kv_capacity=self.max_total_num_tokens,
         )
         self.prefill_delayer: Optional[PrefillDelayer] = None
         self.prefill_bs_tracker = RecentPrefillBatchSizeTracker(
@@ -1735,11 +1798,14 @@ class Scheduler(
             self.running_batch = plan.running_batch
             batch = plan.batch_to_run
             self.cur_batch_for_debug = batch
+            if batch is not None:
+                self.observe_tenant_resources(batch)
 
             # Launch the current batch
             if batch:
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
+                self.observe_tenant_resources(batch)
             else:
                 # When the server is idle, do self-check and re-init some states.
                 self._sched_idled = True
@@ -1779,6 +1845,8 @@ class Scheduler(
             self.running_batch = plan.running_batch
             batch = plan.batch_to_run
             self.cur_batch_for_debug = batch
+            if batch is not None:
+                self.observe_tenant_resources(batch)
             disable_overlap_for_batch = self.is_disable_overlap_for_batch(
                 batch, last_batch=self.last_batch
             )
@@ -1818,6 +1886,9 @@ class Scheduler(
             # It depends on the result of the last batch (e.g., grammar), so we run it after the last batch is processed.
             if self.is_generation:
                 self.launch_batch_sample_if_needed(batch_result, batch)
+
+            if batch is not None or self.last_batch is not None:
+                self.observe_tenant_resources(batch)
 
             # Update last_batch
             self.last_batch = batch
@@ -2722,6 +2793,9 @@ class Scheduler(
             if self._abort_on_queued_limit(req):
                 return
             self._prefetch_kvcache(req)
+            self.policy.on_request_queued(
+                req, self.waiting_queue, is_retracted=is_retracted
+            )
             self.waiting_queue.append(req)
             req.time_stats.set_wait_queue_entry_time()
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -3154,6 +3228,52 @@ class Scheduler(
         res = min(res, self.req_to_token_pool.available_size())
         return res
 
+    def _prefill_req_limit_reached(
+        self, running_bs, selected_requests, reused_slots, candidate_reuses_slot
+    ):
+        if getattr(self, "_tenant_legacy_slot_gate", False):
+            return selected_requests >= self.get_num_allocatable_reqs(running_bs)
+        if selected_requests >= get_parallel().pp_max_micro_batch_size - running_bs:
+            return True
+        # A continuation participates in the batch but reuses its request slot.
+        new_slots = selected_requests - reused_slots + int(not candidate_reuses_slot)
+        return new_slots > self.req_to_token_pool.available_size()
+
+    def _tenant_activation_limit_reached(
+        self, selected_requests, reused_slots, candidate_reuses_slot
+    ):
+        limit = getattr(self, "_tenant_new_activation_limit", 0)
+        return (
+            limit > 0
+            and not candidate_reuses_slot
+            and selected_requests - reused_slots >= limit
+        )
+
+    def _record_tenant_admission_block(self, reason, running_bs, req=None, adder=None):
+        tracker = self.tenant_batch_tracker
+        if tracker is None or not tracker.capture_events:
+            return
+        mamba = getattr(self.req_to_token_pool, "mamba_allocator", None)
+        tracker.record_admission_block({
+            "reason": reason,
+            "running_requests": running_bs,
+            "selected_requests": len(adder.can_run_list) if adder is not None else 0,
+            "selected_reusing_request_slots": sum(
+                r.req_pool_idx is not None for r in adder.can_run_list
+            ) if adder is not None else 0,
+            "new_activation_limit": getattr(self, "_tenant_new_activation_limit", 0),
+            "waiting_requests": len(self.waiting_queue),
+            "runtime_cap": get_parallel().pp_max_micro_batch_size,
+            "request_slots_free": self.req_to_token_pool.available_size(),
+            "state_slots_free": mamba.available_size() if mamba is not None else None,
+            "kv_tokens_free": self.token_to_kv_pool_allocator.available_size(),
+            "candidate_rid": getattr(req, "rid", None),
+            "budgets": {name: getattr(adder, name, None) for name in (
+                "rem_total_tokens", "cur_rem_tokens", "rem_input_tokens",
+                "rem_chunk_tokens", "rem_mamba_slots",
+            )} if adder is not None else None,
+        })
+
     def get_new_batch_prefill(self, running_batch: ScheduleBatch) -> NextBatchPlan:
         prefill_delayer_single_pass = None
         if self.prefill_delayer:
@@ -3226,6 +3346,7 @@ class Scheduler(
             and self.chunked_req is None
             and not self.enable_priority_preemption
         ):
+            self._record_tenant_admission_block("request_limit", running_bs)
             running_batch.batch_is_full = True
             return None, running_batch
 
@@ -3293,13 +3414,17 @@ class Scheduler(
         mamba_allocator = getattr(self.req_to_token_pool, "mamba_allocator", None)
         if mamba_allocator is not None:
             mamba_allocator.alloc_group_begin(len(self.waiting_queue))
+        reused_req_slots = sum(r.req_pool_idx is not None for r in adder.can_run_list)
         # Get requests from the waiting queue to a new prefill batch
         for req in self.waiting_queue:
             if self.enable_lora and not self._can_schedule_lora_req(req, running_loras):
                 continue
 
             running_bs = len(running_batch.reqs)
-            if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
+            if self._prefill_req_limit_reached(
+                running_bs, len(adder.can_run_list), reused_req_slots,
+                req.req_pool_idx is not None,
+            ):
                 running_batch.batch_is_full = True
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 # In prefill mode, prealloc queue and transfer queue can also take memory,
@@ -3312,7 +3437,20 @@ class Scheduler(
                     not self.enable_priority_preemption
                     or not adder.preempt_to_schedule(req, self.server_args)
                 ):
+                    self._record_tenant_admission_block(
+                        "request_limit", running_bs, req, adder
+                    )
                     break
+
+            if self._tenant_activation_limit_reached(
+                len(adder.can_run_list), reused_req_slots,
+                req.req_pool_idx is not None,
+            ):
+                self._record_tenant_admission_block(
+                    "activation_pacing", running_bs, req, adder
+                )
+                # This is voluntary pacing, not exhaustion: retry next pass.
+                break
 
             if self.enable_hicache_storage:
                 prefetch_done = self.tree_cache.check_prefetch_progress(req.rid)
@@ -3330,11 +3468,16 @@ class Scheduler(
                 has_chunked_req=(self.chunked_req is not None),
                 truncation_align_size=self.truncation_align_size,
             )
+            if adder.can_run_list and adder.can_run_list[-1] is req:
+                reused_req_slots += int(req.req_pool_idx is not None)
 
             if self.enable_lora:
                 running_loras.add(req.lora_id)
 
             if res != AddReqResult.CONTINUE:
+                self._record_tenant_admission_block(
+                    f"prefill_{res.name.lower()}", running_bs, req, adder
+                )
                 if res == AddReqResult.NO_TOKEN:
                     if self.enable_hierarchical_cache:
                         # Set batch_is_full after making sure there are requests that can be served
@@ -3372,6 +3515,7 @@ class Scheduler(
 
         can_run_set = set(can_run_list)
         self.waiting_queue = [x for x in self.waiting_queue if x not in can_run_set]
+        self.policy.on_requests_admitted(can_run_list, self.waiting_queue)
         if adder.preempt_list:
             for req in adder.preempt_list:
                 self._add_request_to_queue(req)
@@ -3944,6 +4088,7 @@ class Scheduler(
             self.batch_result_processor.process_batch_result_idle(batch, result)
 
         self._record_step_counters(batch, result)
+        self.policy.on_batch_processed(batch)
 
         self.metrics_reporter.log_batch_result_stats(batch, result)
 
@@ -3964,6 +4109,10 @@ class Scheduler(
             return
         if all(is_health_check_generate_req(req) for req in batch.reqs):
             return
+        if self.tenant_batch_tracker is not None:
+            self.tenant_batch_tracker.record(
+                batch, result, waiting_requests=len(self.waiting_queue)
+            )
         prev = self._prev_step
         self._prev_step = (batch.forward_iter, batch.launch_ts, is_prefill)
         # An idle pass keeps forward_iter contiguous (forward_ct advances in run_batch).
@@ -4297,6 +4446,27 @@ class Scheduler(
         )
         ret["startup_time"] = self.startup_time
         ret["effective_max_running_requests_per_dp"] = self.max_running_requests
+        ret["tenant_slot_gate_code"] = int(not getattr(self, "_tenant_legacy_slot_gate", False))
+        ret["tenant_new_activation_limit"] = getattr(self, "_tenant_new_activation_limit", 0)
+        ret["tenant_vtc_request_weight"] = self.policy.vtc_request_weight
+        ret["tenant_vtc_input_weight"] = self.policy.vtc_input_weight
+        ret["tenant_vtc_output_weight"] = self.policy.vtc_output_weight
+        ret["tenant_vtc_input_quadratic_weight"] = (
+            self.policy.vtc_input_quadratic_weight
+        )
+        ret["tenant_vtc_input_output_weight"] = self.policy.vtc_input_output_weight
+        ret["tenant_vtc_output_quadratic_weight"] = (
+            self.policy.vtc_output_quadratic_weight
+        )
+        if self.schedule_policy == "tenant-vtc":
+            ret["tenant_vtc_trace"] = self.policy.vtc_snapshot()
+        ret["tenant_lifecycle_state_weight"] = self.policy.lifecycle_state_weight
+        ret["tenant_lifecycle_kv_weight"] = self.policy.lifecycle_kv_weight
+        if self.tenant_resource_tracker is not None:
+            self.observe_tenant_resources()
+            ret["tenant_resource_trace"] = self.tenant_resource_tracker.snapshot()
+        if self.tenant_batch_tracker is not None:
+            ret["tenant_batch_trace"] = self.tenant_batch_tracker.snapshot()
 
         if get_exec().moe.elastic_ep_backend is not None:
             from sglang.srt.elastic_ep.elastic_ep import ElasticEPStateManager
@@ -4340,6 +4510,17 @@ class Scheduler(
                 "speculative_accept_threshold_acc",
                 "dspark_force_budget_frac",
                 "dspark_clear_info_records",
+                "tenant_schedule_policy_code",
+                "tenant_slot_gate_code",
+                "tenant_new_activation_limit",
+                "tenant_vtc_request_weight",
+                "tenant_vtc_input_weight",
+                "tenant_vtc_output_weight",
+                "tenant_vtc_input_quadratic_weight",
+                "tenant_vtc_input_output_weight",
+                "tenant_vtc_output_quadratic_weight",
+                "tenant_lifecycle_state_weight",
+                "tenant_lifecycle_kv_weight",
             ]
         )
 
@@ -4381,6 +4562,54 @@ class Scheduler(
                     )
                     if_success = False
                     break
+            elif k == "tenant_slot_gate_code" and v not in (0, 1):
+                logging.warning("tenant_slot_gate_code must be 0 (legacy) or 1 (reuse-aware).")
+                if_success = False
+                break
+            elif k == "tenant_new_activation_limit":
+                if type(v) is not int or not 0 <= v <= self.max_running_requests:
+                    logging.warning("tenant_new_activation_limit must be an integer in [0, max_running_requests].")
+                    if_success = False
+                    break
+                if not self.is_fully_idle():
+                    logging.warning("Activation-pacing experiments require an idle scheduler.")
+                    if_success = False
+                    break
+            elif k == "tenant_schedule_policy_code" and int(v) not in (0, 1, 2, 3, 4):
+                logging.warning(
+                    "tenant_schedule_policy_code must be 0 (fcfs), 1 "
+                    "(tenant-vtc), 2 (tenant-vector-debt), or 3 "
+                    "(tenant-lifecycle-cost), or 4 (tenant-instant-share), "
+                    f"got {v!r}."
+                )
+                if_success = False
+                break
+            elif k in (
+                "tenant_vtc_request_weight",
+                "tenant_vtc_input_weight",
+                "tenant_vtc_output_weight",
+                "tenant_vtc_input_quadratic_weight",
+                "tenant_vtc_input_output_weight",
+                "tenant_vtc_output_quadratic_weight",
+            ) and float(v) < 0:
+                logging.warning(f"{k} must be non-negative.")
+                if_success = False
+                break
+            elif k in (
+                "tenant_lifecycle_state_weight",
+                "tenant_lifecycle_kv_weight",
+            ) and float(v) < 0:
+                logging.warning(f"{k} must be non-negative.")
+                if_success = False
+                break
+
+            if k.startswith("tenant_") and not ENABLE_TENANT_RESOURCE_TRACKING:
+                logging.warning(
+                    "Tenant policy experiment controls require "
+                    "SGLANG_ENABLE_TENANT_RESOURCE_TRACKING=1."
+                )
+                if_success = False
+                break
 
         if if_success:
             if (
@@ -4398,6 +4627,15 @@ class Scheduler(
             # DSpark control keys are worker commands, not server args; route
             # them to the draft worker and keep them out of the override.
             remaining = dict(server_args_dict)
+            activation_limit = remaining.pop("tenant_new_activation_limit", None)
+            if activation_limit is not None:
+                self._tenant_new_activation_limit = activation_limit
+            slot_gate_code = remaining.pop("tenant_slot_gate_code", None)
+            if slot_gate_code is not None:
+                if not self.is_fully_idle():
+                    logging.warning("Slot-gate experiment controls require an idle scheduler.")
+                    return SetInternalStateReqOutput(updated=False)
+                self._tenant_legacy_slot_gate = slot_gate_code == 0
             frac = remaining.pop("dspark_force_budget_frac", None)
             if "dspark_force_budget_frac" in server_args_dict:
                 self.draft_worker.set_dspark_forced_budget_frac(
@@ -4405,6 +4643,90 @@ class Scheduler(
                 )
             if remaining.pop("dspark_clear_info_records", None):
                 self.draft_worker.clear_info_records()
+            tenant_policy_code = remaining.pop("tenant_schedule_policy_code", None)
+            tenant_request_weight = remaining.pop(
+                "tenant_vtc_request_weight", None
+            )
+            tenant_input_weight = remaining.pop("tenant_vtc_input_weight", None)
+            tenant_output_weight = remaining.pop("tenant_vtc_output_weight", None)
+            tenant_input_quadratic_weight = remaining.pop(
+                "tenant_vtc_input_quadratic_weight", None
+            )
+            tenant_input_output_weight = remaining.pop(
+                "tenant_vtc_input_output_weight", None
+            )
+            tenant_output_quadratic_weight = remaining.pop(
+                "tenant_vtc_output_quadratic_weight", None
+            )
+            lifecycle_state_weight = remaining.pop(
+                "tenant_lifecycle_state_weight", None
+            )
+            lifecycle_kv_weight = remaining.pop(
+                "tenant_lifecycle_kv_weight", None
+            )
+            if tenant_policy_code is not None:
+                if not self.is_fully_idle():
+                    logging.warning(
+                        "Tenant policy experiment controls require an idle scheduler."
+                    )
+                    return SetInternalStateReqOutput(updated=False)
+                policy_name = (
+                    {
+                        0: "fcfs",
+                        1: "tenant-vtc",
+                        2: "tenant-vector-debt",
+                        3: "tenant-lifecycle-cost",
+                        4: "tenant-instant-share",
+                    }[
+                        int(tenant_policy_code)
+                    ]
+                    if tenant_policy_code is not None
+                    else self.schedule_policy
+                )
+                self.schedule_policy = policy_name
+                self.init_tenant_resource_tracker()
+                self.policy = SchedulePolicy(
+                    policy_name,
+                    self.tree_cache,
+                    self.enable_hierarchical_cache,
+                    self.enable_priority_scheduling,
+                    self.schedule_low_priority_values_first,
+                    tenant_resource_tracker=self.tenant_resource_tracker,
+                    state_capacity=int(
+                        getattr(
+                            getattr(self.req_to_token_pool, "mamba_pool", None),
+                            "size",
+                            1,
+                        )
+                    ),
+                    kv_capacity=self.max_total_num_tokens,
+                )
+                get_context().override(
+                    source="tenant_policy_experiment",
+                    schedule_policy=policy_name,
+                )
+            if tenant_request_weight is not None:
+                self.policy.vtc_request_weight = float(tenant_request_weight)
+            if tenant_input_weight is not None:
+                self.policy.vtc_input_weight = float(tenant_input_weight)
+            if tenant_output_weight is not None:
+                self.policy.vtc_output_weight = float(tenant_output_weight)
+            if tenant_input_quadratic_weight is not None:
+                self.policy.vtc_input_quadratic_weight = float(
+                    tenant_input_quadratic_weight
+                )
+            if tenant_input_output_weight is not None:
+                self.policy.vtc_input_output_weight = float(
+                    tenant_input_output_weight
+                )
+            if tenant_output_quadratic_weight is not None:
+                self.policy.vtc_output_quadratic_weight = float(
+                    tenant_output_quadratic_weight
+                )
+            if lifecycle_state_weight is not None:
+                self.policy.lifecycle_state_weight = float(lifecycle_state_weight)
+            if lifecycle_kv_weight is not None:
+                self.policy.lifecycle_kv_weight = float(lifecycle_kv_weight)
             if remaining:
                 get_context().override(source="update_server_args", **remaining)
             logger.info(f"Config updated via context override: {remaining}")

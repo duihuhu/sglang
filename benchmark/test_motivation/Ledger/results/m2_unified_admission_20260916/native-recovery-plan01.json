@@ -1,0 +1,402 @@
+{
+  "original": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01",
+  "manifest": {
+    "source_hashes": {
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+      "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+      "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+      "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+      "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+      "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+      "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+      "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef"
+    },
+    "stage": "native-controls",
+    "plan": {
+      "arrivals": {
+        "state-far": 8.634797419421375,
+        "state-near": 13.789265418425202,
+        "kv-far": 115.5441352268681,
+        "kv-near": 119.8455872037448
+      },
+      "evidence": [
+        {
+          "profile": "state",
+          "phase": "far",
+          "rep": 41,
+          "snapshot": {
+            "arrival_s": 8.634797419421375,
+            "holders": 512,
+            "alive": 512,
+            "prefilled": 512,
+            "median_remaining": 112.0,
+            "state_live_bytes_proxy": 11114905600,
+            "kv_live_bytes_proxy": 2179989504,
+            "state_fraction": 0.8360280779241265,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "state",
+          "phase": "far",
+          "rep": 42,
+          "snapshot": {
+            "arrival_s": 8.634797419421375,
+            "holders": 512,
+            "alive": 512,
+            "prefilled": 512,
+            "median_remaining": 113.0,
+            "state_live_bytes_proxy": 11114905600,
+            "kv_live_bytes_proxy": 2179989504,
+            "state_fraction": 0.8360280779241265,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "state",
+          "phase": "near",
+          "rep": 41,
+          "snapshot": {
+            "arrival_s": 13.789265418425202,
+            "holders": 512,
+            "alive": 512,
+            "prefilled": 512,
+            "median_remaining": 32.0,
+            "state_live_bytes_proxy": 11114905600,
+            "kv_live_bytes_proxy": 2510290944,
+            "state_fraction": 0.8157611205171618,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "state",
+          "phase": "near",
+          "rep": 42,
+          "snapshot": {
+            "arrival_s": 13.789265418425202,
+            "holders": 512,
+            "alive": 512,
+            "prefilled": 512,
+            "median_remaining": 33.0,
+            "state_live_bytes_proxy": 11114905600,
+            "kv_live_bytes_proxy": 2510290944,
+            "state_fraction": 0.8157611205171618,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "kv",
+          "phase": "far",
+          "rep": 41,
+          "snapshot": {
+            "arrival_s": 115.5441352268681,
+            "holders": 96,
+            "alive": 96,
+            "prefilled": 96,
+            "median_remaining": 117.0,
+            "state_live_bytes_proxy": 2084044800,
+            "kv_live_bytes_proxy": 12683575296,
+            "state_fraction": 0.14112259026520396,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "kv",
+          "phase": "far",
+          "rep": 42,
+          "snapshot": {
+            "arrival_s": 115.5441352268681,
+            "holders": 96,
+            "alive": 96,
+            "prefilled": 96,
+            "median_remaining": 108.0,
+            "state_live_bytes_proxy": 2084044800,
+            "kv_live_bytes_proxy": 12683575296,
+            "state_fraction": 0.14112259026520396,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "kv",
+          "phase": "near",
+          "rep": 41,
+          "snapshot": {
+            "arrival_s": 119.8455872037448,
+            "holders": 96,
+            "alive": 96,
+            "prefilled": 96,
+            "median_remaining": 38.0,
+            "state_live_bytes_proxy": 2084044800,
+            "kv_live_bytes_proxy": 12751699968,
+            "state_fraction": 0.14047456548964,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "kv",
+          "phase": "near",
+          "rep": 42,
+          "snapshot": {
+            "arrival_s": 119.8455872037448,
+            "holders": 96,
+            "alive": 96,
+            "prefilled": 96,
+            "median_remaining": 27.0,
+            "state_live_bytes_proxy": 2084044800,
+            "kv_live_bytes_proxy": 12751699968,
+            "state_fraction": 0.14047456548964,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        }
+      ],
+      "scenes_valid": true,
+      "source_hashes": {
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+        "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+        "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+        "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+        "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+        "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+        "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+        "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+        "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+        "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+        "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+        "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+        "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+        "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef"
+      },
+      "parent_manifest": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/calibrate03/manifest.json",
+      "physical_gpu_ids": [
+        4,
+        5
+      ],
+      "formal_reps": [
+        51,
+        52
+      ],
+      "primary": "mean JCT; p95/makespan regression <=5%"
+    },
+    "gpus": [
+      {
+        "index": 4,
+        "uuid": "GPU-bfe384be-b1b9-a366-b97f-fb4a19ecca92",
+        "name": "NVIDIA A800-SXM4-80GB",
+        "memory_mib": 1,
+        "total_mib": 81920,
+        "utilization": 0
+      },
+      {
+        "index": 5,
+        "uuid": "GPU-98c6d507-a0b0-178a-3988-bede27dae961",
+        "name": "NVIDIA A800-SXM4-80GB",
+        "memory_mib": 1,
+        "total_mib": 81920,
+        "utilization": 0
+      }
+    ],
+    "created_unix_s": 1789608128.3425386
+  },
+  "missing": [
+    [
+      "delayer32",
+      "kv",
+      "near",
+      52
+    ],
+    [
+      "delayer32",
+      "kv",
+      "far",
+      52
+    ],
+    [
+      "delayer32",
+      "state",
+      "near",
+      52
+    ],
+    [
+      "delayer32",
+      "state",
+      "far",
+      52
+    ],
+    [
+      "slots64",
+      "kv",
+      "near",
+      52
+    ],
+    [
+      "slots64",
+      "kv",
+      "far",
+      52
+    ],
+    [
+      "slots64",
+      "state",
+      "near",
+      52
+    ],
+    [
+      "slots64",
+      "state",
+      "far",
+      52
+    ]
+  ],
+  "case_order": [
+    [
+      "kv",
+      "near"
+    ],
+    [
+      "kv",
+      "far"
+    ],
+    [
+      "state",
+      "near"
+    ],
+    [
+      "state",
+      "far"
+    ]
+  ],
+  "policy_order": [
+    "delayer32",
+    "slots64"
+  ],
+  "adopted_sessions": [
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-00-slots64-rep51",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-01-delayer32-rep51"
+  ],
+  "adopted_artifact_sha256": {
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-00-slots64-rep51/m2ua-slots64-kv-far-rep51-native-controls.json": "a529f758129248493c6f0b7f56d15cff1c079fb61fd98c55eb4c892e4dfbd2b7",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-00-slots64-rep51/m2ua-slots64-kv-far-rep51-warmup.json": "5c28c33b7c2eb791f913e363b22594a9ba7689ad0e3d8f5ed8866cb3f1fa3830",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-00-slots64-rep51/m2ua-slots64-kv-near-rep51-native-controls.json": "028a342e8b5ce75f33257139ba23d10b4cc1867f3bdc3353984c331f9fc81316",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-00-slots64-rep51/m2ua-slots64-kv-near-rep51-warmup.json": "4d1dbd38e048dc2b847d33d2b5bd931007c981b287bc9693a36366402715ed6e",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-00-slots64-rep51/m2ua-slots64-state-far-rep51-native-controls.json": "26d1c8852e21dde4f54c6b48e85720932e006ebae2bdcd7e49f71f22e760ac34",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-00-slots64-rep51/m2ua-slots64-state-far-rep51-warmup.json": "dc74e8e7a6375b3571066cedb887cd05887ba45f7a4aa4d272bbdb817cadc4ab",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-00-slots64-rep51/m2ua-slots64-state-near-rep51-native-controls.json": "92a038bee985390f448b3dec0cacfe41662310220c2535ae09a1ad1acd41537f",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-00-slots64-rep51/m2ua-slots64-state-near-rep51-warmup.json": "fdeb516047d42d9a707b2f40805ed401bb8ea648cb0e8fec31c798e625f0ea32",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-01-delayer32-rep51/m2ua-delayer32-kv-far-rep51-native-controls.json": "58d69c432a4f68967129eeedee597b6b94c843a97906c304e9e20ccbdd271f27",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-01-delayer32-rep51/m2ua-delayer32-kv-far-rep51-warmup.json": "fb48d49303b370c4bde1410d614f572d195d14ecbce1f0b9597a4495edbd13ea",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-01-delayer32-rep51/m2ua-delayer32-kv-near-rep51-native-controls.json": "c8cf8ac2dfca4459bea6980470b300c414f4eee6d8331e9da6dd92182d76054a",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-01-delayer32-rep51/m2ua-delayer32-kv-near-rep51-warmup.json": "8e7b9628181e5e57105521be0bfda67bb33e8a4e014b51302e8b99565d947da3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-01-delayer32-rep51/m2ua-delayer32-state-far-rep51-native-controls.json": "cf652437254976c80df617c0fb42b58ae4fe5cbf32bd91aa671d44f990631fcf",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-01-delayer32-rep51/m2ua-delayer32-state-far-rep51-warmup.json": "9a0111aac99998fb1117a19c690be4c2b91d8a77e8bfad5448becf8900859def",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-01-delayer32-rep51/m2ua-delayer32-state-near-rep51-native-controls.json": "6c1a653309f0b370768446ff7f54d868e843b1aa424d584000576a81bc3448b2",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-01-delayer32-rep51/m2ua-delayer32-state-near-rep51-warmup.json": "57b3acd3ad77991c4066c5a2eeaa611cd588e7a608a51579e7d83909643c0287"
+  },
+  "excluded": [
+    {
+      "session": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-02-delayer32-rep52",
+      "reason": "entire incomplete session excluded",
+      "artifacts": {
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-02-delayer32-rep52/m2ua-delayer32-kv-far-rep52-native-controls.json": "0a6b0c2583d994fbf3eea81627489020ed17aa15ebdd5fe2e3a6f31a5cc45254",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-02-delayer32-rep52/m2ua-delayer32-kv-far-rep52-warmup.json": "63040ee592c7e5e37ee05dfe172d4e0031df8dd921537d42138901535e5d452a",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-02-delayer32-rep52/m2ua-delayer32-kv-near-rep52-native-controls.json": "28a20386bb48b424a7ca2bcd8495f1e45a621e0fe9c48a8c70ebd8d387a7ef81",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-02-delayer32-rep52/m2ua-delayer32-kv-near-rep52-warmup.json": "400e37a67e45daad3119ffb33f33b64814e2fbf3f5c63d538855e282e5cdb5fe"
+      },
+      "missing": [
+        [
+          "state",
+          "far",
+          "native-controls"
+        ],
+        [
+          "state",
+          "far",
+          "warmup"
+        ],
+        [
+          "state",
+          "near",
+          "native-controls"
+        ],
+        [
+          "state",
+          "near",
+          "warmup"
+        ]
+      ]
+    }
+  ],
+  "failure_summaries": [
+    {
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/native_controls01/session-02-delayer32-rep52/m2ua-delayer32-kv-far-rep52-native-controls.json",
+      "experiment": {
+        "run_id": "m2ua-delayer32-kv-far-rep52-native-controls",
+        "policy": "delayer32",
+        "profile": "kv",
+        "phase": "far",
+        "rep": 52,
+        "stage": "native-controls",
+        "arrival": 115.5441352268681,
+        "activation_limit": 0
+      },
+      "integrity_errors": [
+        "arrival lateness"
+      ],
+      "max_lateness_ms": 77.65271400037818
+    }
+  ],
+  "created_unix_s": 1789610881.333473,
+  "port": 30144,
+  "recovery_script_sha256": "0e8231c660b08eef128d299efecc5d1d7f5164a23a54e4aeec6b7c10283d4223",
+  "analysis_sha256": "ffa2e26049797925edc1f153cce3a8aa6607a77f9baf7a0e45d0958bc4405d20",
+  "retry_rule": "One fresh recovery attempt; stop for client/environment review if timing fails again."
+}

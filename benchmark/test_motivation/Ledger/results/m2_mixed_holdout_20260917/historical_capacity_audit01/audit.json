@@ -1,0 +1,672 @@
+{
+  "complete": true,
+  "historical_analysis": "benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/analysis01/analysis.json",
+  "historical_analysis_sha256": "fe4707b0068bcdf46caefafda0352cd12100d336616769e094cbd9c6abe8ba05",
+  "state_entry_bytes": 21708800,
+  "kv_entry_bytes": 8064,
+  "rows": [
+    {
+      "experiment": {
+        "run_id": "m2nc-cap512-state-far-rep61-calibration",
+        "policy": "cap512",
+        "profile": "state",
+        "phase": "far",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13757317120,
+      "minimum_logical_headroom_bytes": 5723754880,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 327680,
+      "admission_blocks": {
+        "prefill_other": 190,
+        "request_limit": 1
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-cap512-state-far-rep61-calibration.json",
+      "sha256": "ce5732d81c631cff0fc87421233eb497c234f2c9b06f76fb627625ed54276eaf"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-cap512-state-near-rep61-calibration",
+        "policy": "cap512",
+        "profile": "state",
+        "phase": "near",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13757317120,
+      "minimum_logical_headroom_bytes": 5723754880,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 327680,
+      "admission_blocks": {
+        "prefill_other": 190,
+        "request_limit": 1
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-cap512-state-near-rep61-calibration.json",
+      "sha256": "b163ec136b7eaf50f6054d94360ff6137938e70f1da6b0fce4047a4cdddd1c2d"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-native607-state-far-rep61-calibration",
+        "policy": "native607",
+        "profile": "state",
+        "phase": "far",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 19209388032,
+      "minimum_logical_headroom_bytes": 271683968,
+      "peak_joint_event_state_slots": 576,
+      "peak_joint_event_kv_tokens": 831488,
+      "admission_blocks": {
+        "prefill_other": 190
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-native607-state-far-rep61-calibration.json",
+      "sha256": "60504930ff8a208a9b4abde3079aa0b0f09d9a4cbab5d1a159e1b24de769a2ca"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-native607-state-near-rep61-calibration",
+        "policy": "native607",
+        "profile": "state",
+        "phase": "near",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 19386925056,
+      "minimum_logical_headroom_bytes": 94146944,
+      "peak_joint_event_state_slots": 576,
+      "peak_joint_event_kv_tokens": 853504,
+      "admission_blocks": {
+        "prefill_other": 190
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-native607-state-near-rep61-calibration.json",
+      "sha256": "558a1dfa1f3b8f79eda95610d45bcd87ce00d43d5ef10825a2055b0b740d23fd"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-slots96-state-far-rep61-calibration",
+        "policy": "slots96",
+        "profile": "state",
+        "phase": "far",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13757317120,
+      "minimum_logical_headroom_bytes": 5723754880,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 327680,
+      "admission_blocks": {
+        "prefill_other": 190
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-01-slots96-rep61/m2nc-slots96-state-far-rep61-calibration.json",
+      "sha256": "232dc56d0d19c5a761e637dc45396f8aa8fcec91ee1f5414b9531ef572d20fa4"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-slots96-state-near-rep61-calibration",
+        "policy": "slots96",
+        "profile": "state",
+        "phase": "near",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13757317120,
+      "minimum_logical_headroom_bytes": 5723754880,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 327680,
+      "admission_blocks": {
+        "prefill_other": 190
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-01-slots96-rep61/m2nc-slots96-state-near-rep61-calibration.json",
+      "sha256": "feaa5c2534cc3a5b2d29b424dafe53fadb56e277a8b9dbd5f676a1581695c47a"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-slots96-state-far-rep62-calibration",
+        "policy": "slots96",
+        "profile": "state",
+        "phase": "far",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13757317120,
+      "minimum_logical_headroom_bytes": 5723754880,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 327680,
+      "admission_blocks": {
+        "prefill_other": 190
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-02-slots96-rep62/m2nc-slots96-state-far-rep62-calibration.json",
+      "sha256": "eca74c4aded3c9ac47d4a1db10a3cd1c36d4d5d05eace9344c69f67482ee63e3"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-slots96-state-near-rep62-calibration",
+        "policy": "slots96",
+        "profile": "state",
+        "phase": "near",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13757317120,
+      "minimum_logical_headroom_bytes": 5723754880,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 327680,
+      "admission_blocks": {
+        "prefill_other": 190
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-02-slots96-rep62/m2nc-slots96-state-near-rep62-calibration.json",
+      "sha256": "bc10fcfbb47d623a2476bfecc9721afcb0870765a7a01d4de3fb76c0f94ce08e"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-cap512-state-far-rep62-calibration",
+        "policy": "cap512",
+        "profile": "state",
+        "phase": "far",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13757317120,
+      "minimum_logical_headroom_bytes": 5723754880,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 327680,
+      "admission_blocks": {
+        "prefill_other": 190,
+        "request_limit": 1
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-cap512-state-far-rep62-calibration.json",
+      "sha256": "70ae03ce7b33bc7223c4b6492d06d1fb1fc7bdb09740310d8d7360c5d8b36cfd"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-cap512-state-near-rep62-calibration",
+        "policy": "cap512",
+        "profile": "state",
+        "phase": "near",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13757317120,
+      "minimum_logical_headroom_bytes": 5723754880,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 327680,
+      "admission_blocks": {
+        "prefill_other": 190,
+        "request_limit": 1
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-cap512-state-near-rep62-calibration.json",
+      "sha256": "268494cd477946845cd57e55f96d6679f4f7200946c5b7d3ab5a61b661cb0571"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-native607-state-far-rep62-calibration",
+        "policy": "native607",
+        "profile": "state",
+        "phase": "far",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 19209388032,
+      "minimum_logical_headroom_bytes": 271683968,
+      "peak_joint_event_state_slots": 576,
+      "peak_joint_event_kv_tokens": 831488,
+      "admission_blocks": {
+        "prefill_other": 190
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-native607-state-far-rep62-calibration.json",
+      "sha256": "673b391aa44470f89ab8e7203aab405aa94d82a3b523bec62510b8fc04042dc0"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-native607-state-near-rep62-calibration",
+        "policy": "native607",
+        "profile": "state",
+        "phase": "near",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 19382796288,
+      "minimum_logical_headroom_bytes": 98275712,
+      "peak_joint_event_state_slots": 576,
+      "peak_joint_event_kv_tokens": 852992,
+      "admission_blocks": {
+        "prefill_other": 190
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-native607-state-near-rep62-calibration.json",
+      "sha256": "02d696764ff456985949e0cb4a76d66602f3e2f5738425eec5a7b2282b51df57"
+    }
+  ],
+  "theoretical_scenarios": {
+    "historical_512_plus_64": {
+      "shapes": [
+        [
+          512,
+          512,
+          128
+        ],
+        [
+          64,
+          8192,
+          64
+        ]
+      ],
+      "requests": 576,
+      "context_token_upper": 856064,
+      "state_body_upper_bytes": 12504268800,
+      "kv_body_upper_bytes": 6903300096,
+      "joint_body_upper_bytes": 19407568896,
+      "shared_raw_bytes": 19481072000,
+      "logical_upper_headroom_bytes": 73503104,
+      "all_requests_below_request_cap": true,
+      "kv_body_alone_fits": true,
+      "joint_body_upper_exceeds_budget": false,
+      "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+    },
+    "held_out_384_plus_64": {
+      "shapes": [
+        [
+          384,
+          1024,
+          128
+        ],
+        [
+          64,
+          8192,
+          64
+        ]
+      ],
+      "requests": 448,
+      "context_token_upper": 970752,
+      "state_body_upper_bytes": 9725542400,
+      "kv_body_upper_bytes": 7828144128,
+      "joint_body_upper_bytes": 17553686528,
+      "shared_raw_bytes": 19481072000,
+      "logical_upper_headroom_bytes": 1927385472,
+      "all_requests_below_request_cap": true,
+      "kv_body_alone_fits": true,
+      "joint_body_upper_exceeds_budget": false,
+      "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+    },
+    "unmeasured_24_probe_feasibility": {
+      "shapes": [
+        [
+          512,
+          512,
+          128
+        ],
+        [
+          64,
+          8192,
+          64
+        ],
+        [
+          24,
+          512,
+          64
+        ]
+      ],
+      "requests": 600,
+      "context_token_upper": 869888,
+      "state_body_upper_bytes": 13025280000,
+      "kv_body_upper_bytes": 7014776832,
+      "joint_body_upper_bytes": 20040056832,
+      "shared_raw_bytes": 19481072000,
+      "logical_upper_headroom_bytes": -558984832,
+      "all_requests_below_request_cap": true,
+      "kv_body_alone_fits": true,
+      "joint_body_upper_exceeds_budget": true,
+      "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+    }
+  },
+  "scope": "Read-only historical audit. Body-byte occupancy omits reserved sink, fragmentation, transient reservations and workspace. An over-budget upper bound does not prove the peak is reachable."
+}

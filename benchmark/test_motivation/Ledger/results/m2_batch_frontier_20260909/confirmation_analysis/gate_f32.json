@@ -1,0 +1,64 @@
+{
+  "factor": 32,
+  "repetitions": [
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "selection": {
+    "baseline": "separate-4096/n96/vtc",
+    "candidate": "separate-4096/n48/vtc",
+    "primary_endpoint": "split_p95",
+    "min_primary_improvement": 0.1,
+    "noninferiority_margin": 0.05,
+    "last_screening_rep": 1,
+    "confirmation_repetitions": [
+      10,
+      11,
+      12,
+      13,
+      14
+    ],
+    "factors": [
+      16,
+      32
+    ],
+    "reason": "A within-policy concurrency control selected from the one-repeat screen; no new scheduler or SOTA-wide comparison.",
+    "claim_rule": "Evaluate f16 and held-out f32 separately; do not pool, select another cap, or retune thresholds after observing confirmation outcomes."
+  },
+  "effects": {
+    "split_p95": {
+      "mean_improvement": -0.0040389018261278945,
+      "ci95": [
+        -0.0818565867561694,
+        0.07303799141818675
+      ],
+      "n": 5,
+      "claim_eligible_n": true
+    },
+    "packed_p95": {
+      "mean_improvement": -0.0028163624938448485,
+      "ci95": [
+        -0.0047229284036109705,
+        -0.0010597173268059867
+      ],
+      "n": 5,
+      "claim_eligible_n": true
+    },
+    "makespan": {
+      "mean_improvement": -0.019162992369014687,
+      "ci95": [
+        -0.02016670016109203,
+        -0.018306786718311097
+      ],
+      "n": 5,
+      "claim_eligible_n": true
+    }
+  },
+  "native_control_benefit_gate_passed": false,
+  "sota_residual_loss_demonstrated": false,
+  "hybrid_specific_causality_demonstrated": false,
+  "note": "A configuration control is not a new scheduler or a SOTA-wide result."
+}

@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "mode": "eviction",
+    "run_id": "eviction-none-rep2",
+    "base_url": "http://127.0.0.1:30000",
+    "timeout_seconds": 3600,
+    "slo_seconds": 20,
+    "arrival_gap_ms": 1,
+    "prompt_len": 1024,
+    "output_len": 32,
+    "count": 1,
+    "reuse_fraction": 0,
+    "pair": null,
+    "order": null,
+    "candidate": null,
+    "background_count": 64,
+    "candidate_count": 8,
+    "candidate_delay_s": 0.75,
+    "pressure": "none",
+    "eviction_prefix_len": 16384,
+    "state_pressure_count": 80,
+    "kv_pressure_count": 16,
+    "phase_pattern": null,
+    "policy": null,
+    "scalar_weight": 0,
+    "phase_weights": "65536,0,65536",
+    "phase_waves": 4,
+    "phase_wave_interval_s": 0.75,
+    "phase_duration_s": 8
+  },
+  "server": {
+    "version": "0.0.0.dev16772+g0077f84d3.d20260820",
+    "model_path": "/models/Kimi-Linear-48B-A3B",
+    "max_total_num_tokens": 196608,
+    "internal_states": [
+      {
+        "max_mamba_cache_size": 480,
+        "effective_max_running_requests_per_dp": 96
+      }
+    ]
+  },
+  "summary": {
+    "overall": {
+      "requests": 2,
+      "completed": 2,
+      "mean_jct_s": 0.042601173743605614,
+      "p95_jct_s": 0.04274135939776898,
+      "mean_ttft_s": 0.04258311539888382,
+      "p95_ttft_s": 0.04272324237972498,
+      "p95_itl_s": null,
+      "max_itl_s": null,
+      "slo_goodput": 2,
+      "mean_cached_tokens": 16384.0,
+      "total_retractions": 0
+    },
+    "groups": {
+      "probe-after": {
+        "requests": 1,
+        "completed": 1,
+        "mean_jct_s": 0.042445411905646324,
+        "p95_jct_s": 0.042445411905646324,
+        "mean_ttft_s": 0.04242741875350475,
+        "p95_ttft_s": 0.04242741875350475,
+        "p95_itl_s": null,
+        "max_itl_s": null,
+        "slo_goodput": 1,
+        "mean_cached_tokens": 16384.0,
+        "total_retractions": 0
+      },
+      "probe-before": {
+        "requests": 1,
+        "completed": 1,
+        "mean_jct_s": 0.0427569355815649,
+        "p95_jct_s": 0.0427569355815649,
+        "mean_ttft_s": 0.042738812044262886,
+        "p95_ttft_s": 0.042738812044262886,
+        "p95_itl_s": null,
+        "max_itl_s": null,
+        "slo_goodput": 1,
+        "mean_cached_tokens": 16384.0,
+        "total_retractions": 0
+      }
+    }
+  },
+  "scheduler_resource_trace": {
+    "schema_version": 2,
+    "measurement_scope": "active requests only; inactive radix cache excluded",
+    "state_unit": "physically assigned recurrent-state slots",
+    "kv_unit": "allocated active KV token slots",
+    "elapsed_seconds": 0.29113806784152985,
+    "observation_count": 11,
+    "system": {
+      "active_request_seconds": 0.07333718053996563,
+      "state_slot_seconds": 0.2200115416198969,
+      "kv_token_seconds": 1203.9307154323906,
+      "peak_active_requests": 1,
+      "peak_state_slots": 3,
+      "peak_kv_tokens": 16417,
+      "current_active_requests": 0,
+      "current_state_slots": 0,
+      "current_kv_tokens": 0
+    },
+    "tenants": {
+      "cache-probe": {
+        "active_request_seconds": 0.07333718053996563,
+        "state_slot_seconds": 0.2200115416198969,
+        "kv_token_seconds": 1203.9307154323906,
+        "peak_active_requests": 1,
+        "peak_state_slots": 3,
+        "peak_kv_tokens": 16417,
+        "current_active_requests": 0,
+        "current_state_slots": 0,
+        "current_kv_tokens": 0
+      }
+    },
+    "run_id": "eviction-none-rep2"
+  },
+  "policy_updates": [],
+  "requests": [
+    {
+      "rid": "eviction-none-rep2-probe-before",
+      "group": "probe-before",
+      "input_len": 16416,
+      "output_len": 1,
+      "common_prefix_len": 16384,
+      "scheduled_arrival_s": 0,
+      "submitted_s": 0.00016854703426361084,
+      "first_token_s": 0.0429073590785265,
+      "finished_s": 0.042925482615828514,
+      "completion_tokens": 1,
+      "cached_tokens": 16384,
+      "prompt_tokens": 16416,
+      "num_retractions": 0,
+      "success": true,
+      "error": null,
+      "token_events": [
+        [
+          0.0429073590785265,
+          1
+        ]
+      ],
+      "latency_s": 0.0427569355815649,
+      "ttft_s": 0.042738812044262886
+    },
+    {
+      "rid": "eviction-none-rep2-probe-after",
+      "group": "probe-after",
+      "input_len": 16416,
+      "output_len": 1,
+      "common_prefix_len": 16384,
+      "scheduled_arrival_s": 0,
+      "submitted_s": 0.00016674771904945374,
+      "first_token_s": 0.04259416647255421,
+      "finished_s": 0.04261215962469578,
+      "completion_tokens": 1,
+      "cached_tokens": 16384,
+      "prompt_tokens": 16416,
+      "num_retractions": 0,
+      "success": true,
+      "error": null,
+      "token_events": [
+        [
+          0.04259416647255421,
+          1
+        ]
+      ],
+      "latency_s": 0.042445411905646324,
+      "ttft_s": 0.04242741875350475
+    }
+  ]
+}

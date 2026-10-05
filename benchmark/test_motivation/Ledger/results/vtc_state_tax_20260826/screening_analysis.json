@@ -1,0 +1,49 @@
+{
+  "selection": {
+    "global_request_tax": "token-vtc",
+    "per_cell_request_tax": {
+      "f1-base": "request-tax-r1024",
+      "f16-base": "token-vtc",
+      "f16-fast": "token-vtc",
+      "f16-full": "token-vtc",
+      "f16-kv-relaxed": "token-vtc",
+      "f16-slow": "request-tax-r8192",
+      "f16-state-relaxed": "token-vtc",
+      "f32-base": "token-vtc",
+      "f4-base": "token-vtc"
+    }
+  },
+  "integrity": {
+    "artifacts": 144,
+    "requests": 6843,
+    "failures": 0,
+    "cached": 0,
+    "retractions": 0,
+    "exact_traces": 144,
+    "vtc_traces": 81,
+    "vtc_artifacts": 81,
+    "resolved": 144,
+    "gpu": 144,
+    "equal_token_mixed": 99,
+    "mixed": 99,
+    "stage_counts": {
+      "screen": 117,
+      "profile": 27
+    },
+    "duplicate_run_ids": [],
+    "filenames_ok": true,
+    "model_ok": true,
+    "capacities_ok": true,
+    "profile_matrix_ok": true,
+    "screen_matrix_ok": true,
+    "confirm_matrix_entries": 0,
+    "confirm_matrix_ok": null
+  },
+  "decisions": {
+    "complete": false,
+    "o1": null,
+    "o2": null,
+    "o3": null
+  },
+  "overall": null
+}

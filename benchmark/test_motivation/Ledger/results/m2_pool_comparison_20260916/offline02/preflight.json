@@ -1,0 +1,448 @@
+{
+  "created_utc": "2026-09-16T06:54:25.441736+00:00",
+  "status": "offline_preflight_passed_live_validation_pending",
+  "torch_version": "2.13.0+cu129",
+  "cuda_visible_devices": "",
+  "gpu_memory_allocated_by_audit": false,
+  "kernel_parity_tested": false,
+  "geometry_per_rank": {
+    "state_bytes": 21708800,
+    "kv_bytes_per_token": 8064,
+    "context_len": 1048576,
+    "kda_layers": 20,
+    "mla_layers": 7,
+    "tp": 2,
+    "conv_dtype": "torch.bfloat16",
+    "temporal_dtype": "torch.float32"
+  },
+  "backend_guards": {
+    "guard_checks_passed": true,
+    "page_major_implied": true,
+    "full_model_startup_or_kernel_parity_tested": false
+  },
+  "rows": [
+    {
+      "arm": "static-natural",
+      "enable_unified_memory": false,
+      "bootstrap_state_cap": 485,
+      "bootstrap_kv_tokens": 1458643,
+      "main_cache_bytes": 22312973952,
+      "unified_tail_pad_bytes": 0,
+      "static_kv_padding_bytes": 8064,
+      "main_allocation_bytes": 22312982016,
+      "main_budget_delta_bytes": 0,
+      "main_allocation_delta_bytes": 0,
+      "resolved_request_cap_offline": 485,
+      "request_table_bytes": 2038439520,
+      "known_cache_plus_request_table_bytes": 24351421536,
+      "cache_budget_is_full_hbm_budget": false,
+      "fresh_server_cap_and_memory_readback_required": true
+    },
+    {
+      "arm": "static-rebalanced",
+      "enable_unified_memory": false,
+      "bootstrap_state_cap": 607,
+      "bootstrap_kv_tokens": 1130211,
+      "main_cache_bytes": 22312971904,
+      "unified_tail_pad_bytes": 0,
+      "static_kv_padding_bytes": 8064,
+      "main_allocation_bytes": 22312979968,
+      "main_budget_delta_bytes": -2048,
+      "main_allocation_delta_bytes": -2048,
+      "resolved_request_cap_offline": 607,
+      "request_table_bytes": 2550146560,
+      "known_cache_plus_request_table_bytes": 24863126528,
+      "cache_budget_is_full_hbm_budget": false,
+      "fresh_server_cap_and_memory_readback_required": true
+    },
+    {
+      "arm": "unified-raised-cap",
+      "enable_unified_memory": true,
+      "bootstrap_state_cap": 607,
+      "bootstrap_kv_tokens": 1130211,
+      "main_cache_bytes": 22291263104,
+      "unified_tail_pad_bytes": 8064,
+      "static_kv_padding_bytes": 0,
+      "main_allocation_bytes": 22291271168,
+      "main_budget_delta_bytes": -21710848,
+      "main_allocation_delta_bytes": -21710848,
+      "resolved_request_cap_offline": 607,
+      "request_table_bytes": 2550146560,
+      "known_cache_plus_request_table_bytes": 24841417728,
+      "cache_budget_is_full_hbm_budget": false,
+      "fresh_server_cap_and_memory_readback_required": true,
+      "meta_layout": {
+        "unique_storage": {
+          "unique_bytes": 22291271168,
+          "storage_count": 1,
+          "groups": [
+            {
+              "device": "meta",
+              "bytes": 22291271168,
+              "names": [
+                "raw",
+                "temporal",
+                "conv_0",
+                "mla_layer_0",
+                "mla_layer_1",
+                "mla_layer_2",
+                "mla_layer_3",
+                "mla_layer_4",
+                "mla_layer_5",
+                "mla_layer_6"
+              ]
+            }
+          ]
+        },
+        "virtual_slots": {
+          "mamba": 1026,
+          "full": 2764293
+        },
+        "reserved_slot_prefix": {
+          "mamba": 1,
+          "full": 2693
+        },
+        "virtual_capacities_are_not_simultaneously_allocatable": true,
+        "views": {
+          "raw": {
+            "shape": [
+              22291271168
+            ],
+            "stride": [
+              1
+            ],
+            "storage_offset": 0
+          },
+          "temporal": {
+            "shape": [
+              20,
+              1026,
+              16,
+              128,
+              128
+            ],
+            "stride": [
+              262144,
+              5427200,
+              16384,
+              128,
+              1
+            ],
+            "storage_offset": 184320
+          },
+          "conv_0": {
+            "shape": [
+              20,
+              1026,
+              3,
+              6144
+            ],
+            "stride": [
+              18432,
+              10854400,
+              6144,
+              1
+            ],
+            "storage_offset": 0
+          },
+          "mla_layer_0": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 0
+          },
+          "mla_layer_1": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 576
+          },
+          "mla_layer_2": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 1152
+          },
+          "mla_layer_3": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 1728
+          },
+          "mla_layer_4": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 2304
+          },
+          "mla_layer_5": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 2880
+          },
+          "mla_layer_6": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 3456
+          }
+        }
+      }
+    },
+    {
+      "arm": "unified-old-cap-control",
+      "enable_unified_memory": true,
+      "bootstrap_state_cap": 485,
+      "bootstrap_kv_tokens": 1458643,
+      "main_cache_bytes": 22291265152,
+      "unified_tail_pad_bytes": 8064,
+      "static_kv_padding_bytes": 0,
+      "main_allocation_bytes": 22291273216,
+      "main_budget_delta_bytes": -21708800,
+      "main_allocation_delta_bytes": -21708800,
+      "resolved_request_cap_offline": 485,
+      "request_table_bytes": 2038439520,
+      "known_cache_plus_request_table_bytes": 24329712736,
+      "cache_budget_is_full_hbm_budget": false,
+      "fresh_server_cap_and_memory_readback_required": true,
+      "meta_layout": {
+        "unique_storage": {
+          "unique_bytes": 22291273216,
+          "storage_count": 1,
+          "groups": [
+            {
+              "device": "meta",
+              "bytes": 22291273216,
+              "names": [
+                "raw",
+                "temporal",
+                "conv_0",
+                "mla_layer_0",
+                "mla_layer_1",
+                "mla_layer_2",
+                "mla_layer_3",
+                "mla_layer_4",
+                "mla_layer_5",
+                "mla_layer_6"
+              ]
+            }
+          ]
+        },
+        "virtual_slots": {
+          "mamba": 1026,
+          "full": 2764293
+        },
+        "reserved_slot_prefix": {
+          "mamba": 1,
+          "full": 2693
+        },
+        "virtual_capacities_are_not_simultaneously_allocatable": true,
+        "views": {
+          "raw": {
+            "shape": [
+              22291273216
+            ],
+            "stride": [
+              1
+            ],
+            "storage_offset": 0
+          },
+          "temporal": {
+            "shape": [
+              20,
+              1026,
+              16,
+              128,
+              128
+            ],
+            "stride": [
+              262144,
+              5427200,
+              16384,
+              128,
+              1
+            ],
+            "storage_offset": 184320
+          },
+          "conv_0": {
+            "shape": [
+              20,
+              1026,
+              3,
+              6144
+            ],
+            "stride": [
+              18432,
+              10854400,
+              6144,
+              1
+            ],
+            "storage_offset": 0
+          },
+          "mla_layer_0": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 0
+          },
+          "mla_layer_1": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 576
+          },
+          "mla_layer_2": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 1152
+          },
+          "mla_layer_3": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 1728
+          },
+          "mla_layer_4": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 2304
+          },
+          "mla_layer_5": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 2880
+          },
+          "mla_layer_6": {
+            "shape": [
+              19350051,
+              1,
+              576
+            ],
+            "stride": [
+              576,
+              576,
+              1
+            ],
+            "storage_offset": 3456
+          }
+        }
+      }
+    }
+  ],
+  "workload_cache_lower_accounting_bytes": 16309944320,
+  "limitations": [
+    "No live allocator collision/compaction or kernel tests",
+    "No full-HBM census",
+    "Bootstrap KV estimates require fresh server resolution",
+    "No serving performance claim"
+  ],
+  "sha256": {
+    "/workspace/sglang/benchmark/test_motivation/Ledger/preflight_m2_pool_comparison.py": "4c648305000b0e45db8b7a5f1d4776b8178c07c57e0626a870f544bfd4ba51cd",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_protocol_20260916.md": "1e56a21273bb89239c6d031a79609a5d84eba7028138691997ca2b3beb4c3619",
+    "/models/Kimi-Linear-48B-A3B/config.json": "732c453928a14df15ad7b7bf8c626a02236d10eee80ce63a36aa05df73bc17eb",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_state_mediation_20260916/inspect03/m2mediate-natural-mixed-4096-cap485-rep1-inspect.json": "dbecbd785c54b99d53a34012577271da8b3c6091505083da83cff893be50b1ca",
+    "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+    "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+    "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+    "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+    "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+    "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+    "/workspace/sglang/python/sglang/srt/model_executor/pool_configurator.py": "095cf9df90cb91985852a8e8bc9825cf931bc4cc8339e0a23d232d9955d9e456",
+    "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2"
+  }
+}

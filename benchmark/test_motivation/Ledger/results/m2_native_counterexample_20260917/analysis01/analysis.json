@@ -1,0 +1,1853 @@
+{
+  "complete": true,
+  "counts": {
+    "runs": 12,
+    "requests": 6912,
+    "warmup_requests": 6912
+  },
+  "manifest": {
+    "source_hashes": {
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+      "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+      "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+      "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+      "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+      "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+      "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+      "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_native_counterexample.py": "705a34a07b983152c9418e8b3508ab809ab6ac9a2974fc21da667f5f9a3f12a8",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_native_counterexample_protocol_20260917.md": "16ac0dbfdfab52783839f287e1aab971d84005ccc4b0016e8125ddc16f525d12"
+    },
+    "reference": {
+      "arrivals": {
+        "state-far": 8.634797419421375,
+        "state-near": 13.789265418425202,
+        "kv-far": 115.5441352268681,
+        "kv-near": 119.8455872037448
+      },
+      "evidence": [
+        {
+          "profile": "state",
+          "phase": "far",
+          "rep": 41,
+          "snapshot": {
+            "arrival_s": 8.634797419421375,
+            "holders": 512,
+            "alive": 512,
+            "prefilled": 512,
+            "median_remaining": 112.0,
+            "state_live_bytes_proxy": 11114905600,
+            "kv_live_bytes_proxy": 2179989504,
+            "state_fraction": 0.8360280779241265,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "state",
+          "phase": "far",
+          "rep": 42,
+          "snapshot": {
+            "arrival_s": 8.634797419421375,
+            "holders": 512,
+            "alive": 512,
+            "prefilled": 512,
+            "median_remaining": 113.0,
+            "state_live_bytes_proxy": 11114905600,
+            "kv_live_bytes_proxy": 2179989504,
+            "state_fraction": 0.8360280779241265,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "state",
+          "phase": "near",
+          "rep": 41,
+          "snapshot": {
+            "arrival_s": 13.789265418425202,
+            "holders": 512,
+            "alive": 512,
+            "prefilled": 512,
+            "median_remaining": 32.0,
+            "state_live_bytes_proxy": 11114905600,
+            "kv_live_bytes_proxy": 2510290944,
+            "state_fraction": 0.8157611205171618,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "state",
+          "phase": "near",
+          "rep": 42,
+          "snapshot": {
+            "arrival_s": 13.789265418425202,
+            "holders": 512,
+            "alive": 512,
+            "prefilled": 512,
+            "median_remaining": 33.0,
+            "state_live_bytes_proxy": 11114905600,
+            "kv_live_bytes_proxy": 2510290944,
+            "state_fraction": 0.8157611205171618,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "kv",
+          "phase": "far",
+          "rep": 41,
+          "snapshot": {
+            "arrival_s": 115.5441352268681,
+            "holders": 96,
+            "alive": 96,
+            "prefilled": 96,
+            "median_remaining": 117.0,
+            "state_live_bytes_proxy": 2084044800,
+            "kv_live_bytes_proxy": 12683575296,
+            "state_fraction": 0.14112259026520396,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "kv",
+          "phase": "far",
+          "rep": 42,
+          "snapshot": {
+            "arrival_s": 115.5441352268681,
+            "holders": 96,
+            "alive": 96,
+            "prefilled": 96,
+            "median_remaining": 108.0,
+            "state_live_bytes_proxy": 2084044800,
+            "kv_live_bytes_proxy": 12683575296,
+            "state_fraction": 0.14112259026520396,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "kv",
+          "phase": "near",
+          "rep": 41,
+          "snapshot": {
+            "arrival_s": 119.8455872037448,
+            "holders": 96,
+            "alive": 96,
+            "prefilled": 96,
+            "median_remaining": 38.0,
+            "state_live_bytes_proxy": 2084044800,
+            "kv_live_bytes_proxy": 12751699968,
+            "state_fraction": 0.14047456548964,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "kv",
+          "phase": "near",
+          "rep": 42,
+          "snapshot": {
+            "arrival_s": 119.8455872037448,
+            "holders": 96,
+            "alive": 96,
+            "prefilled": 96,
+            "median_remaining": 27.0,
+            "state_live_bytes_proxy": 2084044800,
+            "kv_live_bytes_proxy": 12751699968,
+            "state_fraction": 0.14047456548964,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        }
+      ],
+      "scenes_valid": true,
+      "source_hashes": {
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+        "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+        "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+        "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+        "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+        "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+        "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+        "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+        "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+        "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+        "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+        "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+        "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+        "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef"
+      },
+      "parent_manifest": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/calibrate03/manifest.json",
+      "physical_gpu_ids": [
+        4,
+        5
+      ],
+      "formal_reps": [
+        51,
+        52
+      ],
+      "primary": "mean JCT; p95/makespan regression <=5%"
+    },
+    "reference_sha256": "13d50bc3bed7e600efe2628ef34adbaf63c31802c4592737b16e7fe6256c2025",
+    "sessions": [
+      {
+        "rep": 61,
+        "server_policy": "native607",
+        "cases": [
+          [
+            "native607",
+            "far"
+          ],
+          [
+            "cap512",
+            "far"
+          ],
+          [
+            "native607",
+            "near"
+          ],
+          [
+            "cap512",
+            "near"
+          ]
+        ]
+      },
+      {
+        "rep": 61,
+        "server_policy": "slots96",
+        "cases": [
+          [
+            "slots96",
+            "far"
+          ],
+          [
+            "slots96",
+            "near"
+          ]
+        ]
+      },
+      {
+        "rep": 62,
+        "server_policy": "slots96",
+        "cases": [
+          [
+            "slots96",
+            "near"
+          ],
+          [
+            "slots96",
+            "far"
+          ]
+        ]
+      },
+      {
+        "rep": 62,
+        "server_policy": "native607",
+        "cases": [
+          [
+            "cap512",
+            "near"
+          ],
+          [
+            "native607",
+            "near"
+          ],
+          [
+            "cap512",
+            "far"
+          ],
+          [
+            "native607",
+            "far"
+          ]
+        ]
+      }
+    ],
+    "initial_gpus": [
+      [
+        {
+          "index": 4,
+          "uuid": "GPU-bfe384be-b1b9-a366-b97f-fb4a19ecca92",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        },
+        {
+          "index": 5,
+          "uuid": "GPU-98c6d507-a0b0-178a-3988-bede27dae961",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        }
+      ],
+      [
+        {
+          "index": 4,
+          "uuid": "GPU-bfe384be-b1b9-a366-b97f-fb4a19ecca92",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        },
+        {
+          "index": 5,
+          "uuid": "GPU-98c6d507-a0b0-178a-3988-bede27dae961",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        }
+      ]
+    ],
+    "created_unix_s": 1789616980.8077066,
+    "scope": "State-only native calibration"
+  },
+  "artifact_sha256": {
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-cap512-state-far-rep61-calibration.json": "ce5732d81c631cff0fc87421233eb497c234f2c9b06f76fb627625ed54276eaf",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-cap512-state-far-rep61-warmup.json": "818a72167504ac2e77ef43bd250f226d7b3523d40782334b480fa86e7a64e2ac",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-cap512-state-near-rep61-calibration.json": "b163ec136b7eaf50f6054d94360ff6137938e70f1da6b0fce4047a4cdddd1c2d",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-cap512-state-near-rep61-warmup.json": "518f8352df1164357f9b7614ebd5cabd594cceba6ca1806c640dab0786f677c0",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-native607-state-far-rep61-calibration.json": "60504930ff8a208a9b4abde3079aa0b0f09d9a4cbab5d1a159e1b24de769a2ca",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-native607-state-far-rep61-warmup.json": "c5b42ea456281fc60a80b9e442b8db1d426d951e184a480bb9c79ce11a21c845",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-native607-state-near-rep61-calibration.json": "558a1dfa1f3b8f79eda95610d45bcd87ce00d43d5ef10825a2055b0b740d23fd",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-native607-state-near-rep61-warmup.json": "f8e1dc8cc248109ce0fdea56a3a4edd01df9dd99831de19a592c50024d90f5a5",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-01-slots96-rep61/m2nc-slots96-state-far-rep61-calibration.json": "232dc56d0d19c5a761e637dc45396f8aa8fcec91ee1f5414b9531ef572d20fa4",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-01-slots96-rep61/m2nc-slots96-state-far-rep61-warmup.json": "0d0526fb31bc2eb19577f28780c6ea380aa4bb465bfb67662a40e33bef85ef4c",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-01-slots96-rep61/m2nc-slots96-state-near-rep61-calibration.json": "feaa5c2534cc3a5b2d29b424dafe53fadb56e277a8b9dbd5f676a1581695c47a",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-01-slots96-rep61/m2nc-slots96-state-near-rep61-warmup.json": "43b6ca41a7d15dd32e03d60227466d7b3bad22a31d54767f5afda921c8bbad20",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-02-slots96-rep62/m2nc-slots96-state-far-rep62-calibration.json": "eca74c4aded3c9ac47d4a1db10a3cd1c36d4d5d05eace9344c69f67482ee63e3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-02-slots96-rep62/m2nc-slots96-state-far-rep62-warmup.json": "a54402f119057f820c8cc2389d253a7cc5850757502731840744a0a0c3a1954a",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-02-slots96-rep62/m2nc-slots96-state-near-rep62-calibration.json": "bc10fcfbb47d623a2476bfecc9721afcb0870765a7a01d4de3fb76c0f94ce08e",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-02-slots96-rep62/m2nc-slots96-state-near-rep62-warmup.json": "cae457befe7385144a4e6930d3e50ec8da0dcc0a4861ce4f4d67c28f73cf68f4",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-cap512-state-far-rep62-calibration.json": "70ae03ce7b33bc7223c4b6492d06d1fb1fc7bdb09740310d8d7360c5d8b36cfd",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-cap512-state-far-rep62-warmup.json": "b5d05618846f11991b7ace4a305ac5f57b7675e0e53174717a4ab3c1b7ba4b9f",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-cap512-state-near-rep62-calibration.json": "268494cd477946845cd57e55f96d6679f4f7200946c5b7d3ab5a61b661cb0571",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-cap512-state-near-rep62-warmup.json": "cfcd8eb5741e2c1fa000fdfc24d2d987ac38dd8f7e103923bacc66013c666cd3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-native607-state-far-rep62-calibration.json": "673b391aa44470f89ab8e7203aab405aa94d82a3b523bec62510b8fc04042dc0",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-native607-state-far-rep62-warmup.json": "1098ebad5cb8a1d442de0385ab9b42ea9593153b0b35b412d0c61083f2af270e",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-native607-state-near-rep62-calibration.json": "02d696764ff456985949e0cb4a76d66602f3e2f5738425eec5a7b2282b51df57",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-native607-state-near-rep62-warmup.json": "c08cc8c7d76c6840fc27f78e3b2855607e83f5701d7dcde0794e7c7c9cfee684"
+  },
+  "rows": [
+    {
+      "experiment": {
+        "run_id": "m2nc-cap512-state-far-rep61-calibration",
+        "policy": "cap512",
+        "profile": "state",
+        "phase": "far",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 17.932228602548612,
+        "p95_jct_s": 33.927619602998675,
+        "mean_ttft_s": 5.463885673449608,
+        "p95_ttft_s": 20.51593316800063,
+        "makespan_s": 42.59596516400052,
+        "peak_active": 512,
+        "state_slot_seconds": 7277.204513216033,
+        "blocks": {
+          "prefill_other": 190,
+          "request_limit": 1
+        },
+        "max_lateness_ms": 1.3151815783203347,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 15.933043093572262,
+          "p95_jct_s": 16.125473488998978,
+          "mean_ttft_s": 3.739894167267522,
+          "p95_ttft_s": 6.910824465001497,
+          "mean_queue_s": 3.5499060304824397,
+          "p95_queue_s": 6.719844125000236,
+          "mean_after_activation_s": 12.383137063089823,
+          "mean_holding_s": 12.326817074300905
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 33.9257126743594,
+          "p95_jct_s": 33.95049036099954,
+          "mean_ttft_s": 19.2558177229063,
+          "p95_ttft_s": 29.49230810699919,
+          "mean_queue_s": 18.82613575604688,
+          "p95_queue_s": 29.062817017998896,
+          "mean_after_activation_s": 15.099576918312522,
+          "mean_holding_s": 15.091783924593273
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 7.503377908578841,
+          "holder_first_release_after_arrival_s": 7.497988609578897,
+          "holder_last_release_after_arrival_s": 7.497988609578897,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "snapshot": {
+        "arrival_s": 8.634797419421375,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 113.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2179989504,
+        "state_fraction": 0.8360280779241265,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "8edc2f622b6b1ccf755d3b4c2f199913631e2dccb89a2846b009738a4cec84fb",
+      "capacity": [
+        607,
+        781725,
+        607,
+        512
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 7.497988609578897,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 112,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.02662944957955915,
+        "max_interval_without_holder_decode_launch_s": 0.2513459430010698,
+        "batch_modes": {
+          "decode": 112
+        },
+        "admission_blocks": {
+          "request_limit": 1
+        }
+      },
+      "health": {
+        "sample_count": 172,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 64.0,
+        "max_memory_mib": 76394.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-cap512-state-far-rep61-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-cap512-state-near-rep61-calibration",
+        "policy": "cap512",
+        "profile": "state",
+        "phase": "near",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 17.389853426914918,
+        "p95_jct_s": 28.827817231000154,
+        "mean_ttft_s": 4.898059417840301,
+        "p95_ttft_s": 15.384960082001271,
+        "makespan_s": 42.65001972299979,
+        "peak_active": 512,
+        "state_slot_seconds": 7290.80692518767,
+        "blocks": {
+          "prefill_other": 190,
+          "request_limit": 1
+        },
+        "max_lateness_ms": 1.0791595756156624,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 15.960381468265624,
+          "p95_jct_s": 16.152068863999375,
+          "mean_ttft_s": 3.7445026846465126,
+          "p95_ttft_s": 6.931212632000097,
+          "mean_queue_s": 3.554327798304733,
+          "p95_queue_s": 6.740922082999532,
+          "mean_after_activation_s": 12.40605366996089,
+          "mean_holding_s": 12.349750747087292
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 28.82562909610928,
+          "p95_jct_s": 28.850684684999578,
+          "mean_ttft_s": 14.126513283390608,
+          "p95_ttft_s": 24.36215333799919,
+          "mean_queue_s": 13.696923166359255,
+          "p95_queue_s": 23.933956274000593,
+          "mean_after_activation_s": 15.128705929750026,
+          "mean_holding_s": 15.120852229359002
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.3762842935757362,
+          "holder_first_release_after_arrival_s": 2.37085924157509,
+          "holder_last_release_after_arrival_s": 2.37085924157509,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "snapshot": {
+        "arrival_s": 13.789265418425202,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 34.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2493775872,
+        "state_fraction": 0.8167511028066188,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "6c256187a78c3ac8a826f5a55b1c2320197a027a90dbcbc5e2da2c7aeb8b718f",
+      "capacity": [
+        607,
+        781725,
+        607,
+        512
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 2.37085924157509,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 33,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.03836650157609256,
+        "max_interval_without_holder_decode_launch_s": 0.24608855699989363,
+        "batch_modes": {
+          "decode": 33
+        },
+        "admission_blocks": {
+          "request_limit": 1
+        }
+      },
+      "health": {
+        "sample_count": 172,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 66.0,
+        "max_memory_mib": 76554.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-cap512-state-near-rep61-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-native607-state-far-rep61-calibration",
+        "policy": "native607",
+        "profile": "state",
+        "phase": "far",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 38.44333443533165,
+        "p95_jct_s": 39.92721271699884,
+        "mean_ttft_s": 4.639759219982693,
+        "p95_ttft_s": 13.15788645000066,
+        "makespan_s": 40.03613340599986,
+        "peak_active": 576,
+        "state_slot_seconds": 19564.076759199226,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.0711709999013386,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 39.73892492629106,
+          "p95_jct_s": 39.93109259999983,
+          "mean_ttft_s": 3.733631290578181,
+          "p95_ttft_s": 6.899054161000095,
+          "mean_queue_s": 3.544526869818405,
+          "p95_queue_s": 6.708029789000648,
+          "mean_after_activation_s": 36.19439805647266,
+          "mean_holding_s": 36.13819518636947
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 28.078610507656293,
+          "p95_jct_s": 28.10329679700044,
+          "mean_ttft_s": 11.88878265521879,
+          "p95_ttft_s": 22.19967003199963,
+          "mean_queue_s": 11.45508072371888,
+          "p95_queue_s": 21.76666483900044,
+          "mean_after_activation_s": 16.623529783937414,
+          "mean_holding_s": 16.583137871532074
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.05846493857825408,
+          "holder_first_release_after_arrival_s": 31.303981941578968,
+          "holder_last_release_after_arrival_s": 31.303981941578968,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "snapshot": {
+        "arrival_s": 8.634797419421375,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 113.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2179989504,
+        "state_fraction": 0.8360280779241265,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "8edc2f622b6b1ccf755d3b4c2f199913631e2dccb89a2846b009738a4cec84fb",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 31.303981941578968,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 112,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 23.110704301578153,
+        "max_interval_without_holder_decode_launch_s": 23.110704301578153,
+        "batch_modes": {
+          "extend": 128,
+          "decode": 112
+        },
+        "admission_blocks": {
+          "prefill_other": 127
+        }
+      },
+      "health": {
+        "sample_count": 162,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 62.0,
+        "max_memory_mib": 78660.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-native607-state-far-rep61-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-native607-state-near-rep61-calibration",
+        "policy": "native607",
+        "profile": "state",
+        "phase": "near",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 38.15697704553126,
+        "p95_jct_s": 39.6714956830001,
+        "mean_ttft_s": 4.643960827210084,
+        "p95_ttft_s": 13.175866203000623,
+        "makespan_s": 41.376404976999765,
+        "peak_active": 576,
+        "state_slot_seconds": 19399.0898935562,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.0753305743858022,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 39.48264282631445,
+          "p95_jct_s": 39.67542774300091,
+          "mean_ttft_s": 3.7364501903750167,
+          "p95_ttft_s": 6.918964578999294,
+          "mean_queue_s": 3.546436492050862,
+          "p95_queue_s": 6.727459833999092,
+          "mean_after_activation_s": 35.93620633426359,
+          "mean_holding_s": 35.879685327500425
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 27.551650799265673,
+          "p95_jct_s": 27.576335812000252,
+          "mean_ttft_s": 11.904045921890628,
+          "p95_ttft_s": 22.21038004700131,
+          "mean_queue_s": 11.470320318671924,
+          "p95_queue_s": 21.77723247600079,
+          "mean_after_activation_s": 16.08133048059375,
+          "mean_holding_s": 16.073296966812194
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.07331053757479822,
+          "holder_first_release_after_arrival_s": 25.892906445575136,
+          "holder_last_release_after_arrival_s": 25.892906445575136,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "snapshot": {
+        "arrival_s": 13.789265418425202,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 34.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2493775872,
+        "state_fraction": 0.8167511028066188,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "6c256187a78c3ac8a826f5a55b1c2320197a027a90dbcbc5e2da2c7aeb8b718f",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 25.892906445575136,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 33,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 23.125108440573968,
+        "max_interval_without_holder_decode_launch_s": 23.125108440573968,
+        "batch_modes": {
+          "extend": 128,
+          "decode": 33
+        },
+        "admission_blocks": {
+          "prefill_other": 127
+        }
+      },
+      "health": {
+        "sample_count": 168,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 65.0,
+        "max_memory_mib": 81176.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61/m2nc-native607-state-near-rep61-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-slots96-state-far-rep61-calibration",
+        "policy": "slots96",
+        "profile": "state",
+        "phase": "far",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 17.951919421611077,
+        "p95_jct_s": 33.90938712299976,
+        "mean_ttft_s": 5.464926122265603,
+        "p95_ttft_s": 20.54219676199864,
+        "makespan_s": 42.57805880900014,
+        "peak_active": 512,
+        "state_slot_seconds": 7284.337025191726,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.0690370008232808,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 15.957582521697216,
+          "p95_jct_s": 16.14579473500089,
+          "mean_ttft_s": 3.7379047848847335,
+          "p95_ttft_s": 6.911062848999791,
+          "mean_queue_s": 3.5487692807461677,
+          "p95_queue_s": 6.7223030740005925,
+          "mean_after_activation_s": 12.408813240951048,
+          "mean_holding_s": 12.346390929351063
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 33.90661462092197,
+          "p95_jct_s": 33.93129218200011,
+          "mean_ttft_s": 19.28109682131256,
+          "p95_ttft_s": 29.53085449399987,
+          "mean_queue_s": 18.851561759671938,
+          "p95_queue_s": 29.10191867800131,
+          "mean_after_activation_s": 15.055052861250033,
+          "mean_holding_s": 15.04663858381221
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 7.522228348580029,
+          "holder_first_release_after_arrival_s": 7.5164118155789765,
+          "holder_last_release_after_arrival_s": 7.5164118155789765,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "snapshot": {
+        "arrival_s": 8.634797419421375,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 113.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2179989504,
+        "state_fraction": 0.8360280779241265,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "8edc2f622b6b1ccf755d3b4c2f199913631e2dccb89a2846b009738a4cec84fb",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 242,
+        "native_slot_delays": 113,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 7.5164118155789765,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 112,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.022865447579533793,
+        "max_interval_without_holder_decode_launch_s": 0.25213862499913375,
+        "batch_modes": {
+          "decode": 112
+        },
+        "admission_blocks": {}
+      },
+      "health": {
+        "sample_count": 172,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 63.0,
+        "max_memory_mib": 76368.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-01-slots96-rep61/m2nc-slots96-state-far-rep61-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-slots96-state-near-rep61-calibration",
+        "policy": "slots96",
+        "profile": "state",
+        "phase": "near",
+        "rep": 61,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 17.363656846809054,
+        "p95_jct_s": 28.752588663001006,
+        "mean_ttft_s": 4.88607588260765,
+        "p95_ttft_s": 15.373238313000911,
+        "makespan_s": 42.574672380000266,
+        "peak_active": 512,
+        "state_slot_seconds": 7283.549979128051,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.0705080002080813,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 15.940334418404309,
+          "p95_jct_s": 16.13337152299937,
+          "mean_ttft_s": 3.732757921691423,
+          "p95_ttft_s": 6.9060201960000995,
+          "mean_queue_s": 3.54347123615819,
+          "p95_queue_s": 6.715989225000158,
+          "mean_after_activation_s": 12.396863182246118,
+          "mean_holding_s": 12.343294938289073
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 28.750236274047012,
+          "p95_jct_s": 28.775161708999804,
+          "mean_ttft_s": 14.112619569937465,
+          "p95_ttft_s": 24.34840672199971,
+          "mean_queue_s": 13.683768096390537,
+          "p95_queue_s": 23.919850493000922,
+          "mean_after_activation_s": 15.066468177656475,
+          "mean_holding_s": 15.059108917563208
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.3588614665750356,
+          "holder_first_release_after_arrival_s": 2.3534859795745433,
+          "holder_last_release_after_arrival_s": 2.3534859795745433,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "snapshot": {
+        "arrival_s": 13.789265418425202,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 34.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2493775872,
+        "state_fraction": 0.8167511028066188,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "6c256187a78c3ac8a826f5a55b1c2320197a027a90dbcbc5e2da2c7aeb8b718f",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 163,
+        "native_slot_delays": 34,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 2.3534859795745433,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 33,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.01392948657485249,
+        "max_interval_without_holder_decode_launch_s": 0.2513538139992306,
+        "batch_modes": {
+          "decode": 33
+        },
+        "admission_blocks": {}
+      },
+      "health": {
+        "sample_count": 172,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 64.0,
+        "max_memory_mib": 75594.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-01-slots96-rep61/m2nc-slots96-state-near-rep61-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-slots96-state-far-rep62-calibration",
+        "policy": "slots96",
+        "profile": "state",
+        "phase": "far",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 18.048124526831582,
+        "p95_jct_s": 34.106132349999825,
+        "mean_ttft_s": 5.474797823223996,
+        "p95_ttft_s": 20.63957206199848,
+        "makespan_s": 42.77493587400022,
+        "peak_active": 512,
+        "state_slot_seconds": 7336.73329233732,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.0827740000677322,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 16.041095487105455,
+          "p95_jct_s": 16.23173087500072,
+          "mean_ttft_s": 3.7368786783516015,
+          "p95_ttft_s": 6.91073834800045,
+          "mean_queue_s": 3.547506979605444,
+          "p95_queue_s": 6.721459866999794,
+          "mean_after_activation_s": 12.49358850750001,
+          "mean_holding_s": 12.436141423863834
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 34.10435684464059,
+          "p95_jct_s": 34.129658018000555,
+          "mean_ttft_s": 19.378150982203152,
+          "p95_ttft_s": 29.629319506000684,
+          "mean_queue_s": 18.949024919375034,
+          "p95_queue_s": 29.199186378000377,
+          "mean_after_activation_s": 15.155331925265557,
+          "mean_holding_s": 15.147326301859948
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 7.614108968578876,
+          "holder_first_release_after_arrival_s": 7.60490680357907,
+          "holder_last_release_after_arrival_s": 7.60490680357907,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "snapshot": {
+        "arrival_s": 8.634797419421375,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 113.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2179989504,
+        "state_fraction": 0.8360280779241265,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "a763237af25938b48145756cfcf5a369709b5ffb358097036417ec1505dae736",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 242,
+        "native_slot_delays": 113,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 7.60490680357907,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 112,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.035137272578140255,
+        "max_interval_without_holder_decode_launch_s": 0.2509365730002173,
+        "batch_modes": {
+          "decode": 112
+        },
+        "admission_blocks": {}
+      },
+      "health": {
+        "sample_count": 174,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 65.0,
+        "max_memory_mib": 75594.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-02-slots96-rep62/m2nc-slots96-state-far-rep62-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-slots96-state-near-rep62-calibration",
+        "policy": "slots96",
+        "profile": "state",
+        "phase": "near",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 17.48467681349301,
+        "p95_jct_s": 28.94209412100099,
+        "mean_ttft_s": 4.907181041659691,
+        "p95_ttft_s": 15.497941200999776,
+        "makespan_s": 42.76461804399878,
+        "peak_active": 512,
+        "state_slot_seconds": 7338.000778246744,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.0618799993389882,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 16.052778212664027,
+          "p95_jct_s": 16.24046800599899,
+          "mean_ttft_s": 3.7414943350155987,
+          "p95_ttft_s": 6.918371624999054,
+          "mean_queue_s": 3.5510325492148382,
+          "p95_queue_s": 6.725953343999208,
+          "mean_after_activation_s": 12.501745663449189,
+          "mean_holding_s": 12.44073415411864
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 28.93986562012489,
+          "p95_jct_s": 28.963821675999498,
+          "mean_ttft_s": 14.232674694812431,
+          "p95_ttft_s": 24.485413611000695,
+          "mean_queue_s": 13.801938962515578,
+          "p95_queue_s": 24.0553311929998,
+          "mean_after_activation_s": 15.137926657609313,
+          "mean_holding_s": 15.130388927156247
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.4646591655746306,
+          "holder_first_release_after_arrival_s": 2.458537808573965,
+          "holder_last_release_after_arrival_s": 2.458537808573965,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "snapshot": {
+        "arrival_s": 13.789265418425202,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 35.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2493775872,
+        "state_fraction": 0.8167511028066188,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "ed2dbb53b95bc092f01533dea5138f474ffda386e52d850efaa70fa07a97268d",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 164,
+        "native_slot_delays": 35,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 2.458537808573965,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 34,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.024416611573542468,
+        "max_interval_without_holder_decode_launch_s": 0.2523603939989698,
+        "batch_modes": {
+          "decode": 34
+        },
+        "admission_blocks": {}
+      },
+      "health": {
+        "sample_count": 174,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 63.0,
+        "max_memory_mib": 76368.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-02-slots96-rep62/m2nc-slots96-state-near-rep62-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-cap512-state-far-rep62-calibration",
+        "policy": "cap512",
+        "profile": "state",
+        "phase": "far",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 18.076478325440963,
+        "p95_jct_s": 34.04061260100025,
+        "mean_ttft_s": 5.514257618095519,
+        "p95_ttft_s": 20.66651357400042,
+        "makespan_s": 42.70819027200014,
+        "peak_active": 512,
+        "state_slot_seconds": 7330.987614199703,
+        "blocks": {
+          "prefill_other": 190,
+          "request_limit": 1
+        },
+        "max_lateness_ms": 1.1337045797414902,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 16.081226806824226,
+          "p95_jct_s": 16.27269562299989,
+          "mean_ttft_s": 3.777805454418008,
+          "p95_ttft_s": 6.950206486000752,
+          "mean_queue_s": 3.5875924132480215,
+          "p95_queue_s": 6.760269498001435,
+          "mean_after_activation_s": 12.493634393576205,
+          "mean_holding_s": 12.43662350320059
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 34.03849047437487,
+          "p95_jct_s": 34.06313878400033,
+          "mean_ttft_s": 19.40587492751561,
+          "p95_ttft_s": 29.6487491099997,
+          "mean_queue_s": 18.976911210890535,
+          "p95_queue_s": 29.221156745999906,
+          "mean_after_activation_s": 15.061579263484333,
+          "mean_holding_s": 15.05369344626564
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 7.650799302578889,
+          "holder_first_release_after_arrival_s": 7.645468347578571,
+          "holder_last_release_after_arrival_s": 7.645468347578571,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "snapshot": {
+        "arrival_s": 8.634797419421375,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 114.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2163474432,
+        "state_fraction": 0.837067893313328,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "a763237af25938b48145756cfcf5a369709b5ffb358097036417ec1505dae736",
+      "capacity": [
+        607,
+        781725,
+        607,
+        512
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 7.645468347578571,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 113,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.006002291578624863,
+        "max_interval_without_holder_decode_launch_s": 0.2518445360001351,
+        "batch_modes": {
+          "decode": 113
+        },
+        "admission_blocks": {
+          "request_limit": 1
+        }
+      },
+      "health": {
+        "sample_count": 174,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 62.0,
+        "max_memory_mib": 75594.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-cap512-state-far-rep62-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-cap512-state-near-rep62-calibration",
+        "policy": "cap512",
+        "profile": "state",
+        "phase": "near",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 17.470978628428835,
+        "p95_jct_s": 28.901037728999654,
+        "mean_ttft_s": 4.904834829739589,
+        "p95_ttft_s": 15.480799062999722,
+        "makespan_s": 42.72377257900007,
+        "peak_active": 512,
+        "state_slot_seconds": 7332.047483564336,
+        "blocks": {
+          "prefill_other": 190,
+          "request_limit": 1
+        },
+        "max_lateness_ms": 1.0715539994853316,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 16.042495598005875,
+          "p95_jct_s": 16.234177194999575,
+          "mean_ttft_s": 3.7402401545586024,
+          "p95_ttft_s": 6.913920869999856,
+          "mean_queue_s": 3.550117493230534,
+          "p95_queue_s": 6.722580808998828,
+          "mean_after_activation_s": 12.49237810477534,
+          "mean_holding_s": 12.432983941143334
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 28.89884287181252,
+          "p95_jct_s": 28.924189637999007,
+          "mean_ttft_s": 14.221592231187486,
+          "p95_ttft_s": 24.475942199998826,
+          "mean_queue_s": 13.790854978093734,
+          "p95_queue_s": 24.04460251299861,
+          "mean_after_activation_s": 15.107987893718786,
+          "mean_holding_s": 15.099370401546082
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.45539003657359,
+          "holder_first_release_after_arrival_s": 2.4498846975748165,
+          "holder_last_release_after_arrival_s": 2.4498846975748165,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "snapshot": {
+        "arrival_s": 13.789265418425202,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 35.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2493775872,
+        "state_fraction": 0.8167511028066188,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "ed2dbb53b95bc092f01533dea5138f474ffda386e52d850efaa70fa07a97268d",
+      "capacity": [
+        607,
+        781725,
+        607,
+        512
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 2.4498846975748165,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 34,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.015871013574724202,
+        "max_interval_without_holder_decode_launch_s": 0.25304545300059544,
+        "batch_modes": {
+          "decode": 34
+        },
+        "admission_blocks": {
+          "request_limit": 1
+        }
+      },
+      "health": {
+        "sample_count": 174,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 62.0,
+        "max_memory_mib": 76368.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-cap512-state-near-rep62-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-native607-state-far-rep62-calibration",
+        "policy": "native607",
+        "profile": "state",
+        "phase": "far",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 38.57650413438197,
+        "p95_jct_s": 40.06944443000066,
+        "mean_ttft_s": 4.651879068743085,
+        "p95_ttft_s": 13.184033674000602,
+        "makespan_s": 40.177534246000505,
+        "peak_active": 576,
+        "state_slot_seconds": 19633.5959142794,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.0682479991810379,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 39.88104183456058,
+          "p95_jct_s": 40.07308148100128,
+          "mean_ttft_s": 3.7433588286367225,
+          "p95_ttft_s": 6.918187573999603,
+          "mean_queue_s": 3.5539939192520116,
+          "p95_queue_s": 6.728046038000684,
+          "mean_after_activation_s": 36.32704791530857,
+          "mean_holding_s": 36.26947587768822
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 28.14020253295314,
+          "p95_jct_s": 28.165956421000374,
+          "mean_ttft_s": 11.920040989593986,
+          "p95_ttft_s": 22.236296166000102,
+          "mean_queue_s": 11.487214094093815,
+          "p95_queue_s": 21.804889580000236,
+          "mean_after_activation_s": 16.652988438859325,
+          "mean_holding_s": 16.619129139109873
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.09358832157886354,
+          "holder_first_release_after_arrival_s": 31.4447194425793,
+          "holder_last_release_after_arrival_s": 31.4447194425793,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "snapshot": {
+        "arrival_s": 8.634797419421375,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 113.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2179989504,
+        "state_fraction": 0.8360280779241265,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "a763237af25938b48145756cfcf5a369709b5ffb358097036417ec1505dae736",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 31.4447194425793,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 112,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 23.14433691457816,
+        "max_interval_without_holder_decode_launch_s": 23.14433691457816,
+        "batch_modes": {
+          "extend": 128,
+          "decode": 112
+        },
+        "admission_blocks": {
+          "prefill_other": 127
+        }
+      },
+      "health": {
+        "sample_count": 164,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 62.0,
+        "max_memory_mib": 80212.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-native607-state-far-rep62-calibration.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2nc-native607-state-near-rep62-calibration",
+        "policy": "native607",
+        "profile": "state",
+        "phase": "near",
+        "rep": 62,
+        "stage": "calibration",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 38.26281727170835,
+        "p95_jct_s": 39.78996750299848,
+        "mean_ttft_s": 4.639172541654523,
+        "p95_ttft_s": 13.156669398000304,
+        "makespan_s": 41.38308367799982,
+        "peak_active": 576,
+        "state_slot_seconds": 19437.022831110713,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.1473235753225453,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 39.600813125406276,
+          "p95_jct_s": 39.792252256998836,
+          "mean_ttft_s": 3.733009545683597,
+          "p95_ttft_s": 6.905277817999377,
+          "mean_queue_s": 3.544691747167967,
+          "p95_queue_s": 6.713517100999525,
+          "mean_after_activation_s": 36.05612137823831,
+          "mean_holding_s": 35.95107715673187
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 27.558850442124935,
+          "p95_jct_s": 27.58360217200061,
+          "mean_ttft_s": 11.888476509421935,
+          "p95_ttft_s": 22.19591152999965,
+          "mean_queue_s": 11.455970056671987,
+          "p95_queue_s": 21.762796217999494,
+          "mean_after_activation_s": 16.10288038545295,
+          "mean_holding_s": 16.094864482249903
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.0672081215743674,
+          "holder_first_release_after_arrival_s": 25.96255279957404,
+          "holder_last_release_after_arrival_s": 25.96255279957404,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "snapshot": {
+        "arrival_s": 13.789265418425202,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 35.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2493775872,
+        "state_fraction": 0.8167511028066188,
+        "shared_pool_bytes": 19481072000
+      },
+      "fingerprint": "ed2dbb53b95bc092f01533dea5138f474ffda386e52d850efaa70fa07a97268d",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 25.96255279957404,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 34,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 23.106295249574032,
+        "max_interval_without_holder_decode_launch_s": 23.106295249574032,
+        "batch_modes": {
+          "extend": 128,
+          "decode": 34
+        },
+        "admission_blocks": {
+          "prefill_other": 127
+        }
+      },
+      "health": {
+        "sample_count": 168,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 63.0,
+        "max_memory_mib": 80216.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62/m2nc-native607-state-near-rep62-calibration.json"
+    }
+  ],
+  "contrasts": [
+    {
+      "phase": "far",
+      "policy": "cap512",
+      "samples": [
+        {
+          "rep": 61,
+          "gain_percent": {
+            "mean_jct_s": 53.354127923753,
+            "p95_jct_s": 15.026325920932273,
+            "makespan_s": -6.393803647424742,
+            "state_slot_seconds": 62.80323062117297,
+            "candidate_mean_jct_s": -20.824043857543305,
+            "candidate_mean_ttft_s": -61.96626922482783,
+            "candidate_p95_ttft_s": -32.850209325127864
+          },
+          "triggered": true,
+          "constrained_gain": false
+        },
+        {
+          "rep": 62,
+          "gain_percent": {
+            "mean_jct_s": 53.14122227750028,
+            "p95_jct_s": 15.04595812285963,
+            "makespan_s": -6.298684260972408,
+            "state_slot_seconds": 62.66100389247637,
+            "candidate_mean_jct_s": -20.960360660214263,
+            "candidate_mean_ttft_s": -62.80040433129924,
+            "candidate_p95_ttft_s": -33.334926323446965
+          },
+          "triggered": true,
+          "constrained_gain": false
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 53.24767510062664,
+        "p95_jct_s": 15.036142021895952,
+        "makespan_s": -6.346243954198576,
+        "state_slot_seconds": 62.73211725682467,
+        "candidate_mean_jct_s": -20.892202258878783,
+        "candidate_mean_ttft_s": -62.38333677806354,
+        "candidate_p95_ttft_s": -33.092567824287414
+      },
+      "screen_positive": false
+    },
+    {
+      "phase": "far",
+      "policy": "slots96",
+      "samples": [
+        {
+          "rep": 61,
+          "gain_percent": {
+            "mean_jct_s": 53.30290755134856,
+            "p95_jct_s": 15.071990215427721,
+            "makespan_s": -6.34907816202686,
+            "state_slot_seconds": 62.76677343454729,
+            "candidate_mean_jct_s": -20.756027481048378,
+            "candidate_mean_ttft_s": -62.178899055310616,
+            "candidate_p95_ttft_s": -33.023844279814654
+          },
+          "triggered": true,
+          "constrained_gain": false
+        },
+        {
+          "rep": 62,
+          "gain_percent": {
+            "mean_jct_s": 53.21472245395641,
+            "p95_jct_s": 14.882442631363269,
+            "makespan_s": -6.464810936620073,
+            "state_slot_seconds": 62.631739369753674,
+            "candidate_mean_jct_s": -21.194425678717923,
+            "candidate_mean_ttft_s": -62.56782169725744,
+            "candidate_p95_ttft_s": -33.247548444262556
+          },
+          "triggered": true,
+          "constrained_gain": false
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 53.25881500265248,
+        "p95_jct_s": 14.977216423395495,
+        "makespan_s": -6.406944549323466,
+        "state_slot_seconds": 62.69925640215048,
+        "candidate_mean_jct_s": -20.97522657988315,
+        "candidate_mean_ttft_s": -62.373360376284026,
+        "candidate_p95_ttft_s": -33.1356963620386
+      },
+      "screen_positive": false
+    },
+    {
+      "phase": "near",
+      "policy": "cap512",
+      "samples": [
+        {
+          "rep": 61,
+          "gain_percent": {
+            "mean_jct_s": 54.42549495950826,
+            "p95_jct_s": 27.333676901540787,
+            "makespan_s": -3.0781184269343735,
+            "state_slot_seconds": 62.41675787270073,
+            "candidate_mean_jct_s": -4.623963573455148,
+            "candidate_mean_ttft_s": -18.669848689116975,
+            "candidate_p95_ttft_s": -9.688142600191112
+          },
+          "triggered": true,
+          "constrained_gain": true
+        },
+        {
+          "rep": 62,
+          "gain_percent": {
+            "mean_jct_s": 54.33953933824174,
+            "p95_jct_s": 27.366018263720022,
+            "makespan_s": -3.2397027525355466,
+            "state_slot_seconds": 62.27792935537056,
+            "candidate_mean_jct_s": -4.862294356223747,
+            "candidate_mean_ttft_s": -19.625018562441497,
+            "candidate_p95_ttft_s": -10.272300224829802
+          },
+          "triggered": true,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 54.382517148875,
+        "p95_jct_s": 27.349847582630403,
+        "makespan_s": -3.15891058973496,
+        "state_slot_seconds": 62.347343614035644,
+        "candidate_mean_jct_s": -4.743128964839448,
+        "candidate_mean_ttft_s": -19.147433625779236,
+        "candidate_p95_ttft_s": -9.980221412510456
+      },
+      "screen_positive": true
+    },
+    {
+      "phase": "near",
+      "policy": "slots96",
+      "samples": [
+        {
+          "rep": 61,
+          "gain_percent": {
+            "mean_jct_s": 54.49414971712862,
+            "p95_jct_s": 27.523305668250945,
+            "makespan_s": -2.8960162287337203,
+            "state_slot_seconds": 62.4541665660953,
+            "candidate_mean_jct_s": -4.3503218137959445,
+            "candidate_mean_ttft_s": -18.553134476618908,
+            "candidate_p95_ttft_s": -9.626249845675476
+          },
+          "triggered": true,
+          "constrained_gain": true
+        },
+        {
+          "rep": 62,
+          "gain_percent": {
+            "mean_jct_s": 54.30373908608858,
+            "p95_jct_s": 27.2628354903281,
+            "makespan_s": -3.3384036258598444,
+            "state_slot_seconds": 62.247300720861375,
+            "candidate_mean_jct_s": -5.011149434190521,
+            "candidate_mean_ttft_s": -19.71823877965067,
+            "candidate_p95_ttft_s": -10.314972097030532
+          },
+          "triggered": true,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 54.3989444016086,
+        "p95_jct_s": 27.39307057928952,
+        "makespan_s": -3.1172099272967824,
+        "state_slot_seconds": 62.350733643478335,
+        "candidate_mean_jct_s": -4.6807356239932325,
+        "candidate_mean_ttft_s": -19.13568662813479,
+        "candidate_p95_ttft_s": -9.970610971353004
+      },
+      "screen_positive": true
+    }
+  ],
+  "server_logs": [
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-00-native607-rep61",
+      "allocation_retry_warnings": 2,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-01-slots96-rep61",
+      "allocation_retry_warnings": 0,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-02-slots96-rep62",
+      "allocation_retry_warnings": 0,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_native_counterexample_20260917/measure01/session-03-native607-rep62",
+      "allocation_retry_warnings": 0,
+      "custom_all_reduce_fallback_warnings": 2
+    }
+  ],
+  "scope": "State-only native calibration, two repeats; not an independent state-cost ablation, held-out, or CI."
+}

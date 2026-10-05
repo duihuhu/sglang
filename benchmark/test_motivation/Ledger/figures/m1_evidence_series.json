@@ -1,0 +1,147 @@
+{
+  "source": "benchmark/test_motivation/Ledger/results/vtc_state_tax_20260826/analysis.json",
+  "source_sha256": "f46d139cc3ff28ffbd0356003aa851cd9970a728939537557946ed024ed0284f",
+  "opening": {
+    "source": "benchmark/test_motivation/Ledger/results/vtc_state_tax_20260826/analysis.json",
+    "source_sha256": "f46d139cc3ff28ffbd0356003aa851cd9970a728939537557946ed024ed0284f",
+    "cell": "f16-base",
+    "policy": "local token-VTC",
+    "input_weight": 1,
+    "output_weight": 2,
+    "rows": [
+      {
+        "tenant": "packed",
+        "requests_per_wave": 1,
+        "input_per_request": 16384,
+        "output_per_request": 512,
+        "offered_token_charge": 17408,
+        "fixed_state_per_initial_resident_token_relative_to_packed": 1,
+        "mean_p95_slowdown_ratio": 1.2095948799520622
+      },
+      {
+        "tenant": "split",
+        "requests_per_wave": 16,
+        "input_per_request": 1024,
+        "output_per_request": 32,
+        "offered_token_charge": 17408,
+        "fixed_state_per_initial_resident_token_relative_to_packed": 16,
+        "mean_p95_slowdown_ratio": 10.341447982901292
+      }
+    ],
+    "panel_a": "Offered workload charge, not measured backlogged-window fairness",
+    "panel_b": "Analytical S/L for identical active state size S; no aggregate memory or state-time claim",
+    "panel_c": "Mean of per-run mixed/isolated p95 ratios, not a ratio of pooled request quantiles; CI unavailable in this compact input",
+    "causality": "Juxtaposition of observations, not proof that state tax alone causes slowdown"
+  },
+  "resources": [
+    {
+      "cell": "f16-base",
+      "state_capacity": 48,
+      "kv_capacity": 196608,
+      "tenants": [
+        {
+          "tenant": "packed",
+          "peak_state_slots": 18,
+          "peak_kv_tokens": 100166,
+          "peak_state_fraction": 0.375,
+          "peak_kv_fraction": 0.5094706217447916
+        },
+        {
+          "tenant": "split",
+          "peak_state_slots": 24,
+          "peak_kv_tokens": 8448,
+          "peak_state_fraction": 0.5,
+          "peak_kv_fraction": 0.04296875
+        }
+      ]
+    },
+    {
+      "cell": "f16-state-relaxed",
+      "state_capacity": 480,
+      "kv_capacity": 196608,
+      "tenants": [
+        {
+          "tenant": "packed",
+          "peak_state_slots": 24,
+          "peak_kv_tokens": 135086,
+          "peak_state_fraction": 0.05,
+          "peak_kv_fraction": 0.6870829264322916
+        },
+        {
+          "tenant": "split",
+          "peak_state_slots": 270,
+          "peak_kv_tokens": 94844.66666666667,
+          "peak_state_fraction": 0.5625,
+          "peak_kv_fraction": 0.4824049207899306
+        }
+      ]
+    }
+  ],
+  "partitions": [
+    {
+      "cell": "f1-base",
+      "split_factor": 1,
+      "split_input_per_request": 16384,
+      "split_output_per_request": 512,
+      "wave_interval_s": 1.5,
+      "state_capacity": 48,
+      "kv_capacity": 196608,
+      "packed_p95_slowdown_ratio": 1.7748975302243024,
+      "split_p95_slowdown_ratio": 1.7691610203063592,
+      "mean_absolute_slowdown_gap_pp": 1.1732683268206237,
+      "packed_queue_p95_s": 10.787613141040007,
+      "split_queue_p95_s": 10.584062997251749,
+      "offered_token_charge_per_tenant_wave": 17408
+    },
+    {
+      "cell": "f4-base",
+      "split_factor": 4,
+      "split_input_per_request": 4096,
+      "split_output_per_request": 128,
+      "wave_interval_s": 1.5,
+      "state_capacity": 48,
+      "kv_capacity": 196608,
+      "packed_p95_slowdown_ratio": 1.324540163469366,
+      "split_p95_slowdown_ratio": 8.90201979672877,
+      "mean_absolute_slowdown_gap_pp": 757.7479633259403,
+      "packed_queue_p95_s": 8.331206819042563,
+      "split_queue_p95_s": 11.319011519973477,
+      "offered_token_charge_per_tenant_wave": 17408
+    },
+    {
+      "cell": "f16-base",
+      "split_factor": 16,
+      "split_input_per_request": 1024,
+      "split_output_per_request": 32,
+      "wave_interval_s": 1.5,
+      "state_capacity": 48,
+      "kv_capacity": 196608,
+      "packed_p95_slowdown_ratio": 1.2095948799520622,
+      "split_p95_slowdown_ratio": 10.341447982901292,
+      "mean_absolute_slowdown_gap_pp": 913.185310294923,
+      "packed_queue_p95_s": 8.180985063935319,
+      "split_queue_p95_s": 10.685879406208793,
+      "offered_token_charge_per_tenant_wave": 17408
+    },
+    {
+      "cell": "f32-base",
+      "split_factor": 32,
+      "split_input_per_request": 512,
+      "split_output_per_request": 16,
+      "wave_interval_s": 1.5,
+      "state_capacity": 48,
+      "kv_capacity": 196608,
+      "packed_p95_slowdown_ratio": 1.229177736988373,
+      "split_p95_slowdown_ratio": 10.474855597479378,
+      "mean_absolute_slowdown_gap_pp": 924.5677860491005,
+      "packed_queue_p95_s": 8.28119805889825,
+      "split_queue_p95_s": 11.047653258467713,
+      "offered_token_charge_per_tenant_wave": 17408
+    }
+  ],
+  "scope": "Local token-VTC, Kimi-Linear-48B-A3B, TP2 A800 GPUs 6/7, no prefix reuse",
+  "aggregation": "Three confirmation runs per policy/cell; compact source has no per-run CI",
+  "resource_note": "Mean per-run peaks; state and KV peaks need not be simultaneous. Pools have separate denominators. Raw slots include the configured state allocation path.",
+  "partition_note": "Input length, output length, and request count change together; equal totals do not imply equal compute or application semantics. Gap is mean absolute per-run difference, not absolute difference of mean ratios.",
+  "conclusion_scope": "Length/partition-related resource mismatch and service asymmetry; not a causal claim that state tax alone accounts for the latency gap."
+}

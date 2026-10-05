@@ -1,0 +1,17 @@
+{
+  "classification": "exploratory source-level request-slot accounting witness; not an end-to-end fix experiment",
+  "running_requests": 2,
+  "existing_continuations": 1,
+  "selected_new_requests": 4,
+  "free_request_slots_before": 5,
+  "runtime_cap": 8,
+  "actual_gate_blocks_next_candidate": true,
+  "actual_allocator_accepts_continuation_plus_five_new": true,
+  "new_slots_consumed": 5,
+  "active_requests_if_candidate_added": 8,
+  "scope": "Request-slot gate only. Other budgets and serving semantics require separate checks. Not hybrid-exclusive.",
+  "source_hashes": {
+    "/Users/gaofz/Desktop/\u80e1cunchen/Phd/LLM/sglang/python/sglang/srt/managers/scheduler.py": "e49817460788087a11a7404a64385046c407749fa9c3ef54f1a231579e29f936",
+    "/Users/gaofz/Desktop/\u80e1cunchen/Phd/LLM/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3"
+  }
+}

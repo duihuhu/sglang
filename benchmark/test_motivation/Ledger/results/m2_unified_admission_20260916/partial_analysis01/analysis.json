@@ -1,0 +1,1317 @@
+{
+  "complete": false,
+  "sources": [
+    {
+      "directory": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01",
+      "manifest": {
+        "source_hashes": {
+          "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+          "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+          "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+          "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+          "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+          "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+          "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+          "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+          "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+          "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+          "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+          "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+          "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+          "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+          "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef"
+        },
+        "stage": "screen",
+        "plan": {
+          "arrivals": {
+            "state-far": 8.634797419421375,
+            "state-near": 13.789265418425202,
+            "kv-far": 115.5441352268681,
+            "kv-near": 119.8455872037448
+          },
+          "evidence": [
+            {
+              "profile": "state",
+              "phase": "far",
+              "rep": 41,
+              "snapshot": {
+                "arrival_s": 8.634797419421375,
+                "holders": 512,
+                "alive": 512,
+                "prefilled": 512,
+                "median_remaining": 112.0,
+                "state_live_bytes_proxy": 11114905600,
+                "kv_live_bytes_proxy": 2179989504,
+                "state_fraction": 0.8360280779241265,
+                "shared_pool_bytes": 19481072000
+              },
+              "errors": []
+            },
+            {
+              "profile": "state",
+              "phase": "far",
+              "rep": 42,
+              "snapshot": {
+                "arrival_s": 8.634797419421375,
+                "holders": 512,
+                "alive": 512,
+                "prefilled": 512,
+                "median_remaining": 113.0,
+                "state_live_bytes_proxy": 11114905600,
+                "kv_live_bytes_proxy": 2179989504,
+                "state_fraction": 0.8360280779241265,
+                "shared_pool_bytes": 19481072000
+              },
+              "errors": []
+            },
+            {
+              "profile": "state",
+              "phase": "near",
+              "rep": 41,
+              "snapshot": {
+                "arrival_s": 13.789265418425202,
+                "holders": 512,
+                "alive": 512,
+                "prefilled": 512,
+                "median_remaining": 32.0,
+                "state_live_bytes_proxy": 11114905600,
+                "kv_live_bytes_proxy": 2510290944,
+                "state_fraction": 0.8157611205171618,
+                "shared_pool_bytes": 19481072000
+              },
+              "errors": []
+            },
+            {
+              "profile": "state",
+              "phase": "near",
+              "rep": 42,
+              "snapshot": {
+                "arrival_s": 13.789265418425202,
+                "holders": 512,
+                "alive": 512,
+                "prefilled": 512,
+                "median_remaining": 33.0,
+                "state_live_bytes_proxy": 11114905600,
+                "kv_live_bytes_proxy": 2510290944,
+                "state_fraction": 0.8157611205171618,
+                "shared_pool_bytes": 19481072000
+              },
+              "errors": []
+            },
+            {
+              "profile": "kv",
+              "phase": "far",
+              "rep": 41,
+              "snapshot": {
+                "arrival_s": 115.5441352268681,
+                "holders": 96,
+                "alive": 96,
+                "prefilled": 96,
+                "median_remaining": 117.0,
+                "state_live_bytes_proxy": 2084044800,
+                "kv_live_bytes_proxy": 12683575296,
+                "state_fraction": 0.14112259026520396,
+                "shared_pool_bytes": 19481072000
+              },
+              "errors": []
+            },
+            {
+              "profile": "kv",
+              "phase": "far",
+              "rep": 42,
+              "snapshot": {
+                "arrival_s": 115.5441352268681,
+                "holders": 96,
+                "alive": 96,
+                "prefilled": 96,
+                "median_remaining": 108.0,
+                "state_live_bytes_proxy": 2084044800,
+                "kv_live_bytes_proxy": 12683575296,
+                "state_fraction": 0.14112259026520396,
+                "shared_pool_bytes": 19481072000
+              },
+              "errors": []
+            },
+            {
+              "profile": "kv",
+              "phase": "near",
+              "rep": 41,
+              "snapshot": {
+                "arrival_s": 119.8455872037448,
+                "holders": 96,
+                "alive": 96,
+                "prefilled": 96,
+                "median_remaining": 38.0,
+                "state_live_bytes_proxy": 2084044800,
+                "kv_live_bytes_proxy": 12751699968,
+                "state_fraction": 0.14047456548964,
+                "shared_pool_bytes": 19481072000
+              },
+              "errors": []
+            },
+            {
+              "profile": "kv",
+              "phase": "near",
+              "rep": 42,
+              "snapshot": {
+                "arrival_s": 119.8455872037448,
+                "holders": 96,
+                "alive": 96,
+                "prefilled": 96,
+                "median_remaining": 27.0,
+                "state_live_bytes_proxy": 2084044800,
+                "kv_live_bytes_proxy": 12751699968,
+                "state_fraction": 0.14047456548964,
+                "shared_pool_bytes": 19481072000
+              },
+              "errors": []
+            }
+          ],
+          "scenes_valid": true,
+          "source_hashes": {
+            "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+            "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+            "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+            "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+            "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+            "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+            "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+            "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+            "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+            "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+            "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+            "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+            "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+            "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+            "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef"
+          },
+          "parent_manifest": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/calibrate03/manifest.json",
+          "physical_gpu_ids": [
+            4,
+            5
+          ],
+          "formal_reps": [
+            51,
+            52
+          ],
+          "primary": "mean JCT; p95/makespan regression <=5%"
+        },
+        "gpus": [
+          {
+            "index": 4,
+            "uuid": "GPU-bfe384be-b1b9-a366-b97f-fb4a19ecca92",
+            "name": "NVIDIA A800-SXM4-80GB",
+            "memory_mib": 1,
+            "total_mib": 81920,
+            "utilization": 0
+          },
+          {
+            "index": 5,
+            "uuid": "GPU-98c6d507-a0b0-178a-3988-bede27dae961",
+            "name": "NVIDIA A800-SXM4-80GB",
+            "memory_mib": 1,
+            "total_mib": 81920,
+            "utilization": 0
+          }
+        ],
+        "created_unix_s": 1789561882.9453883
+      },
+      "completed": null
+    }
+  ],
+  "rows": [
+    {
+      "experiment": {
+        "run_id": "m2ua-native-kv-far-rep51-screen",
+        "policy": "native",
+        "profile": "kv",
+        "phase": "far",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 115.5441352268681,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 96.00878156147664,
+        "p95_jct_s": 144.7366783581674,
+        "makespan_s": 145.46702027879655,
+        "peak_active": 144,
+        "state_slot_seconds": 9125.906519496813,
+        "blocks": {
+          "prefill_other": 507,
+          "prefill_no_token": 1
+        },
+        "max_lateness_ms": 28.98136407136917,
+        "holder": {
+          "count": 96,
+          "mean_jct_s": 144.69105505370922,
+          "p95_jct_s": 144.74126420356333,
+          "mean_queue_s": 56.80900405946886,
+          "p95_queue_s": 108.84667139314115,
+          "mean_after_activation_s": 87.88205099424036,
+          "mean_holding_s": 87.87106967387565
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 22.985371323127765,
+          "p95_jct_s": 29.872139785438776,
+          "mean_queue_s": 12.190493902482558,
+          "p95_queue_s": 25.02084831893444,
+          "mean_after_activation_s": 10.794877420645207,
+          "mean_holding_s": 10.785684856324224
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.006973841227591038,
+          "holder_first_release_after_arrival_s": 29.198791067115963,
+          "holder_last_release_after_arrival_s": 29.198791067115963,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 115.5441352268681,
+        "holders": 96,
+        "alive": 96,
+        "prefilled": 96,
+        "median_remaining": 117.0,
+        "state_live_bytes_proxy": 2084044800,
+        "kv_live_bytes_proxy": 12683575296,
+        "state_fraction": 0.14112259026520396,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "fingerprint": "c2371c6bf22a34a08a2f45f3892a165f234b9a16338e13e820bd622a4f7392f8",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-far-rep51-screen.json",
+      "count": 160
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-native-kv-near-rep51-screen",
+        "policy": "native",
+        "profile": "kv",
+        "phase": "near",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 119.8455872037448,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 94.11645604172955,
+        "p95_jct_s": 138.99667101167142,
+        "makespan_s": 148.212614569813,
+        "peak_active": 144,
+        "state_slot_seconds": 8841.911769039929,
+        "blocks": {
+          "prefill_other": 507,
+          "prefill_no_token": 1
+        },
+        "max_lateness_ms": 36.16639479994774,
+        "holder": {
+          "count": 96,
+          "mean_jct_s": 138.94899025410027,
+          "p95_jct_s": 139.00172042287886,
+          "mean_queue_s": 56.861589297982086,
+          "p95_queue_s": 108.91833343915641,
+          "mean_after_activation_s": 82.08740095611819,
+          "mean_holding_s": 82.07664380645535
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 26.867654723173473,
+          "p95_jct_s": 28.315911831334233,
+          "mean_queue_s": 11.822553582373075,
+          "p95_queue_s": 23.4606417901814,
+          "mean_after_activation_s": 15.045101140800398,
+          "mean_holding_s": 15.03990568156587
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.05672813905403018,
+          "holder_first_release_after_arrival_s": 19.158711339812726,
+          "holder_last_release_after_arrival_s": 19.158711339812726,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 119.8455872037448,
+        "holders": 96,
+        "alive": 96,
+        "prefilled": 96,
+        "median_remaining": 36.0,
+        "state_live_bytes_proxy": 2084044800,
+        "kv_live_bytes_proxy": 12751699968,
+        "state_fraction": 0.14047456548964,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "fingerprint": "99639f58045d78dc64aad87db010d4538612e47c5872b996d130cfacf4c90d81",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-near-rep51-screen.json",
+      "count": 160
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-native-state-far-rep51-screen",
+        "policy": "native",
+        "profile": "state",
+        "phase": "far",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 38.183630193518994,
+        "p95_jct_s": 39.65916088037193,
+        "makespan_s": 39.765458311885595,
+        "peak_active": 576,
+        "state_slot_seconds": 19423.610430445522,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.5569524839520454,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 39.469458020088496,
+          "p95_jct_s": 39.661351731047034,
+          "mean_queue_s": 3.52880244662083,
+          "p95_queue_s": 6.677278760820627,
+          "mean_after_activation_s": 35.940655573467666,
+          "mean_holding_s": 35.88088642540606
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 27.897007580962963,
+          "p95_jct_s": 27.921902559697628,
+          "mean_queue_s": 11.410247580846772,
+          "p95_queue_s": 21.671763392165303,
+          "mean_after_activation_s": 16.486760000116192,
+          "mean_holding_s": 16.446821572462795
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.07830496970564127,
+          "holder_first_release_after_arrival_s": 31.030942850746214,
+          "holder_last_release_after_arrival_s": 31.030942850746214,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 8.634797419421375,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 112.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2179989504,
+        "state_fraction": 0.8360280779241265,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "fingerprint": "890805a6b9588fab03da0568af4635f62912a73e22d1246bffe80e1ac65f971a",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-far-rep51-screen.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-native-state-near-rep51-screen",
+        "policy": "native",
+        "profile": "state",
+        "phase": "near",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 37.88418199589877,
+        "p95_jct_s": 39.392027113586664,
+        "makespan_s": 41.16594840027392,
+        "peak_active": 576,
+        "state_slot_seconds": 19232.97667487152,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.0752916485071151,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 39.20200114250474,
+          "p95_jct_s": 39.39587243832648,
+          "mean_queue_s": 3.5307332530901476,
+          "p95_queue_s": 6.687786769121885,
+          "mean_after_activation_s": 35.671267889414594,
+          "mean_holding_s": 35.57273143076236
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 27.341628823050996,
+          "p95_jct_s": 27.366541987285018,
+          "mean_queue_s": 11.4011904844956,
+          "p95_queue_s": 21.656511882320046,
+          "mean_after_activation_s": 15.940438338555396,
+          "mean_holding_s": 15.933409098768607
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.06819966062903404,
+          "holder_first_release_after_arrival_s": 25.570267653092742,
+          "holder_last_release_after_arrival_s": 25.570267653092742,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 13.789265418425202,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 32.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2510290944,
+        "state_fraction": 0.8157611205171618,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "fingerprint": "042458ed599116575542dd3815b660bc6b17fb8307172db58cc224eae287e2d8",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-near-rep51-screen.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-kv-far-rep51-screen",
+        "policy": "decode32",
+        "profile": "kv",
+        "phase": "far",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 115.5441352268681,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 96.90833034275565,
+        "p95_jct_s": 144.99834242463112,
+        "makespan_s": 147.39878089539707,
+        "peak_active": 144,
+        "state_slot_seconds": 9148.567426808178,
+        "blocks": {
+          "prefill_other": 507,
+          "prefill_no_token": 1
+        },
+        "max_lateness_ms": 33.08111868798733,
+        "holder": {
+          "count": 96,
+          "mean_jct_s": 144.95164110360201,
+          "p95_jct_s": 145.00405229628086,
+          "mean_queue_s": 56.878913364761196,
+          "p95_queue_s": 108.98191390186548,
+          "mean_after_activation_s": 88.07272773884083,
+          "mean_holding_s": 88.06264064947997
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 24.84336420148611,
+          "p95_jct_s": 31.803747108206153,
+          "mean_queue_s": 13.981835076381685,
+          "p95_queue_s": 26.85072036087513,
+          "mean_after_activation_s": 10.861529125104425,
+          "mean_holding_s": 10.852405069657834
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 1.8002339778468013,
+          "holder_first_release_after_arrival_s": 29.46224087383598,
+          "holder_last_release_after_arrival_s": 29.46224087383598,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 115.5441352268681,
+        "holders": 96,
+        "alive": 96,
+        "prefilled": 96,
+        "median_remaining": 119.0,
+        "state_live_bytes_proxy": 2084044800,
+        "kv_live_bytes_proxy": 12683575296,
+        "state_fraction": 0.14112259026520396,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "fingerprint": "c2371c6bf22a34a08a2f45f3892a165f234b9a16338e13e820bd622a4f7392f8",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-far-rep51-screen.json",
+      "count": 160
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-kv-near-rep51-screen",
+        "policy": "decode32",
+        "profile": "kv",
+        "phase": "near",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 119.8455872037448,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 94.97666082473006,
+        "p95_jct_s": 139.47298779338598,
+        "makespan_s": 148.6721770092845,
+        "peak_active": 144,
+        "state_slot_seconds": 8878.628970330581,
+        "blocks": {
+          "prefill_other": 507,
+          "prefill_no_token": 1
+        },
+        "max_lateness_ms": 36.05624355375767,
+        "holder": {
+          "count": 96,
+          "mean_jct_s": 139.4258738331846,
+          "p95_jct_s": 139.47881780937314,
+          "mean_queue_s": 56.969731281608496,
+          "p95_queue_s": 109.12380287796259,
+          "mean_after_activation_s": 82.45614255157611,
+          "mean_holding_s": 82.44518295962673
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 28.30284131204826,
+          "p95_jct_s": 28.775371642783284,
+          "mean_queue_s": 13.236835488671204,
+          "p95_queue_s": 23.944908959791064,
+          "mean_after_activation_s": 15.066005823377054,
+          "mean_holding_s": 15.06080322197522
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 1.7738822880201042,
+          "holder_first_release_after_arrival_s": 19.635941836517304,
+          "holder_last_release_after_arrival_s": 19.635941836517304,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 119.8455872037448,
+        "holders": 96,
+        "alive": 96,
+        "prefilled": 96,
+        "median_remaining": 44.0,
+        "state_live_bytes_proxy": 2084044800,
+        "kv_live_bytes_proxy": 12734668800,
+        "state_fraction": 0.14063601310170404,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "fingerprint": "99639f58045d78dc64aad87db010d4538612e47c5872b996d130cfacf4c90d81",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-near-rep51-screen.json",
+      "count": 160
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-state-far-rep51-screen",
+        "policy": "decode32",
+        "profile": "state",
+        "phase": "far",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 38.44250985976477,
+        "p95_jct_s": 39.68882811628282,
+        "makespan_s": 39.79826243966818,
+        "peak_active": 576,
+        "state_slot_seconds": 19427.849948002025,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.2839781120419502,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 39.500936507683946,
+          "p95_jct_s": 39.692242285236716,
+          "mean_queue_s": 3.553799353860086,
+          "p95_queue_s": 6.711840912699699,
+          "mean_after_activation_s": 35.94713715382386,
+          "mean_holding_s": 35.889106644663116
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 29.97509667641134,
+          "p95_jct_s": 30.000287268310785,
+          "mean_queue_s": 13.488640942872735,
+          "p95_queue_s": 23.74633640423417,
+          "mean_after_activation_s": 16.486455733538605,
+          "mean_holding_s": 16.447302280226722
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.14207002799958,
+          "holder_first_release_after_arrival_s": 31.064174805767834,
+          "holder_last_release_after_arrival_s": 31.064174805767834,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 8.634797419421375,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 113.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2179989504,
+        "state_fraction": 0.8360280779241265,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "fingerprint": "890805a6b9588fab03da0568af4635f62912a73e22d1246bffe80e1ac65f971a",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-far-rep51-screen.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-state-near-rep51-screen",
+        "policy": "decode32",
+        "profile": "state",
+        "phase": "near",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 17.18864040760026,
+        "p95_jct_s": 28.486554795876145,
+        "makespan_s": 42.30903871357441,
+        "peak_active": 512,
+        "state_slot_seconds": 7201.550864418969,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.0646955072886044,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 15.776656484042178,
+          "p95_jct_s": 15.968875693157315,
+          "mean_queue_s": 3.530316655163915,
+          "p95_queue_s": 6.686617333441973,
+          "mean_after_activation_s": 12.246339828878263,
+          "mean_holding_s": 12.189796976032085
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 28.484511796064908,
+          "p95_jct_s": 28.509919928386807,
+          "mean_queue_s": 13.471382994990563,
+          "p95_queue_s": 23.66956335492432,
+          "mean_after_activation_s": 15.013128801074345,
+          "mean_holding_s": 15.005856448289705
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.1945542339235544,
+          "holder_first_release_after_arrival_s": 2.186916284263134,
+          "holder_last_release_after_arrival_s": 2.186916284263134,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 13.789265418425202,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 32.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2510290944,
+        "state_fraction": 0.8157611205171618,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "fingerprint": "042458ed599116575542dd3815b660bc6b17fb8307172db58cc224eae287e2d8",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-near-rep51-screen.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-kv-far-rep52-screen",
+        "policy": "decode32",
+        "profile": "kv",
+        "phase": "far",
+        "rep": 52,
+        "stage": "screen",
+        "arrival": 115.5441352268681,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 96.74264274991583,
+        "p95_jct_s": 144.72382289730012,
+        "makespan_s": 147.4359492007643,
+        "peak_active": 144,
+        "state_slot_seconds": 9133.333586990833,
+        "blocks": {
+          "prefill_other": 507,
+          "prefill_no_token": 1
+        },
+        "max_lateness_ms": 37.04941898584366,
+        "holder": {
+          "count": 96,
+          "mean_jct_s": 144.6749475930895,
+          "p95_jct_s": 144.72956035658717,
+          "mean_queue_s": 56.77705344427765,
+          "p95_queue_s": 108.70871219038963,
+          "mean_after_activation_s": 87.89789414881187,
+          "mean_holding_s": 87.88760727358749
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 24.84418548515532,
+          "p95_jct_s": 31.84033740311861,
+          "mean_queue_s": 13.958134548011003,
+          "p95_queue_s": 26.84393838979304,
+          "mean_after_activation_s": 10.886050937144319,
+          "mean_holding_s": 10.876926386350533
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 1.7923923479393125,
+          "holder_first_release_after_arrival_s": 29.18787422310561,
+          "holder_last_release_after_arrival_s": 29.18787422310561,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 115.5441352268681,
+        "holders": 96,
+        "alive": 96,
+        "prefilled": 96,
+        "median_remaining": 114.0,
+        "state_live_bytes_proxy": 2084044800,
+        "kv_live_bytes_proxy": 12683575296,
+        "state_fraction": 0.14112259026520396,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "fingerprint": "a5e2a697b74cd81f7be904afee89c10ea959c91a3abf7d19cdfcd6507662f687",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-far-rep52-screen.json",
+      "count": 160
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-kv-near-rep52-screen",
+        "policy": "decode32",
+        "profile": "kv",
+        "phase": "near",
+        "rep": 52,
+        "stage": "screen",
+        "arrival": 119.8455872037448,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 84.02361503764988,
+        "p95_jct_s": 121.48090814426541,
+        "makespan_s": 147.78943328373134,
+        "peak_active": 96,
+        "state_slot_seconds": 7171.5699954833835,
+        "blocks": {
+          "prefill_other": 508
+        },
+        "max_lateness_ms": 35.65838813781738,
+        "holder": {
+          "count": 96,
+          "mean_jct_s": 121.43324847300148,
+          "p95_jct_s": 121.48615023866296,
+          "mean_queue_s": 56.71386555403782,
+          "p95_queue_s": 108.60115174390376,
+          "mean_after_activation_s": 64.71938291896367,
+          "mean_holding_s": 64.70823227697595
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 27.90916488462244,
+          "p95_jct_s": 27.93517253920436,
+          "mean_queue_s": 12.908228907443117,
+          "p95_queue_s": 23.101217214018106,
+          "mean_after_activation_s": 15.000935977179324,
+          "mean_holding_s": 14.993432763963938
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 1.6460190932266414,
+          "holder_first_release_after_arrival_s": 1.642859164159745,
+          "holder_last_release_after_arrival_s": 1.642859164159745,
+          "holders_released_by_first_candidate": 96
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 119.8455872037448,
+        "holders": 96,
+        "alive": 96,
+        "prefilled": 96,
+        "median_remaining": 31.0,
+        "state_live_bytes_proxy": 2084044800,
+        "kv_live_bytes_proxy": 12751699968,
+        "state_fraction": 0.14047456548964,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 30,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "fingerprint": "9dba7bc19ba636fd4568a0ae31c00267a54d9b37f81afe8bd7eebdff8da2ee23",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-near-rep52-screen.json",
+      "count": 160
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-state-far-rep52-screen",
+        "policy": "decode32",
+        "profile": "state",
+        "phase": "far",
+        "rep": 52,
+        "stage": "screen",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 38.67800564449539,
+        "p95_jct_s": 39.9329353608191,
+        "makespan_s": 40.04184859059751,
+        "peak_active": 576,
+        "state_slot_seconds": 19556.791509484872,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 2.7496183589104106,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 39.744456405791425,
+          "p95_jct_s": 39.935953840613365,
+          "mean_queue_s": 3.560516166853631,
+          "p95_queue_s": 6.745149355381727,
+          "mean_after_activation_s": 36.183940238937794,
+          "mean_holding_s": 36.126861845441454
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 30.14639955412713,
+          "p95_jct_s": 30.17032839730382,
+          "mean_queue_s": 13.544456970237661,
+          "p95_queue_s": 23.883712338283658,
+          "mean_after_activation_s": 16.601942583889468,
+          "mean_holding_s": 16.5599725721695
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.1233735075220466,
+          "holder_first_release_after_arrival_s": 31.308578186668456,
+          "holder_last_release_after_arrival_s": 31.308578186668456,
+          "holders_released_by_first_candidate": 0
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 8.634797419421375,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 114.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2179989504,
+        "state_fraction": 0.8360280779241265,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "fingerprint": "ebb46c58d17978f5adbb280174686a5f1e48c8b1e2e132f77e3897712ed1ac3f",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-far-rep52-screen.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-state-near-rep52-screen",
+        "policy": "decode32",
+        "profile": "state",
+        "phase": "near",
+        "rep": 52,
+        "stage": "screen",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 17.2944621566793,
+        "p95_jct_s": 28.689614007249475,
+        "makespan_s": 42.51113839633763,
+        "peak_active": 512,
+        "state_slot_seconds": 7241.21723459661,
+        "blocks": {
+          "prefill_other": 190
+        },
+        "max_lateness_ms": 1.9821356981992722,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 15.870314600910206,
+          "p95_jct_s": 16.063244281336665,
+          "mean_queue_s": 3.556088322380674,
+          "p95_queue_s": 6.718563828617334,
+          "mean_after_activation_s": 12.314226278529532,
+          "mean_holding_s": 12.260174349350564
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 28.687642602832057,
+          "p95_jct_s": 28.713038064539433,
+          "mean_queue_s": 13.616880684072385,
+          "p95_queue_s": 23.859745724126697,
+          "mean_after_activation_s": 15.070761918759672,
+          "mean_holding_s": 15.062624495767523
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.28737785667181,
+          "holder_first_release_after_arrival_s": 2.2830523904412985,
+          "holder_last_release_after_arrival_s": 2.2830523904412985,
+          "holders_released_by_first_candidate": 512
+        }
+      },
+      "scene_errors": [],
+      "snapshot": {
+        "arrival_s": 13.789265418425202,
+        "holders": 512,
+        "alive": 512,
+        "prefilled": 512,
+        "median_remaining": 33.0,
+        "state_live_bytes_proxy": 11114905600,
+        "kv_live_bytes_proxy": 2510290944,
+        "state_fraction": 0.8157611205171618,
+        "shared_pool_bytes": 19481072000
+      },
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "fingerprint": "e03bebaf6ce2b812e72e867caf6715dd46118c29f10268974a7cb9fdfbf1f1f9",
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-near-rep52-screen.json",
+      "count": 576
+    }
+  ],
+  "warmups": 12,
+  "excluded": [
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-03-native-rep52",
+      "reason": "entire incomplete session excluded",
+      "artifacts": {
+        "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-03-native-rep52/m2ua-native-kv-near-rep52-warmup.json": "64f9f2080a50c66e00d4fee9e447be04281df357a70e66568230c3058de977de"
+      },
+      "missing": [
+        [
+          "kv",
+          "far",
+          "screen"
+        ],
+        [
+          "kv",
+          "far",
+          "warmup"
+        ],
+        [
+          "kv",
+          "near",
+          "screen"
+        ],
+        [
+          "state",
+          "far",
+          "screen"
+        ],
+        [
+          "state",
+          "far",
+          "warmup"
+        ],
+        [
+          "state",
+          "near",
+          "screen"
+        ],
+        [
+          "state",
+          "near",
+          "warmup"
+        ]
+      ]
+    }
+  ],
+  "counts": {
+    "runs": 12,
+    "requests": 4416,
+    "warmup_requests": 4416
+  },
+  "contrasts": [
+    {
+      "profile": "state",
+      "phase": "far",
+      "policy": "decode32",
+      "samples": [
+        {
+          "rep": 51,
+          "gain_percent": {
+            "mean_jct_s": -0.6779859980147085,
+            "p95_jct_s": -0.0748055058461294,
+            "makespan_s": -0.08249402666328211,
+            "state_slot_seconds": -0.02182661957561807
+          },
+          "scene_valid": true,
+          "triggered": true,
+          "constrained_gain": false
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": -0.6779859980147085,
+        "p95_jct_s": -0.0748055058461294,
+        "makespan_s": -0.08249402666328211,
+        "state_slot_seconds": -0.02182661957561807
+      },
+      "two_rep_screen_positive": false
+    },
+    {
+      "profile": "state",
+      "phase": "near",
+      "policy": "decode32",
+      "samples": [
+        {
+          "rep": 51,
+          "gain_percent": {
+            "mean_jct_s": 54.628450445462825,
+            "p95_jct_s": 27.68446591048655,
+            "makespan_s": -2.7767860518740877,
+            "state_slot_seconds": 62.55623356613322
+          },
+          "scene_valid": true,
+          "triggered": true,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 54.628450445462825,
+        "p95_jct_s": 27.68446591048655,
+        "makespan_s": -2.7767860518740877,
+        "state_slot_seconds": 62.55623356613322
+      },
+      "two_rep_screen_positive": false
+    },
+    {
+      "profile": "kv",
+      "phase": "far",
+      "policy": "decode32",
+      "samples": [
+        {
+          "rep": 51,
+          "gain_percent": {
+            "mean_jct_s": -0.9369442738974945,
+            "p95_jct_s": -0.18078628681542028,
+            "makespan_s": -1.3279715312090496,
+            "state_slot_seconds": -0.24831404160180343
+          },
+          "scene_valid": true,
+          "triggered": true,
+          "constrained_gain": false
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": -0.9369442738974945,
+        "p95_jct_s": -0.18078628681542028,
+        "makespan_s": -1.3279715312090496,
+        "state_slot_seconds": -0.24831404160180343
+      },
+      "two_rep_screen_positive": false
+    },
+    {
+      "profile": "kv",
+      "phase": "near",
+      "policy": "decode32",
+      "samples": [
+        {
+          "rep": 51,
+          "gain_percent": {
+            "mean_jct_s": -0.9139791479389243,
+            "p95_jct_s": -0.3426821507650084,
+            "makespan_s": -0.31006972031723673,
+            "state_slot_seconds": -0.415263149528566
+          },
+          "scene_valid": true,
+          "triggered": true,
+          "constrained_gain": false
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": -0.9139791479389243,
+        "p95_jct_s": -0.3426821507650084,
+        "makespan_s": -0.31006972031723673,
+        "state_slot_seconds": -0.415263149528566
+      },
+      "two_rep_screen_positive": false
+    }
+  ],
+  "server_logs": [
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51",
+      "allocation_retry_warnings": 2,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51",
+      "allocation_retry_warnings": 2,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52",
+      "allocation_retry_warnings": 0,
+      "custom_all_reduce_fallback_warnings": 2
+    }
+  ],
+  "artifact_sha256": {
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-far-rep51-screen.json": "fd3337ba08603747c58c4856614bc7d39881d3daeca4d349de67a3112f661a74",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-far-rep51-warmup.json": "00bee8d6da5ca97b8fb5872a8be4d244455acf5eb67b7ed4912bb6066d075975",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-near-rep51-screen.json": "27978bd5ce4986c50cc93f4427e1b6f5f7275122a4b5d9f2800eba4bea9ff2a1",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-near-rep51-warmup.json": "cc849681b413283fdaa54ff656bc96772d5b0c4440d1e4668d0501d647148a86",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-far-rep51-screen.json": "153bba5a29c241a016f9859b54c0907bd034edc3fdae8dc0b50194f239e2e400",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-far-rep51-warmup.json": "807f0ffda90169fe107ca001e1e35a7d07eec42999d1cea5986cc1bb44748b88",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-near-rep51-screen.json": "bcccc7c23dd918276813873f44bb4008bd2be86cfab39471558e375e47dbbb7d",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-near-rep51-warmup.json": "621bd18af6adf10a97e3e1b3285b0797d90b0cbd85f96fd87932fc600ce23a3f",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-far-rep51-screen.json": "b48e0a477b618feac181a62fed417c55e904273114d42ae55f2d692acf53c461",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-far-rep51-warmup.json": "145ed6e2cb1d7ac6a2fb5ed573811203e4d262ac7ed08e93cef4b162da614af6",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-near-rep51-screen.json": "2850c53b0d155edb72be18230a8a3d081f79d0b0cfb9c0cd55f3aa085dfd1540",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-near-rep51-warmup.json": "43a51c860c3de69c9f6686f4211e9dc6934b0aca4a1084d9f3b50296ef05743c",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-far-rep51-screen.json": "2e7e12d5579ec37f5c474d0dd3cdaa7f28c95aec527e8c74368debe99ab304a3",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-far-rep51-warmup.json": "4684e3e7c7dee86fbbc0113a28e21104660928375b9581fcfa03bba314a1985b",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-near-rep51-screen.json": "2ae87117dcdffb46f660a1f0b49483b0b053340670c33c9201e63964ccad8f52",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-near-rep51-warmup.json": "c0400df085087cdc7fc90f5c013e81d5deabb932fdfb19c817f83a76c18bfb90",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-far-rep52-screen.json": "e9c4eb2f85cee0ea4a29393e8e486cb30e7be063ceae92ffc67eac0f0ea70e29",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-far-rep52-warmup.json": "8c5c87953bb3fea56602b3cef61de94232188df66fcc267634dc156c3d59fec9",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-near-rep52-screen.json": "f8ecfde5563771133f641ccf573817bfa85c8809eef55189b507379e60220637",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-near-rep52-warmup.json": "ce84c71e5e14f9137d8efe6aafa0f77434a95558142118fda75eb15aa0b16df4",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-far-rep52-screen.json": "37cda19255eb0a531636f9477d9c395031fcc8333f67098918b9ff4a7ca709e4",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-far-rep52-warmup.json": "84d951bdba580c5a5b3b0f91cae4540d8982eb8790770763382824249df69fb0",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-near-rep52-screen.json": "6772211a424dbab09950dc8472a3e6e72e480a1429dc66bdb37a4390f0fef54b",
+    "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-near-rep52-warmup.json": "508fd0692cb11744e43ef9a8788e9aa29c62471511c97ad8dfa3b2db36ebbfeb"
+  },
+  "scope": "Exploratory same-pool admission screen, not held-out, fairness, SOTA ranking or hybrid-exclusive attribution."
+}

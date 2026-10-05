@@ -1,0 +1,257 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "mode": "cost",
+    "run_id": "cost-p1024_o32_n1_r0-rep1",
+    "base_url": "http://127.0.0.1:30000",
+    "timeout_seconds": 3600,
+    "slo_seconds": 20,
+    "arrival_gap_ms": 1,
+    "prompt_len": 1024,
+    "output_len": 32,
+    "count": 1,
+    "reuse_fraction": 0.0,
+    "pair": null,
+    "order": null,
+    "candidate": null,
+    "background_count": 64,
+    "candidate_count": 8,
+    "candidate_delay_s": 0.75
+  },
+  "server": {
+    "version": "0.0.0.dev16772+g0077f84d3.d20260820",
+    "model_path": "/models/Kimi-Linear-48B-A3B",
+    "max_total_num_tokens": 1458422,
+    "internal_states": [
+      {
+        "max_mamba_cache_size": 485,
+        "effective_max_running_requests_per_dp": 97
+      }
+    ]
+  },
+  "summary": {
+    "overall": {
+      "requests": 1,
+      "completed": 1,
+      "mean_jct_s": 0.23050749860703945,
+      "p95_jct_s": 0.23050749860703945,
+      "mean_ttft_s": 0.057402994483709335,
+      "p95_ttft_s": 0.057402994483709335,
+      "p95_itl_s": 0.005727911368012428,
+      "max_itl_s": 0.005736140534281731,
+      "slo_goodput": 1,
+      "mean_cached_tokens": 0.0,
+      "total_retractions": 0
+    },
+    "groups": {
+      "measured": {
+        "requests": 1,
+        "completed": 1,
+        "mean_jct_s": 0.23050749860703945,
+        "p95_jct_s": 0.23050749860703945,
+        "mean_ttft_s": 0.057402994483709335,
+        "p95_ttft_s": 0.057402994483709335,
+        "p95_itl_s": 0.005727911368012428,
+        "max_itl_s": 0.005736140534281731,
+        "slo_goodput": 1,
+        "mean_cached_tokens": 0.0,
+        "total_retractions": 0,
+        "scheduler_active_resources": {
+          "active_request_seconds": 0.22553020156919956,
+          "state_slot_seconds": 0.6765906047075987,
+          "kv_token_seconds": 233.8651592116803,
+          "peak_active_requests": 1,
+          "peak_state_slots": 3,
+          "peak_kv_tokens": 1056,
+          "current_active_requests": 0,
+          "current_state_slots": 0,
+          "current_kv_tokens": 0
+        }
+      }
+    }
+  },
+  "scheduler_resource_trace": {
+    "schema_version": 2,
+    "measurement_scope": "active requests only; inactive radix cache excluded",
+    "state_unit": "physically assigned recurrent-state slots",
+    "kv_unit": "allocated active KV token slots",
+    "elapsed_seconds": 0.49332769587635994,
+    "observation_count": 68,
+    "system": {
+      "active_request_seconds": 0.22553020156919956,
+      "state_slot_seconds": 0.6765906047075987,
+      "kv_token_seconds": 233.8651592116803,
+      "peak_active_requests": 1,
+      "peak_state_slots": 3,
+      "peak_kv_tokens": 1056,
+      "current_active_requests": 0,
+      "current_state_slots": 0,
+      "current_kv_tokens": 0
+    },
+    "tenants": {
+      "measured": {
+        "active_request_seconds": 0.22553020156919956,
+        "state_slot_seconds": 0.6765906047075987,
+        "kv_token_seconds": 233.8651592116803,
+        "peak_active_requests": 1,
+        "peak_state_slots": 3,
+        "peak_kv_tokens": 1056,
+        "current_active_requests": 0,
+        "current_state_slots": 0,
+        "current_kv_tokens": 0
+      }
+    },
+    "run_id": "cost-p1024_o32_n1_r0-rep1"
+  },
+  "requests": [
+    {
+      "rid": "cost-p1024_o32_n1_r0-rep1-measured-0000",
+      "group": "measured",
+      "input_len": 1024,
+      "output_len": 32,
+      "common_prefix_len": 0,
+      "scheduled_arrival_s": 0.0,
+      "submitted_s": 0.00034908950328826904,
+      "first_token_s": 0.057752083986997604,
+      "finished_s": 0.23085658811032772,
+      "completion_tokens": 32,
+      "cached_tokens": 0,
+      "prompt_tokens": 1024,
+      "num_retractions": 0,
+      "success": true,
+      "error": null,
+      "token_events": [
+        [
+          0.057752083986997604,
+          1
+        ],
+        [
+          0.06254911795258522,
+          2
+        ],
+        [
+          0.06817798316478729,
+          3
+        ],
+        [
+          0.07387450896203518,
+          4
+        ],
+        [
+          0.0795936081558466,
+          5
+        ],
+        [
+          0.08529615961015224,
+          6
+        ],
+        [
+          0.09103230014443398,
+          7
+        ],
+        [
+          0.09673201851546764,
+          8
+        ],
+        [
+          0.10243586637079716,
+          9
+        ],
+        [
+          0.10815238580107689,
+          10
+        ],
+        [
+          0.11386778578162193,
+          11
+        ],
+        [
+          0.11956806480884552,
+          12
+        ],
+        [
+          0.12526750564575195,
+          13
+        ],
+        [
+          0.13098225370049477,
+          14
+        ],
+        [
+          0.13667457550764084,
+          15
+        ],
+        [
+          0.14237971231341362,
+          16
+        ],
+        [
+          0.148064149543643,
+          17
+        ],
+        [
+          0.153779162093997,
+          18
+        ],
+        [
+          0.15949194692075253,
+          19
+        ],
+        [
+          0.1652130540460348,
+          20
+        ],
+        [
+          0.1709171924740076,
+          21
+        ],
+        [
+          0.17664039880037308,
+          22
+        ],
+        [
+          0.18235713057219982,
+          23
+        ],
+        [
+          0.1880897469818592,
+          24
+        ],
+        [
+          0.19376156851649284,
+          25
+        ],
+        [
+          0.19947243854403496,
+          26
+        ],
+        [
+          0.20519094169139862,
+          27
+        ],
+        [
+          0.21022536978125572,
+          28
+        ],
+        [
+          0.2152318898588419,
+          29
+        ],
+        [
+          0.22023585066199303,
+          30
+        ],
+        [
+          0.22522087767720222,
+          31
+        ],
+        [
+          0.23083469830453396,
+          32
+        ]
+      ],
+      "latency_s": 0.23050749860703945,
+      "ttft_s": 0.057402994483709335
+    }
+  ]
+}

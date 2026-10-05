@@ -1,0 +1,12 @@
+{
+  "baseline": "separate-4096/n96/vtc",
+  "candidate": "separate-4096/n48/vtc",
+  "primary_endpoint": "split_p95",
+  "min_primary_improvement": 0.1,
+  "noninferiority_margin": 0.05,
+  "last_screening_rep": 1,
+  "confirmation_repetitions": [10, 11, 12, 13, 14],
+  "factors": [16, 32],
+  "reason": "A within-policy concurrency control selected from the one-repeat screen; no new scheduler or SOTA-wide comparison.",
+  "claim_rule": "Evaluate f16 and held-out f32 separately; do not pool, select another cap, or retune thresholds after observing confirmation outcomes."
+}

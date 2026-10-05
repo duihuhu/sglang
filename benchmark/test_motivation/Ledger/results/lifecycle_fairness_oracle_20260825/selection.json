@@ -1,0 +1,7 @@
+{
+  "scalar_label": "scalar-vtc-r0",
+  "scalar_request_weight": 0.0,
+  "lifecycle_label": "realized-cost-s0.25-k1",
+  "lifecycle_state_weight": 0.25,
+  "lifecycle_kv_weight": 1.0
+}

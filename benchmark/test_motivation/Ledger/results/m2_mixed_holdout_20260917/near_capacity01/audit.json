@@ -1,0 +1,877 @@
+{
+  "complete": true,
+  "audit_script_sha256": "9d69f9a44fd9965bed4dc873e3e792b29c8d0f575fbe05901060297557e742ad",
+  "historical_analysis": "benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_analysis01/analysis.json",
+  "historical_analysis_sha256": "afd92d485de178010ff910c3841da1869a3366d76057c4b909cca8e75784d899",
+  "state_entry_bytes": 21708800,
+  "kv_entry_bytes": 8064,
+  "rows": [
+    {
+      "experiment": {
+        "run_id": "m2mh-cap512-hold384-near-rep81-measure",
+        "policy": "cap512",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            384,
+            1024,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 448,
+        "context_token_upper": 970752,
+        "state_body_upper_bytes": 9725542400,
+        "kv_body_upper_bytes": 7828144128,
+        "joint_body_upper_bytes": 17553686528,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 1927385472,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 11739525888,
+      "minimum_logical_headroom_bytes": 7741546112,
+      "peak_joint_event_state_slots": 384,
+      "peak_joint_event_kv_tokens": 422042,
+      "admission_blocks": {
+        "prefill_other": 230
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-cap512-hold384-near-rep81-measure.json",
+      "sha256": "1d98a64101c83f38f88e4cff6ffcc3125de4791af6a849c90e97cc2ac50a007a"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-cap512-train512-near-rep81-measure",
+        "policy": "cap512",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13605230080,
+      "minimum_logical_headroom_bytes": 5875841920,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 308820,
+      "admission_blocks": {
+        "prefill_other": 199
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-cap512-train512-near-rep81-measure.json",
+      "sha256": "c2b49af498a00eb4ee6e9c3c4f980451c9edaa5217d8915b63ec129ecf8970ca"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-native607-hold384-near-rep81-measure",
+        "policy": "native607",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            384,
+            1024,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 448,
+        "context_token_upper": 970752,
+        "state_body_upper_bytes": 9725542400,
+        "kv_body_upper_bytes": 7828144128,
+        "joint_body_upper_bytes": 17553686528,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 1927385472,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 11739525888,
+      "minimum_logical_headroom_bytes": 7741546112,
+      "peak_joint_event_state_slots": 384,
+      "peak_joint_event_kv_tokens": 422042,
+      "admission_blocks": {
+        "prefill_other": 231
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-native607-hold384-near-rep81-measure.json",
+      "sha256": "8e6be8421bda00f6266b067bb719819f0bce469b8f512443d5cfde55a2f505af"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-native607-train512-near-rep81-measure",
+        "policy": "native607",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13605230080,
+      "minimum_logical_headroom_bytes": 5875841920,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 308820,
+      "admission_blocks": {
+        "prefill_other": 199
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-native607-train512-near-rep81-measure.json",
+      "sha256": "2b01161fe009ecbad6735fe64d50ba10683d59779d10ec66849dd2dcdebc518e"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-slots96-hold384-near-rep81-measure",
+        "policy": "slots96",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            384,
+            1024,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 448,
+        "context_token_upper": 970752,
+        "state_body_upper_bytes": 9725542400,
+        "kv_body_upper_bytes": 7828144128,
+        "joint_body_upper_bytes": 17553686528,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 1927385472,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 11739525888,
+      "minimum_logical_headroom_bytes": 7741546112,
+      "peak_joint_event_state_slots": 384,
+      "peak_joint_event_kv_tokens": 422042,
+      "admission_blocks": {
+        "prefill_other": 230
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-01-slots96-rep81/m2mh-slots96-hold384-near-rep81-measure.json",
+      "sha256": "3a4ec60f8845eb7037deec507c3f1677cc8d4486c84968bdf09711c988d7e478"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-slots96-train512-near-rep81-measure",
+        "policy": "slots96",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13605230080,
+      "minimum_logical_headroom_bytes": 5875841920,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 308820,
+      "admission_blocks": {
+        "prefill_other": 199
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-01-slots96-rep81/m2mh-slots96-train512-near-rep81-measure.json",
+      "sha256": "5bebd4165f64c9595789cd21488ae94744cc5582a17be49072ad8844011ce2e1"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-decode32-hold384-near-rep81-measure",
+        "policy": "decode32",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            384,
+            1024,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 448,
+        "context_token_upper": 970752,
+        "state_body_upper_bytes": 9725542400,
+        "kv_body_upper_bytes": 7828144128,
+        "joint_body_upper_bytes": 17553686528,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 1927385472,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 11739525888,
+      "minimum_logical_headroom_bytes": 7741546112,
+      "peak_joint_event_state_slots": 384,
+      "peak_joint_event_kv_tokens": 422042,
+      "admission_blocks": {
+        "prefill_other": 228
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-02-decode32-rep81/m2mh-decode32-hold384-near-rep81-measure.json",
+      "sha256": "d7171746899ade799b12173ce0bc8795fd239e1721a62d06b747ab4b222f2976"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-decode32-train512-near-rep81-measure",
+        "policy": "decode32",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13605230080,
+      "minimum_logical_headroom_bytes": 5875841920,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 308820,
+      "admission_blocks": {
+        "prefill_other": 196
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-02-decode32-rep81/m2mh-decode32-train512-near-rep81-measure.json",
+      "sha256": "7fd939539106450b08d70ab9765c52e42cfdd20e42a69af1212b4f86c1d4bbc4"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-decode32-hold384-near-rep82-measure",
+        "policy": "decode32",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            384,
+            1024,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 448,
+        "context_token_upper": 970752,
+        "state_body_upper_bytes": 9725542400,
+        "kv_body_upper_bytes": 7828144128,
+        "joint_body_upper_bytes": 17553686528,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 1927385472,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 11739525888,
+      "minimum_logical_headroom_bytes": 7741546112,
+      "peak_joint_event_state_slots": 384,
+      "peak_joint_event_kv_tokens": 422042,
+      "admission_blocks": {
+        "prefill_other": 228
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-03-decode32-rep82/m2mh-decode32-hold384-near-rep82-measure.json",
+      "sha256": "27a4f81837d858f814cd3277c92756b1f8235e9a6fedd1d7776fc210e4845bfd"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-decode32-train512-near-rep82-measure",
+        "policy": "decode32",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13605230080,
+      "minimum_logical_headroom_bytes": 5875841920,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 308820,
+      "admission_blocks": {
+        "prefill_other": 196
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-03-decode32-rep82/m2mh-decode32-train512-near-rep82-measure.json",
+      "sha256": "ec8947b3d05a6d5561fd45d8d591a8356635744b8ec970d5bbc211643d2faa6c"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-slots96-hold384-near-rep82-measure",
+        "policy": "slots96",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            384,
+            1024,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 448,
+        "context_token_upper": 970752,
+        "state_body_upper_bytes": 9725542400,
+        "kv_body_upper_bytes": 7828144128,
+        "joint_body_upper_bytes": 17553686528,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 1927385472,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 11739525888,
+      "minimum_logical_headroom_bytes": 7741546112,
+      "peak_joint_event_state_slots": 384,
+      "peak_joint_event_kv_tokens": 422042,
+      "admission_blocks": {
+        "prefill_other": 230
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-04-slots96-rep82/m2mh-slots96-hold384-near-rep82-measure.json",
+      "sha256": "57c6acc9ba1509914bf61ccc176bb2a1b4c74cfd45ec12812731892bf8a98520"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-slots96-train512-near-rep82-measure",
+        "policy": "slots96",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13605230080,
+      "minimum_logical_headroom_bytes": 5875841920,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 308820,
+      "admission_blocks": {
+        "prefill_other": 199
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-04-slots96-rep82/m2mh-slots96-train512-near-rep82-measure.json",
+      "sha256": "9679486a22021eec26fd29f08a014cb4b06ea927fb9a906a4e9bac94cbc8010f"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-cap512-hold384-near-rep82-measure",
+        "policy": "cap512",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            384,
+            1024,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 448,
+        "context_token_upper": 970752,
+        "state_body_upper_bytes": 9725542400,
+        "kv_body_upper_bytes": 7828144128,
+        "joint_body_upper_bytes": 17553686528,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 1927385472,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 11739525888,
+      "minimum_logical_headroom_bytes": 7741546112,
+      "peak_joint_event_state_slots": 384,
+      "peak_joint_event_kv_tokens": 422042,
+      "admission_blocks": {
+        "prefill_other": 230
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-cap512-hold384-near-rep82-measure.json",
+      "sha256": "99a009787cc9ed7957451cf7e8a1d331df608cc627e5d6892da84ba5cca537ef"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-cap512-train512-near-rep82-measure",
+        "policy": "cap512",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13605230080,
+      "minimum_logical_headroom_bytes": 5875841920,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 308820,
+      "admission_blocks": {
+        "prefill_other": 199
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-cap512-train512-near-rep82-measure.json",
+      "sha256": "613e297d7b35894a4a09bd1d50a9926f2d95919e97125c594d818f8d8908f86a"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-native607-hold384-near-rep82-measure",
+        "policy": "native607",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            384,
+            1024,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 448,
+        "context_token_upper": 970752,
+        "state_body_upper_bytes": 9725542400,
+        "kv_body_upper_bytes": 7828144128,
+        "joint_body_upper_bytes": 17553686528,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 1927385472,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 11739525888,
+      "minimum_logical_headroom_bytes": 7741546112,
+      "peak_joint_event_state_slots": 384,
+      "peak_joint_event_kv_tokens": 422042,
+      "admission_blocks": {
+        "prefill_other": 230
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-native607-hold384-near-rep82-measure.json",
+      "sha256": "74ee1095aea8568045895388d461f7c32b62a03c48faec3f74c07270e73580e2"
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-native607-train512-near-rep82-measure",
+        "policy": "native607",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "logical_bound": {
+        "shapes": [
+          [
+            512,
+            512,
+            128
+          ],
+          [
+            64,
+            8192,
+            64
+          ]
+        ],
+        "requests": 576,
+        "context_token_upper": 856064,
+        "state_body_upper_bytes": 12504268800,
+        "kv_body_upper_bytes": 6903300096,
+        "joint_body_upper_bytes": 19407568896,
+        "shared_raw_bytes": 19481072000,
+        "logical_upper_headroom_bytes": 73503104,
+        "all_requests_below_request_cap": true,
+        "kv_body_alone_fits": true,
+        "joint_body_upper_exceeds_budget": false,
+        "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+      },
+      "peak_joint_live_body_bytes": 13605230080,
+      "minimum_logical_headroom_bytes": 5875841920,
+      "peak_joint_event_state_slots": 512,
+      "peak_joint_event_kv_tokens": 308820,
+      "admission_blocks": {
+        "prefill_other": 199
+      },
+      "no_token_events": 0,
+      "current_active_at_end": 0,
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-native607-train512-near-rep82-measure.json",
+      "sha256": "3e2bc03d8666dbdd50c76c6b35c375c5994b79bd81b67127f2ed7160d4f828b3"
+    }
+  ],
+  "theoretical_scenarios": {
+    "historical_512_plus_64": {
+      "shapes": [
+        [
+          512,
+          512,
+          128
+        ],
+        [
+          64,
+          8192,
+          64
+        ]
+      ],
+      "requests": 576,
+      "context_token_upper": 856064,
+      "state_body_upper_bytes": 12504268800,
+      "kv_body_upper_bytes": 6903300096,
+      "joint_body_upper_bytes": 19407568896,
+      "shared_raw_bytes": 19481072000,
+      "logical_upper_headroom_bytes": 73503104,
+      "all_requests_below_request_cap": true,
+      "kv_body_alone_fits": true,
+      "joint_body_upper_exceeds_budget": false,
+      "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+    },
+    "held_out_384_plus_64": {
+      "shapes": [
+        [
+          384,
+          1024,
+          128
+        ],
+        [
+          64,
+          8192,
+          64
+        ]
+      ],
+      "requests": 448,
+      "context_token_upper": 970752,
+      "state_body_upper_bytes": 9725542400,
+      "kv_body_upper_bytes": 7828144128,
+      "joint_body_upper_bytes": 17553686528,
+      "shared_raw_bytes": 19481072000,
+      "logical_upper_headroom_bytes": 1927385472,
+      "all_requests_below_request_cap": true,
+      "kv_body_alone_fits": true,
+      "joint_body_upper_exceeds_budget": false,
+      "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+    },
+    "unmeasured_24_probe_feasibility": {
+      "shapes": [
+        [
+          512,
+          512,
+          128
+        ],
+        [
+          64,
+          8192,
+          64
+        ],
+        [
+          24,
+          512,
+          64
+        ]
+      ],
+      "requests": 600,
+      "context_token_upper": 869888,
+      "state_body_upper_bytes": 13025280000,
+      "kv_body_upper_bytes": 7014776832,
+      "joint_body_upper_bytes": 20040056832,
+      "shared_raw_bytes": 19481072000,
+      "logical_upper_headroom_bytes": -558984832,
+      "all_requests_below_request_cap": true,
+      "kv_body_alone_fits": true,
+      "joint_body_upper_exceeds_budget": true,
+      "scope": "All requests hypothetically retain their full input+output at once; not an observed peak or allocator feasibility test."
+    }
+  },
+  "scope": "Read-only historical audit. Body-byte occupancy omits reserved sink, fragmentation, transient reservations and workspace. An over-budget upper bound does not prove the peak is reachable."
+}

@@ -1,0 +1,257 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "mode": "cost",
+    "run_id": "smoke-unique",
+    "base_url": "http://127.0.0.1:30000",
+    "timeout_seconds": 3600,
+    "slo_seconds": 20,
+    "arrival_gap_ms": 1,
+    "prompt_len": 4096,
+    "output_len": 32,
+    "count": 1,
+    "reuse_fraction": 0.0,
+    "pair": null,
+    "order": null,
+    "candidate": null,
+    "background_count": 64,
+    "candidate_count": 8,
+    "candidate_delay_s": 0.75
+  },
+  "server": {
+    "version": "0.0.0.dev16772+g0077f84d3.d20260820",
+    "model_path": "/models/Kimi-Linear-48B-A3B",
+    "max_total_num_tokens": 1458422,
+    "internal_states": [
+      {
+        "max_mamba_cache_size": 485,
+        "effective_max_running_requests_per_dp": 97
+      }
+    ]
+  },
+  "summary": {
+    "overall": {
+      "requests": 1,
+      "completed": 1,
+      "mean_jct_s": 0.34228951297700405,
+      "p95_jct_s": 0.34228951297700405,
+      "mean_ttft_s": 0.17194212973117828,
+      "p95_ttft_s": 0.17194212973117828,
+      "p95_itl_s": 0.005835113115608692,
+      "max_itl_s": 0.005846623331308365,
+      "slo_goodput": 1,
+      "mean_cached_tokens": 0.0,
+      "total_retractions": 0
+    },
+    "groups": {
+      "measured": {
+        "requests": 1,
+        "completed": 1,
+        "mean_jct_s": 0.34228951297700405,
+        "p95_jct_s": 0.34228951297700405,
+        "mean_ttft_s": 0.17194212973117828,
+        "p95_ttft_s": 0.17194212973117828,
+        "p95_itl_s": 0.005835113115608692,
+        "max_itl_s": 0.005846623331308365,
+        "slo_goodput": 1,
+        "mean_cached_tokens": 0.0,
+        "total_retractions": 0,
+        "scheduler_active_resources": {
+          "active_request_seconds": 0.3330446742475033,
+          "state_slot_seconds": 0.9991340227425098,
+          "kv_token_seconds": 1367.0325819291174,
+          "peak_active_requests": 1,
+          "peak_state_slots": 3,
+          "peak_kv_tokens": 4128,
+          "current_active_requests": 0,
+          "current_state_slots": 0,
+          "current_kv_tokens": 0
+        }
+      }
+    }
+  },
+  "scheduler_resource_trace": {
+    "schema_version": 2,
+    "measurement_scope": "active requests only; inactive radix cache excluded",
+    "state_unit": "physically assigned recurrent-state slots",
+    "kv_unit": "allocated active KV token slots",
+    "elapsed_seconds": 0.6011693179607391,
+    "observation_count": 68,
+    "system": {
+      "active_request_seconds": 0.3330446742475033,
+      "state_slot_seconds": 0.9991340227425098,
+      "kv_token_seconds": 1367.0325819291174,
+      "peak_active_requests": 1,
+      "peak_state_slots": 3,
+      "peak_kv_tokens": 4128,
+      "current_active_requests": 0,
+      "current_state_slots": 0,
+      "current_kv_tokens": 0
+    },
+    "tenants": {
+      "measured": {
+        "active_request_seconds": 0.3330446742475033,
+        "state_slot_seconds": 0.9991340227425098,
+        "kv_token_seconds": 1367.0325819291174,
+        "peak_active_requests": 1,
+        "peak_state_slots": 3,
+        "peak_kv_tokens": 4128,
+        "current_active_requests": 0,
+        "current_state_slots": 0,
+        "current_kv_tokens": 0
+      }
+    },
+    "run_id": "smoke-unique"
+  },
+  "requests": [
+    {
+      "rid": "smoke-unique-measured-0000",
+      "group": "measured",
+      "input_len": 4096,
+      "output_len": 32,
+      "common_prefix_len": 0,
+      "scheduled_arrival_s": 0.0,
+      "submitted_s": 0.00032511167228221893,
+      "first_token_s": 0.1722672414034605,
+      "finished_s": 0.34261462464928627,
+      "completion_tokens": 32,
+      "cached_tokens": 0,
+      "prompt_tokens": 4096,
+      "num_retractions": 0,
+      "success": true,
+      "error": null,
+      "token_events": [
+        [
+          0.1722672414034605,
+          1
+        ],
+        [
+          0.17717749252915382,
+          2
+        ],
+        [
+          0.18292265944182873,
+          3
+        ],
+        [
+          0.18869967199862003,
+          4
+        ],
+        [
+          0.19450285285711288,
+          5
+        ],
+        [
+          0.20029705204069614,
+          6
+        ],
+        [
+          0.20610709115862846,
+          7
+        ],
+        [
+          0.2119338922202587,
+          8
+        ],
+        [
+          0.2177493628114462,
+          9
+        ],
+        [
+          0.22356368601322174,
+          10
+        ],
+        [
+          0.22939008101820946,
+          11
+        ],
+        [
+          0.23522242344915867,
+          12
+        ],
+        [
+          0.2410257514566183,
+          13
+        ],
+        [
+          0.24686363525688648,
+          14
+        ],
+        [
+          0.25264699198305607,
+          15
+        ],
+        [
+          0.2584702353924513,
+          16
+        ],
+        [
+          0.26431685872375965,
+          17
+        ],
+        [
+          0.27012378349900246,
+          18
+        ],
+        [
+          0.2756897807121277,
+          19
+        ],
+        [
+          0.2807032819837332,
+          20
+        ],
+        [
+          0.2857812289148569,
+          21
+        ],
+        [
+          0.29088723100721836,
+          22
+        ],
+        [
+          0.2959705665707588,
+          23
+        ],
+        [
+          0.301075192168355,
+          24
+        ],
+        [
+          0.3061796110123396,
+          25
+        ],
+        [
+          0.3113049268722534,
+          26
+        ],
+        [
+          0.31642267294228077,
+          27
+        ],
+        [
+          0.32151309959590435,
+          28
+        ],
+        [
+          0.32663900777697563,
+          29
+        ],
+        [
+          0.33175260201096535,
+          30
+        ],
+        [
+          0.33686493895947933,
+          31
+        ],
+        [
+          0.34259617887437344,
+          32
+        ]
+      ],
+      "latency_s": 0.34228951297700405,
+      "ttft_s": 0.17194212973117828
+    }
+  ]
+}

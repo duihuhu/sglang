@@ -1,0 +1,415 @@
+{
+  "source_hashes": {
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+    "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+    "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+    "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+    "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+    "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+    "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+    "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+    "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+    "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+    "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+    "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c"
+  },
+  "sessions": [
+    {
+      "arm": "static-natural",
+      "mode": "separate-4096",
+      "reps": [
+        31
+      ],
+      "caps": [
+        485
+      ],
+      "kv_tokens": 1187753
+    },
+    {
+      "arm": "static-natural",
+      "mode": "mixed-4096",
+      "reps": [
+        31
+      ],
+      "caps": [
+        485
+      ],
+      "kv_tokens": 1187753
+    },
+    {
+      "arm": "unified-raised-cap",
+      "mode": "separate-4096",
+      "reps": [
+        31
+      ],
+      "caps": [
+        485,
+        607
+      ],
+      "kv_tokens": 781725
+    },
+    {
+      "arm": "unified-raised-cap",
+      "mode": "mixed-4096",
+      "reps": [
+        31
+      ],
+      "caps": [
+        485,
+        607
+      ],
+      "kv_tokens": 781725
+    },
+    {
+      "arm": "static-rebalanced",
+      "mode": "separate-4096",
+      "reps": [
+        31
+      ],
+      "caps": [
+        485,
+        607
+      ],
+      "kv_tokens": 791088
+    },
+    {
+      "arm": "static-rebalanced",
+      "mode": "mixed-4096",
+      "reps": [
+        31
+      ],
+      "caps": [
+        485,
+        607
+      ],
+      "kv_tokens": 791088
+    },
+    {
+      "arm": "unified-old-cap",
+      "mode": "separate-4096",
+      "reps": [
+        31
+      ],
+      "caps": [
+        485
+      ],
+      "kv_tokens": 1174858
+    },
+    {
+      "arm": "unified-old-cap",
+      "mode": "mixed-4096",
+      "reps": [
+        31
+      ],
+      "caps": [
+        485
+      ],
+      "kv_tokens": 1174858
+    },
+    {
+      "arm": "unified-old-cap",
+      "mode": "mixed-4096",
+      "reps": [
+        32
+      ],
+      "caps": [
+        485
+      ],
+      "kv_tokens": 1174858
+    },
+    {
+      "arm": "unified-old-cap",
+      "mode": "separate-4096",
+      "reps": [
+        32
+      ],
+      "caps": [
+        485
+      ],
+      "kv_tokens": 1174858
+    },
+    {
+      "arm": "static-rebalanced",
+      "mode": "mixed-4096",
+      "reps": [
+        32
+      ],
+      "caps": [
+        607,
+        485
+      ],
+      "kv_tokens": 791088
+    },
+    {
+      "arm": "static-rebalanced",
+      "mode": "separate-4096",
+      "reps": [
+        32
+      ],
+      "caps": [
+        607,
+        485
+      ],
+      "kv_tokens": 791088
+    },
+    {
+      "arm": "unified-raised-cap",
+      "mode": "mixed-4096",
+      "reps": [
+        32
+      ],
+      "caps": [
+        607,
+        485
+      ],
+      "kv_tokens": 781725
+    },
+    {
+      "arm": "unified-raised-cap",
+      "mode": "separate-4096",
+      "reps": [
+        32
+      ],
+      "caps": [
+        607,
+        485
+      ],
+      "kv_tokens": 781725
+    },
+    {
+      "arm": "static-natural",
+      "mode": "mixed-4096",
+      "reps": [
+        32
+      ],
+      "caps": [
+        485
+      ],
+      "kv_tokens": 1187753
+    },
+    {
+      "arm": "static-natural",
+      "mode": "separate-4096",
+      "reps": [
+        32
+      ],
+      "caps": [
+        485
+      ],
+      "kv_tokens": 1187753
+    }
+  ],
+  "budget_targets": null,
+  "memory_evidence": {
+    "static-natural": {
+      "capacity": [
+        485,
+        1187753,
+        485,
+        485
+      ],
+      "kv_tokens": 1187753,
+      "memory": [
+        {
+          "allocated": 71497561600,
+          "reserved": 71565312000,
+          "peak_allocated_since_previous_audit": 71497561600,
+          "peak_reserved_since_previous_audit": 78508982272,
+          "cuda_free": 12262309888,
+          "cuda_total": 85167243264,
+          "cuda_used": 72904933376
+        },
+        {
+          "allocated": 71497561600,
+          "reserved": 71565312000,
+          "peak_allocated_since_previous_audit": 71497561600,
+          "peak_reserved_since_previous_audit": 78508982272,
+          "cuda_free": 12262309888,
+          "cuda_total": 85167243264,
+          "cuda_used": 72904933376
+        }
+      ],
+      "config": {
+        "arm": "static-natural",
+        "mode": "mixed-4096",
+        "reps": [
+          23
+        ],
+        "kv_tokens": 1187753,
+        "reduction_bytes": 36962304
+      },
+      "peak_allocated": 75903409664,
+      "peak_reserved": 83728793600,
+      "log_allocation_retry_warning_count": 4,
+      "session": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-00-static-natural-mixed-4096"
+    },
+    "unified-old-cap": {
+      "capacity": [
+        485,
+        1174858,
+        485,
+        485
+      ],
+      "kv_tokens": 1174858,
+      "memory": [
+        {
+          "allocated": 71497321472,
+          "reserved": 71594672128,
+          "peak_allocated_since_previous_audit": 71497329152,
+          "peak_reserved_since_previous_audit": 78521565184,
+          "cuda_free": 12232949760,
+          "cuda_total": 85167243264,
+          "cuda_used": 72934293504
+        },
+        {
+          "allocated": 71453454336,
+          "reserved": 71535951872,
+          "peak_allocated_since_previous_audit": 71453462016,
+          "peak_reserved_since_previous_audit": 78479622144,
+          "cuda_free": 12291670016,
+          "cuda_total": 85167243264,
+          "cuda_used": 72875573248
+        }
+      ],
+      "config": {
+        "arm": "unified-old-cap",
+        "mode": "mixed-4096",
+        "reps": [
+          23
+        ],
+        "kv_tokens": 1174858,
+        "reduction_bytes": 20127744
+      },
+      "peak_allocated": 75912981504,
+      "peak_reserved": 83762348032,
+      "log_allocation_retry_warning_count": 4,
+      "session": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-01-unified-old-cap-mixed-4096"
+    },
+    "static-rebalanced": {
+      "capacity": [
+        607,
+        791088,
+        607,
+        607
+      ],
+      "kv_tokens": 791088,
+      "memory": [
+        {
+          "allocated": 71458982912,
+          "reserved": 71680655360,
+          "peak_allocated_since_previous_audit": 71458982912,
+          "peak_reserved_since_previous_audit": 82004934656,
+          "cuda_free": 12146966528,
+          "cuda_total": 85167243264,
+          "cuda_used": 73020276736
+        },
+        {
+          "allocated": 71458982912,
+          "reserved": 71680655360,
+          "peak_allocated_since_previous_audit": 71458982912,
+          "peak_reserved_since_previous_audit": 82004934656,
+          "cuda_free": 12146966528,
+          "cuda_total": 85167243264,
+          "cuda_used": 73020276736
+        }
+      ],
+      "config": {
+        "arm": "static-rebalanced",
+        "mode": "mixed-4096",
+        "reps": [
+          22
+        ],
+        "kv_tokens": 791088,
+        "reduction_bytes": 2734686208
+      },
+      "peak_allocated": 76967913472,
+      "peak_reserved": 83674267648,
+      "log_allocation_retry_warning_count": 4,
+      "session": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-02-static-rebalanced-mixed-4096"
+    },
+    "unified-raised-cap": {
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "kv_tokens": 781725,
+      "memory": [
+        {
+          "allocated": 71490748928,
+          "reserved": 71720501248,
+          "peak_allocated_since_previous_audit": 71490756096,
+          "peak_reserved_since_previous_audit": 82147540992,
+          "cuda_free": 12107120640,
+          "cuda_total": 85167243264,
+          "cuda_used": 73060122624
+        },
+        {
+          "allocated": 71447917568,
+          "reserved": 71678558208,
+          "peak_allocated_since_previous_audit": 71447924736,
+          "peak_reserved_since_previous_audit": 82076237824,
+          "cuda_free": 12149063680,
+          "cuda_total": 85167243264,
+          "cuda_used": 73018179584
+        }
+      ],
+      "config": {
+        "arm": "unified-raised-cap",
+        "mode": "mixed-4096",
+        "reps": [
+          22
+        ],
+        "kv_tokens": 781725,
+        "reduction_bytes": 2810183680
+      },
+      "peak_allocated": 77012648448,
+      "peak_reserved": 83705724928,
+      "log_allocation_retry_warning_count": 4,
+      "session": "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-03-unified-raised-cap-mixed-4096"
+    }
+  },
+  "evidence_sha256": {
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/manifest.json": "885285f238ddc084dae221d3fd8c6b1304b36f1895ebf14acd34743738b86457",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-00-static-natural-mixed-4096/m2pool-static-natural-mixed-4096-cap485-rep23-inspect.json": "9399c9725d1fa5399c03cb9fee3df0565fc65d3ee98117e1edbd7089c7b06147",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-00-static-natural-mixed-4096/correctness-static-natural.json": "77921c956ad46cf69b666cfc4c7ab12070d50ff30cf2e4c44d9b13bf358395c1",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-00-static-natural-mixed-4096/memory/rank0-0006.json": "79c29b81b6da9aa0a1a3ac7652f26de9ca9bb73c4189d6b582d5450a1ef641b2",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-00-static-natural-mixed-4096/memory/rank1-0006.json": "91c055681cd15ba894212c545dbf64c07af86c4f89464444e5fcdffb7a667a33",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-01-unified-old-cap-mixed-4096/m2pool-unified-old-cap-mixed-4096-cap485-rep23-inspect.json": "b5250dd609bb87013a98c03336612f0245e49e1e5fd907cbba3f05bae57e981f",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-01-unified-old-cap-mixed-4096/correctness-unified-old-cap.json": "7ae7c26aed61f371c7ad2513615f0fb435b00223377fac4afcf35781318107ff",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-01-unified-old-cap-mixed-4096/memory/rank0-0006.json": "ff9a2383e40706848f3d5ad0ac33505fbae60db879fd899a4852dd9cbbc150cc",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_refine01/session-01-unified-old-cap-mixed-4096/memory/rank1-0006.json": "a73db6aee9e1f4987376fafcd24286df9fac558dd5d8ac332559b60ed8767afb",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/manifest.json": "691cb7b70675bd801e1f20c171ca2374b00dea135b0fcbba921a2aa4a943523c",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-02-static-rebalanced-mixed-4096/m2pool-static-rebalanced-mixed-4096-cap607-rep22-inspect.json": "55c916a190873247156c2c50a890b88cac34d230c3fd06fe349445e69408d367",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-02-static-rebalanced-mixed-4096/correctness-static-rebalanced.json": "4283c8e5f6ab1f33ff4ea355d8fbdacf7bbee55377958e17f1aace7554aceb57",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-02-static-rebalanced-mixed-4096/memory/rank0-0006.json": "d3340e7a88a1855d5938aee25bd65a5c667023c081cf288bc9b019dfc5e44bf4",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-02-static-rebalanced-mixed-4096/memory/rank1-0006.json": "3cb1414ec56e078232d980342d5e27a5e0589367197501686d70b34169277142",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-03-unified-raised-cap-mixed-4096/m2pool-unified-raised-cap-mixed-4096-cap607-rep22-inspect.json": "feebc4bccb391b921fb9089a40aca3f18e11929a2d94292f257d2a807b737bc2",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-03-unified-raised-cap-mixed-4096/correctness-unified-raised-cap.json": "12fd3c8c679b0a0fcc19e163949eb8df08236060fef00b20464db167e622e3a9",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-03-unified-raised-cap-mixed-4096/memory/rank0-0006.json": "cfc0c21de93cf11d4851c86a01a83767cef3592ae72ee7d6d7f99e9b52d6dca1",
+    "benchmark/test_motivation/Ledger/results/m2_pool_comparison_20260916/budget_inspect01/session-03-unified-raised-cap-mixed-4096/memory/rank1-0006.json": "077287c46ce5b7b55cdf6cb9bfbd8b7236da094ea29d6efe1bf5b61264af387b"
+  },
+  "planner_sha256": "467e23a2fcbfcf2d0259f7a26e221f3bef910d1ccb63bc793aba51ed1f0810d5",
+  "allocated_tolerance_bytes": 67108864,
+  "device_used_tolerance_bytes": 268435456,
+  "allocation_retry_policy": "Recovered caching-allocator retries are retained and counted, not equivalent to failed requests; no allocator mode changes.",
+  "planned_nonwarmup_runs": 24,
+  "performance_interpretation": "Two fresh sessions per cell; exploratory paired estimates, not a precise CI or held-out claim.",
+  "objective": "mean JCT; both p95 and makespan may regress by at most 5 percent to count as constrained benefit"
+}

@@ -1,0 +1,238 @@
+{
+  "arrivals": {
+    "train512-near": 17.694009756500236,
+    "hold384-near": 24.09899558900088
+  },
+  "evidence": [
+    {
+      "profile": "train512",
+      "phase": "near",
+      "rep": 71,
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 488,
+        "prefilled": 512,
+        "median_remaining": 32.0,
+        "state_live_bytes_proxy": 10593894400,
+        "kv_live_bytes_proxy": 2391032448,
+        "state_fraction": 0.8158609227461087,
+        "shared_pool_bytes": 19481072000
+      },
+      "errors": []
+    },
+    {
+      "profile": "train512",
+      "phase": "near",
+      "rep": 72,
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 511,
+        "prefilled": 512,
+        "median_remaining": 35,
+        "state_live_bytes_proxy": 11093196800,
+        "kv_live_bytes_proxy": 2497549824,
+        "state_fraction": 0.8162315954305588,
+        "shared_pool_bytes": 19481072000
+      },
+      "errors": []
+    },
+    {
+      "profile": "hold384",
+      "phase": "near",
+      "rep": 71,
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 312,
+        "prefilled": 384,
+        "median_remaining": 41.0,
+        "state_live_bytes_proxy": 6773145600,
+        "kv_live_bytes_proxy": 2794571136,
+        "state_fraction": 0.7079166102937603,
+        "shared_pool_bytes": 19481072000
+      },
+      "errors": []
+    },
+    {
+      "profile": "hold384",
+      "phase": "near",
+      "rep": 72,
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 320,
+        "prefilled": 384,
+        "median_remaining": 42.0,
+        "state_live_bytes_proxy": 6946816000,
+        "kv_live_bytes_proxy": 2863760256,
+        "state_fraction": 0.7080945928891214,
+        "shared_pool_bytes": 19481072000
+      },
+      "errors": []
+    }
+  ],
+  "phases": [
+    "near"
+  ],
+  "scenes_valid": true,
+  "source_hashes": {
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+    "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+    "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+    "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+    "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+    "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+    "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+    "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+    "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+    "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+    "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+    "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+    "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+    "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_mixed_holdout.py": "862ec5e363ebbb4d933794d3b1c4d566a1b6e66c2f973e3cec1b942bfb6ecdf7",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/analyze_m2_mixed_holdout.py": "3381a20759acc11f0ad3e80f3597fa1a5c2384d72849d988709a04dddddb619f",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_mixed_holdout_protocol_20260917.md": "3138586b993a1e1fe1609b713d02f1ff96f4c37b037ff6fb7c9094cb7f18b374",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_mixed_near.py": "5733563156811bff93cd10894c3880a0a540917d8a9aa1bc18a69773e2e76c21",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/analyze_m2_mixed_near.py": "36d80c71b7fbc9b2b70b62e853095df7ea31c21c072373dfed0434807bed5f8b",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_mixed_near_protocol_20260917.md": "a290e31752b241c3992affb36617efcdaed6d5b1d1b06332aeb3aca55b97202c"
+  },
+  "physical_gpu_ids": [
+    4,
+    5
+  ],
+  "gpus": [
+    {
+      "index": 4,
+      "uuid": "GPU-bfe384be-b1b9-a366-b97f-fb4a19ecca92",
+      "name": "NVIDIA A800-SXM4-80GB",
+      "memory_mib": 1,
+      "total_mib": 81920,
+      "utilization": 0
+    },
+    {
+      "index": 5,
+      "uuid": "GPU-98c6d507-a0b0-178a-3988-bede27dae961",
+      "name": "NVIDIA A800-SXM4-80GB",
+      "memory_mib": 1,
+      "total_mib": 81920,
+      "utilization": 0
+    }
+  ],
+  "source_calibration": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03",
+  "source_plan_sha256": "5efaa46dd181143a4d4f68efb594cacff9c6c97110ae84828c6e9025f5c0cd0d",
+  "source_manifest_sha256": "5a90827833cdfa6a775ac8bcae267bac1e7bfc16a3f9de34258a64bb148ff240",
+  "source_artifact_sha256": {
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-00-native607-rep71/m2mh-native607-hold384-background-rep71-calibrate.json": "9bba8dccae69c096caf1ab059a94bd371b2db19eeb87223d16fc5c5aa954f0d5",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-00-native607-rep71/m2mh-native607-hold384-background-rep71-warmup.json": "ca025ec0476e709fdad46d8655fc03421a44b6a5324690fa49564d9de9a86467",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-00-native607-rep71/m2mh-native607-train512-background-rep71-calibrate.json": "390496f9fdcb8b722fcd28b803f0c41c8d05f7c6625da7808f387b12ee1685ac",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-00-native607-rep71/m2mh-native607-train512-background-rep71-warmup.json": "e1d706c9723550d61b021c76e4c563f91e9ebad1dcd3d7c6230a0bcc47cec89a",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-01-native607-rep72/m2mh-native607-hold384-background-rep72-calibrate.json": "4afbbda632f1c1e384cdf81654583fdce7a107651e775a37c72f52b004827327",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-01-native607-rep72/m2mh-native607-hold384-background-rep72-warmup.json": "0cdd6bf897ce88d7337d2f3bd5ee70fe357c1869bd531374035923f422ca36b6",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-01-native607-rep72/m2mh-native607-train512-background-rep72-calibrate.json": "e6aa2f8d6045bbc83cefbce30bce9cfdb85d1d57d877a1286baad81788bd7955",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-01-native607-rep72/m2mh-native607-train512-background-rep72-warmup.json": "8a73a8e215b5f8f94f89205c42948c15a0aba64b0bcd18df01df50b6e5e7e87b"
+  },
+  "original_scenes_valid": false,
+  "excluded_scene_evidence": [
+    {
+      "profile": "train512",
+      "phase": "far",
+      "rep": 71,
+      "snapshot": {
+        "arrival_s": 8.713676455249697,
+        "holders": 512,
+        "alive": 376,
+        "prefilled": 367,
+        "median_remaining": 103.5,
+        "state_live_bytes_proxy": 8162508800,
+        "kv_live_bytes_proxy": 1622605824,
+        "state_fraction": 0.8341761045884709,
+        "shared_pool_bytes": 19481072000
+      },
+      "errors": [
+        "fewer than 80% holders alive",
+        "fewer than 95% holders prefilled"
+      ]
+    },
+    {
+      "profile": "train512",
+      "phase": "far",
+      "rep": 72,
+      "snapshot": {
+        "arrival_s": 8.713676455249697,
+        "holders": 512,
+        "alive": 376,
+        "prefilled": 367,
+        "median_remaining": 103.5,
+        "state_live_bytes_proxy": 8162508800,
+        "kv_live_bytes_proxy": 1622605824,
+        "state_fraction": 0.8341761045884709,
+        "shared_pool_bytes": 19481072000
+      },
+      "errors": [
+        "fewer than 80% holders alive",
+        "fewer than 95% holders prefilled"
+      ]
+    },
+    {
+      "profile": "hold384",
+      "phase": "far",
+      "rep": 71,
+      "snapshot": {
+        "arrival_s": 11.827995864000513,
+        "holders": 384,
+        "alive": 254,
+        "prefilled": 249,
+        "median_remaining": 95.5,
+        "state_live_bytes_proxy": 5514035200,
+        "kv_live_bytes_proxy": 2155216896,
+        "state_fraction": 0.7189795212072789,
+        "shared_pool_bytes": 19481072000
+      },
+      "errors": [
+        "fewer than 80% holders alive",
+        "fewer than 95% holders prefilled"
+      ]
+    },
+    {
+      "profile": "hold384",
+      "phase": "far",
+      "rep": 72,
+      "snapshot": {
+        "arrival_s": 11.827995864000513,
+        "holders": 384,
+        "alive": 254,
+        "prefilled": 249,
+        "median_remaining": 95.5,
+        "state_live_bytes_proxy": 5514035200,
+        "kv_live_bytes_proxy": 2155216896,
+        "state_fraction": 0.7189795212072789,
+        "shared_pool_bytes": 19481072000
+      },
+      "errors": [
+        "fewer than 80% holders alive",
+        "fewer than 95% holders prefilled"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,345 @@
+{
+  "scope": "Post-hoc timing diagnostic. Threshold is descriptive, not an exclusion rule. No root-cause or kernel-idleness attribution.",
+  "source_sha256": "2e3aa609cea2c4f0fb2d63dff79b10f0d4cf5d51acc2c20a7ccf6f2c7b93c830",
+  "analysis_sha256": "953d7f1368daa8aead3184ca70e0cfecb30fe922e2894dc6298e4f7dea342d28",
+  "rows": [
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-1024-cap128-rep11-calibrate",
+        "mode": "mixed-1024",
+        "pool": "natural",
+        "rep": 11,
+        "cap": 128,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.3959775846451521,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-1024-cap128-rep12-calibrate",
+        "mode": "mixed-1024",
+        "pool": "natural",
+        "rep": 12,
+        "cap": 128,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.25011513754725456,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-1024-cap256-rep11-calibrate",
+        "mode": "mixed-1024",
+        "pool": "natural",
+        "rep": 11,
+        "cap": 256,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.6937219388782978,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-1024-cap256-rep12-calibrate",
+        "mode": "mixed-1024",
+        "pool": "natural",
+        "rep": 12,
+        "cap": 256,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.43165008164942265,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-1024-cap485-rep11-calibrate",
+        "mode": "mixed-1024",
+        "pool": "natural",
+        "rep": 11,
+        "cap": 485,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.41413208842277527,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-1024-cap485-rep12-calibrate",
+        "mode": "mixed-1024",
+        "pool": "natural",
+        "rep": 12,
+        "cap": 485,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.37022258527576923,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-4096-cap128-rep11-calibrate",
+        "mode": "mixed-4096",
+        "pool": "natural",
+        "rep": 11,
+        "cap": 128,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.5854057688266039,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-4096-cap128-rep12-calibrate",
+        "mode": "mixed-4096",
+        "pool": "natural",
+        "rep": 12,
+        "cap": 128,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.15594635903835297,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-4096-cap256-rep11-calibrate",
+        "mode": "mixed-4096",
+        "pool": "natural",
+        "rep": 11,
+        "cap": 256,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.1920556053519249,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-4096-cap256-rep12-calibrate",
+        "mode": "mixed-4096",
+        "pool": "natural",
+        "rep": 12,
+        "cap": 256,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.19232214987277985,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-4096-cap485-rep11-calibrate",
+        "mode": "mixed-4096",
+        "pool": "natural",
+        "rep": 11,
+        "cap": 485,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.27952631935477257,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-mixed-4096-cap485-rep12-calibrate",
+        "mode": "mixed-4096",
+        "pool": "natural",
+        "rep": 12,
+        "cap": 485,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.25448978692293167,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-separate-4096-cap128-rep11-calibrate",
+        "mode": "separate-4096",
+        "pool": "natural",
+        "rep": 11,
+        "cap": 128,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.5855419039726257,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-separate-4096-cap128-rep12-calibrate",
+        "mode": "separate-4096",
+        "pool": "natural",
+        "rep": 12,
+        "cap": 128,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.13433389738202095,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-separate-4096-cap256-rep11-calibrate",
+        "mode": "separate-4096",
+        "pool": "natural",
+        "rep": 11,
+        "cap": 256,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.13365963846445084,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-separate-4096-cap256-rep12-calibrate",
+        "mode": "separate-4096",
+        "pool": "natural",
+        "rep": 12,
+        "cap": 256,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.13378230296075344,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-separate-4096-cap485-rep11-calibrate",
+        "mode": "separate-4096",
+        "pool": "natural",
+        "rep": 11,
+        "cap": 485,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.41643953137099743,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-natural-separate-4096-cap485-rep12-calibrate",
+        "mode": "separate-4096",
+        "pool": "natural",
+        "rep": 12,
+        "cap": 485,
+        "stage": "calibrate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.13316639699041843,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-wide-mixed-4096-cap485-rep11-mediate",
+        "mode": "mixed-4096",
+        "pool": "wide",
+        "rep": 11,
+        "cap": 485,
+        "stage": "mediate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.2880867086350918,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-wide-mixed-4096-cap485-rep12-mediate",
+        "mode": "mixed-4096",
+        "pool": "wide",
+        "rep": 12,
+        "cap": 485,
+        "stage": "mediate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.2861674018204212,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-wide-mixed-4096-cap607-rep11-mediate",
+        "mode": "mixed-4096",
+        "pool": "wide",
+        "rep": 11,
+        "cap": 607,
+        "stage": "mediate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.34046247228980064,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-wide-mixed-4096-cap607-rep12-mediate",
+        "mode": "mixed-4096",
+        "pool": "wide",
+        "rep": 12,
+        "cap": 607,
+        "stage": "mediate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.34327247738838196,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-wide-separate-4096-cap485-rep11-mediate",
+        "mode": "separate-4096",
+        "pool": "wide",
+        "rep": 11,
+        "cap": 485,
+        "stage": "mediate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.12197854183614254,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-wide-separate-4096-cap485-rep12-mediate",
+        "mode": "separate-4096",
+        "pool": "wide",
+        "rep": 12,
+        "cap": 485,
+        "stage": "mediate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.12205380946397781,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-wide-separate-4096-cap607-rep11-mediate",
+        "mode": "separate-4096",
+        "pool": "wide",
+        "rep": 11,
+        "cap": 607,
+        "stage": "mediate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.11786576360464096,
+      "intervals_over_1s": []
+    },
+    {
+      "experiment": {
+        "run_id": "m2mediate-wide-separate-4096-cap607-rep12-mediate",
+        "mode": "separate-4096",
+        "pool": "wide",
+        "rep": 12,
+        "cap": 607,
+        "stage": "mediate",
+        "activation_limit": 0
+      },
+      "max_launch_interval_s": 0.13635696284472942,
+      "intervals_over_1s": []
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "rep": 71,
+  "server_policy": "native607",
+  "cases": [
+    [
+      "native607",
+      "train512",
+      "background"
+    ],
+    [
+      "native607",
+      "hold384",
+      "background"
+    ]
+  ],
+  "command": [
+    "/workspace/sglang/.venv/bin/python",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py",
+    "--model-path",
+    "/models/Kimi-Linear-48B-A3B",
+    "--tp-size",
+    "2",
+    "--trust-remote-code",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "30144",
+    "--mem-fraction-static",
+    "0.85",
+    "--schedule-policy",
+    "fcfs",
+    "--disable-radix-cache",
+    "--cuda-graph-backend-decode",
+    "disabled",
+    "--cuda-graph-backend-prefill",
+    "disabled",
+    "--chunked-prefill-size",
+    "4096",
+    "--max-prefill-tokens",
+    "16384",
+    "--enable-mixed-chunk",
+    "--max-mamba-cache-size",
+    "607",
+    "--enable-unified-memory",
+    "--max-total-tokens",
+    "781725"
+  ]
+}

@@ -1,0 +1,357 @@
+{
+  "original": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01",
+  "source_hashes": {
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+    "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+    "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+    "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+    "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+    "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+    "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+    "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+    "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+    "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+    "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+    "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+    "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+    "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef"
+  },
+  "frozen_plan": {
+    "arrivals": {
+      "state-far": 8.634797419421375,
+      "state-near": 13.789265418425202,
+      "kv-far": 115.5441352268681,
+      "kv-near": 119.8455872037448
+    },
+    "evidence": [
+      {
+        "profile": "state",
+        "phase": "far",
+        "rep": 41,
+        "snapshot": {
+          "arrival_s": 8.634797419421375,
+          "holders": 512,
+          "alive": 512,
+          "prefilled": 512,
+          "median_remaining": 112.0,
+          "state_live_bytes_proxy": 11114905600,
+          "kv_live_bytes_proxy": 2179989504,
+          "state_fraction": 0.8360280779241265,
+          "shared_pool_bytes": 19481072000
+        },
+        "errors": []
+      },
+      {
+        "profile": "state",
+        "phase": "far",
+        "rep": 42,
+        "snapshot": {
+          "arrival_s": 8.634797419421375,
+          "holders": 512,
+          "alive": 512,
+          "prefilled": 512,
+          "median_remaining": 113.0,
+          "state_live_bytes_proxy": 11114905600,
+          "kv_live_bytes_proxy": 2179989504,
+          "state_fraction": 0.8360280779241265,
+          "shared_pool_bytes": 19481072000
+        },
+        "errors": []
+      },
+      {
+        "profile": "state",
+        "phase": "near",
+        "rep": 41,
+        "snapshot": {
+          "arrival_s": 13.789265418425202,
+          "holders": 512,
+          "alive": 512,
+          "prefilled": 512,
+          "median_remaining": 32.0,
+          "state_live_bytes_proxy": 11114905600,
+          "kv_live_bytes_proxy": 2510290944,
+          "state_fraction": 0.8157611205171618,
+          "shared_pool_bytes": 19481072000
+        },
+        "errors": []
+      },
+      {
+        "profile": "state",
+        "phase": "near",
+        "rep": 42,
+        "snapshot": {
+          "arrival_s": 13.789265418425202,
+          "holders": 512,
+          "alive": 512,
+          "prefilled": 512,
+          "median_remaining": 33.0,
+          "state_live_bytes_proxy": 11114905600,
+          "kv_live_bytes_proxy": 2510290944,
+          "state_fraction": 0.8157611205171618,
+          "shared_pool_bytes": 19481072000
+        },
+        "errors": []
+      },
+      {
+        "profile": "kv",
+        "phase": "far",
+        "rep": 41,
+        "snapshot": {
+          "arrival_s": 115.5441352268681,
+          "holders": 96,
+          "alive": 96,
+          "prefilled": 96,
+          "median_remaining": 117.0,
+          "state_live_bytes_proxy": 2084044800,
+          "kv_live_bytes_proxy": 12683575296,
+          "state_fraction": 0.14112259026520396,
+          "shared_pool_bytes": 19481072000
+        },
+        "errors": []
+      },
+      {
+        "profile": "kv",
+        "phase": "far",
+        "rep": 42,
+        "snapshot": {
+          "arrival_s": 115.5441352268681,
+          "holders": 96,
+          "alive": 96,
+          "prefilled": 96,
+          "median_remaining": 108.0,
+          "state_live_bytes_proxy": 2084044800,
+          "kv_live_bytes_proxy": 12683575296,
+          "state_fraction": 0.14112259026520396,
+          "shared_pool_bytes": 19481072000
+        },
+        "errors": []
+      },
+      {
+        "profile": "kv",
+        "phase": "near",
+        "rep": 41,
+        "snapshot": {
+          "arrival_s": 119.8455872037448,
+          "holders": 96,
+          "alive": 96,
+          "prefilled": 96,
+          "median_remaining": 38.0,
+          "state_live_bytes_proxy": 2084044800,
+          "kv_live_bytes_proxy": 12751699968,
+          "state_fraction": 0.14047456548964,
+          "shared_pool_bytes": 19481072000
+        },
+        "errors": []
+      },
+      {
+        "profile": "kv",
+        "phase": "near",
+        "rep": 42,
+        "snapshot": {
+          "arrival_s": 119.8455872037448,
+          "holders": 96,
+          "alive": 96,
+          "prefilled": 96,
+          "median_remaining": 27.0,
+          "state_live_bytes_proxy": 2084044800,
+          "kv_live_bytes_proxy": 12751699968,
+          "state_fraction": 0.14047456548964,
+          "shared_pool_bytes": 19481072000
+        },
+        "errors": []
+      }
+    ],
+    "scenes_valid": true,
+    "source_hashes": {
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+      "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+      "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+      "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+      "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+      "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+      "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+      "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef"
+    },
+    "parent_manifest": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/calibrate03/manifest.json",
+    "physical_gpu_ids": [
+      4,
+      5
+    ],
+    "formal_reps": [
+      51,
+      52
+    ],
+    "primary": "mean JCT; p95/makespan regression <=5%"
+  },
+  "missing": [
+    [
+      "native",
+      "kv",
+      "far",
+      52
+    ],
+    [
+      "native",
+      "kv",
+      "near",
+      52
+    ],
+    [
+      "native",
+      "state",
+      "far",
+      52
+    ],
+    [
+      "native",
+      "state",
+      "near",
+      52
+    ]
+  ],
+  "case_order": [
+    [
+      "kv",
+      "near"
+    ],
+    [
+      "kv",
+      "far"
+    ],
+    [
+      "state",
+      "near"
+    ],
+    [
+      "state",
+      "far"
+    ]
+  ],
+  "adopted_sessions": [
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52"
+  ],
+  "adopted_artifact_sha256": {
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-far-rep51-screen.json": "fd3337ba08603747c58c4856614bc7d39881d3daeca4d349de67a3112f661a74",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-far-rep51-warmup.json": "00bee8d6da5ca97b8fb5872a8be4d244455acf5eb67b7ed4912bb6066d075975",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-near-rep51-screen.json": "27978bd5ce4986c50cc93f4427e1b6f5f7275122a4b5d9f2800eba4bea9ff2a1",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-near-rep51-warmup.json": "cc849681b413283fdaa54ff656bc96772d5b0c4440d1e4668d0501d647148a86",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-far-rep51-screen.json": "153bba5a29c241a016f9859b54c0907bd034edc3fdae8dc0b50194f239e2e400",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-far-rep51-warmup.json": "807f0ffda90169fe107ca001e1e35a7d07eec42999d1cea5986cc1bb44748b88",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-near-rep51-screen.json": "bcccc7c23dd918276813873f44bb4008bd2be86cfab39471558e375e47dbbb7d",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-near-rep51-warmup.json": "621bd18af6adf10a97e3e1b3285b0797d90b0cbd85f96fd87932fc600ce23a3f",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-far-rep51-screen.json": "b48e0a477b618feac181a62fed417c55e904273114d42ae55f2d692acf53c461",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-far-rep51-warmup.json": "145ed6e2cb1d7ac6a2fb5ed573811203e4d262ac7ed08e93cef4b162da614af6",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-near-rep51-screen.json": "2850c53b0d155edb72be18230a8a3d081f79d0b0cfb9c0cd55f3aa085dfd1540",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-near-rep51-warmup.json": "43a51c860c3de69c9f6686f4211e9dc6934b0aca4a1084d9f3b50296ef05743c",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-far-rep51-screen.json": "2e7e12d5579ec37f5c474d0dd3cdaa7f28c95aec527e8c74368debe99ab304a3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-far-rep51-warmup.json": "4684e3e7c7dee86fbbc0113a28e21104660928375b9581fcfa03bba314a1985b",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-near-rep51-screen.json": "2ae87117dcdffb46f660a1f0b49483b0b053340670c33c9201e63964ccad8f52",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-near-rep51-warmup.json": "c0400df085087cdc7fc90f5c013e81d5deabb932fdfb19c817f83a76c18bfb90",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-far-rep52-screen.json": "e9c4eb2f85cee0ea4a29393e8e486cb30e7be063ceae92ffc67eac0f0ea70e29",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-far-rep52-warmup.json": "8c5c87953bb3fea56602b3cef61de94232188df66fcc267634dc156c3d59fec9",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-near-rep52-screen.json": "f8ecfde5563771133f641ccf573817bfa85c8809eef55189b507379e60220637",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-near-rep52-warmup.json": "ce84c71e5e14f9137d8efe6aafa0f77434a95558142118fda75eb15aa0b16df4",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-far-rep52-screen.json": "37cda19255eb0a531636f9477d9c395031fcc8333f67098918b9ff4a7ca709e4",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-far-rep52-warmup.json": "84d951bdba580c5a5b3b0f91cae4540d8982eb8790770763382824249df69fb0",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-near-rep52-screen.json": "6772211a424dbab09950dc8472a3e6e72e480a1429dc66bdb37a4390f0fef54b",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-near-rep52-warmup.json": "508fd0692cb11744e43ef9a8788e9aa29c62471511c97ad8dfa3b2db36ebbfeb"
+  },
+  "excluded": [
+    {
+      "session": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-03-native-rep52",
+      "reason": "entire incomplete session excluded",
+      "artifacts": {
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-03-native-rep52/m2ua-native-kv-near-rep52-warmup.json": "64f9f2080a50c66e00d4fee9e447be04281df357a70e66568230c3058de977de"
+      },
+      "missing": [
+        [
+          "kv",
+          "far",
+          "screen"
+        ],
+        [
+          "kv",
+          "far",
+          "warmup"
+        ],
+        [
+          "kv",
+          "near",
+          "screen"
+        ],
+        [
+          "state",
+          "far",
+          "screen"
+        ],
+        [
+          "state",
+          "far",
+          "warmup"
+        ],
+        [
+          "state",
+          "near",
+          "screen"
+        ],
+        [
+          "state",
+          "near",
+          "warmup"
+        ]
+      ]
+    }
+  ],
+  "physical_gpu_ids": [
+    4,
+    5
+  ],
+  "port": 30144,
+  "created_unix_s": 1789604970.2323372,
+  "recovery_script_sha256": "f83bfa6599c023697ff1347961908b4f6112b9680f1ac5d12a94917b36c32ecc",
+  "analysis_sha256": "e35aaa45790745dd734123c3d9e1122470347ee024ca090990c308142239938a"
+}

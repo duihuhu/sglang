@@ -1,0 +1,2760 @@
+{
+  "complete": true,
+  "phases": [
+    "near"
+  ],
+  "counts": {
+    "runs": 16,
+    "requests": 8192,
+    "warmups": 16,
+    "warmup_requests": 8192
+  },
+  "selected_baseline": {
+    "policy": "native607",
+    "training_scores": {
+      "native607": 1.0
+    },
+    "selection_uses_held_out": false,
+    "scope": "near only"
+  },
+  "manifest": {
+    "stage": "measure",
+    "source_hashes": {
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+      "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+      "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+      "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+      "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+      "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+      "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+      "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+      "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+      "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+      "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_mixed_holdout.py": "862ec5e363ebbb4d933794d3b1c4d566a1b6e66c2f973e3cec1b942bfb6ecdf7",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/analyze_m2_mixed_holdout.py": "3381a20759acc11f0ad3e80f3597fa1a5c2384d72849d988709a04dddddb619f",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_mixed_holdout_protocol_20260917.md": "3138586b993a1e1fe1609b713d02f1ff96f4c37b037ff6fb7c9094cb7f18b374",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_mixed_near.py": "5733563156811bff93cd10894c3880a0a540917d8a9aa1bc18a69773e2e76c21",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/analyze_m2_mixed_near.py": "36d80c71b7fbc9b2b70b62e853095df7ea31c21c072373dfed0434807bed5f8b",
+      "/workspace/sglang/benchmark/test_motivation/Ledger/m2_mixed_near_protocol_20260917.md": "a290e31752b241c3992affb36617efcdaed6d5b1d1b06332aeb3aca55b97202c"
+    },
+    "plan": {
+      "arrivals": {
+        "train512-near": 17.694009756500236,
+        "hold384-near": 24.09899558900088
+      },
+      "evidence": [
+        {
+          "profile": "train512",
+          "phase": "near",
+          "rep": 71,
+          "snapshot": {
+            "arrival_s": 17.694009756500236,
+            "holders": 512,
+            "alive": 488,
+            "prefilled": 512,
+            "median_remaining": 32.0,
+            "state_live_bytes_proxy": 10593894400,
+            "kv_live_bytes_proxy": 2391032448,
+            "state_fraction": 0.8158609227461087,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "train512",
+          "phase": "near",
+          "rep": 72,
+          "snapshot": {
+            "arrival_s": 17.694009756500236,
+            "holders": 512,
+            "alive": 511,
+            "prefilled": 512,
+            "median_remaining": 35,
+            "state_live_bytes_proxy": 11093196800,
+            "kv_live_bytes_proxy": 2497549824,
+            "state_fraction": 0.8162315954305588,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "hold384",
+          "phase": "near",
+          "rep": 71,
+          "snapshot": {
+            "arrival_s": 24.09899558900088,
+            "holders": 384,
+            "alive": 312,
+            "prefilled": 384,
+            "median_remaining": 41.0,
+            "state_live_bytes_proxy": 6773145600,
+            "kv_live_bytes_proxy": 2794571136,
+            "state_fraction": 0.7079166102937603,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        },
+        {
+          "profile": "hold384",
+          "phase": "near",
+          "rep": 72,
+          "snapshot": {
+            "arrival_s": 24.09899558900088,
+            "holders": 384,
+            "alive": 320,
+            "prefilled": 384,
+            "median_remaining": 42.0,
+            "state_live_bytes_proxy": 6946816000,
+            "kv_live_bytes_proxy": 2863760256,
+            "state_fraction": 0.7080945928891214,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": []
+        }
+      ],
+      "phases": [
+        "near"
+      ],
+      "scenes_valid": true,
+      "source_hashes": {
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_activation_pacing.py": "6a46f319c958dc58738ff6447f5fa55edc7e2aaa05a69f4c31d245759e9dcd41",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_activation_pacing_protocol_20260910.md": "96a94cfb84787557e4d1fb16bb68c7a9e7e9636f51f2644a2ed7ccf463bf1308",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_gpu_health.py": "25f5b44cd04eb29fad2c4d9dc753ccf6c5fea5881bc24ac144f8ec4626f27d99",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_batch_frontier.py": "db14dbaf01823871777cdaa96b8a9fd185a6f1fcdfe4bd6d4223ced8c9383927",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_hybrid_factors.py": "52d1885304a90db06c7a26cdad656e483bfb1f7785d221561fbdf5aa0e55f115",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/validate_dynamic_cost_motivation.py": "9af4449bb32b244e51bbe3b30cf88b0979017a42197c36ab32779a0f7dbda834",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/validate_vtc_state_tax_motivation.py": "7e53059838064a1dccab44337d5f39f381e7e77e7d009adb7b1a5a8fb52e67bf",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/validate_admission_batch_motivation.py": "24f7274d92a35364dc889c78bcc5d558bf27f525a379e37731ace14cbd57d3f3",
+        "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "ec7ea0bc70a4bd72f7f00b5120fe03804601dca2e0a76538eacc29aab229625d",
+        "/workspace/sglang/python/sglang/srt/managers/schedule_policy.py": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+        "/workspace/sglang/python/sglang/srt/managers/schedule_batch.py": "348cd231d705a618c3d4a80a356470f92a430a941c97b429a8b5d16336fd035c",
+        "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3",
+        "/workspace/sglang/python/sglang/srt/managers/scheduler_components/tenant_resource_tracker.py": "92202949d38a9b8d98c6fdd3cc9dfec9f1b94513021c2f26c49b6066adc337a3",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_progress_probe.py": "9fb8bd34e7937370e94e475eab40a340a6aaa733a7dc73439c8b9f1b5f84594a",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_progress_probe_protocol_20260915.md": "7e98dbf3ec579f6d58e8c1da3aa22c9fef58d3aee409b0b5b64e9e8892f86ad9",
+        "/workspace/sglang/python/sglang/srt/mem_cache/kv_cache_configurator.py": "53da4a1ab9b9be2b3b55607315c68842de4c83f48d7254f742a108c949fc6ba3",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_state_mediation.py": "6e1b42b48db476552744b3e8a95ce68e95ef6e548683bd6719e6eec2dfc73de9",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_state_mediation_protocol_20260916.md": "da438936539ce99b07d43f7ab054fd6ece31f573eb6cb11bc50228d3c87cad9c",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_streaming_gpu_health.py": "afde50345e1b9c5715c1efef635b24c11f52f3824f5847a28bf7258b92f123e3",
+        "/workspace/sglang/python/sglang/srt/server_args.py": "db6763c56d8e6aaa056b571279c243f8dbf2b99f6c2368736d0f414cf13aefc2",
+        "/workspace/sglang/python/sglang/srt/configs/mamba_utils.py": "820627a476130e36e8c9aeec2f1ded01d0c068369149e014cc0ef074f1e90808",
+        "/workspace/sglang/python/sglang/srt/configs/kimi_linear.py": "25d7c7fa629626e49a07cb78daf63aab5f7f32456a652ece2813bc24c2491685",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_pool_comparison.py": "7f641a0c98f03ac20312c8c11be1c8f295a16977128720d55901d58098e8bb15",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_pool_audit_server.py": "73536fa7aa0befb361ea1d07966846030d61a881dba4c2ccf443cbac43dbe83b",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_pool_comparison_live_protocol_20260916.md": "2967e2921295095a540d2e9a707b0c21566d048a03dd9bfec4b3cd718cadeca6",
+        "/workspace/sglang/python/sglang/srt/mem_cache/unified_memory_pool.py": "9875cd709458de684243a802f2da6d0ba6ca3ed6a61dd35d69800cd9d97cf1f9",
+        "/workspace/sglang/python/sglang/srt/mem_cache/multi_ended_allocator.py": "30415f31c66043aefe60f92278f8f1fa16ef2b1980fc45baee70766a536b5d1c",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_unified_admission.py": "9638ad83314728a9adefd6f42ee6cc271832e542d827b44e2b97b368405dae85",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/launch_m2_unified_admission.py": "59fe418229c59dacea351438cf3baf00d9be33362b3918ecc628b84a4f3c26a3",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_unified_admission_protocol_20260916.md": "4b429d407c1df2b7fa9dd68d36348987f99d0e4ac3e727c72e86ad1a3e15926c",
+        "/workspace/sglang/python/sglang/srt/managers/prefill_delayer.py": "e9203f2775a58489e8aea146bc4b8e4620b3ee5876794bd346336375ca4f6e6e",
+        "/workspace/sglang/python/sglang/srt/managers/min_free_slots_delayer.py": "bb864fc17446d3ccedc208250ac0171a235a39870bc151139c411049772fbeef",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_mixed_holdout.py": "862ec5e363ebbb4d933794d3b1c4d566a1b6e66c2f973e3cec1b942bfb6ecdf7",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/analyze_m2_mixed_holdout.py": "3381a20759acc11f0ad3e80f3597fa1a5c2384d72849d988709a04dddddb619f",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_mixed_holdout_protocol_20260917.md": "3138586b993a1e1fe1609b713d02f1ff96f4c37b037ff6fb7c9094cb7f18b374",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/run_m2_mixed_near.py": "5733563156811bff93cd10894c3880a0a540917d8a9aa1bc18a69773e2e76c21",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/analyze_m2_mixed_near.py": "36d80c71b7fbc9b2b70b62e853095df7ea31c21c072373dfed0434807bed5f8b",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/m2_mixed_near_protocol_20260917.md": "a290e31752b241c3992affb36617efcdaed6d5b1d1b06332aeb3aca55b97202c"
+      },
+      "physical_gpu_ids": [
+        4,
+        5
+      ],
+      "gpus": [
+        {
+          "index": 4,
+          "uuid": "GPU-bfe384be-b1b9-a366-b97f-fb4a19ecca92",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        },
+        {
+          "index": 5,
+          "uuid": "GPU-98c6d507-a0b0-178a-3988-bede27dae961",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        }
+      ],
+      "source_calibration": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03",
+      "source_plan_sha256": "5efaa46dd181143a4d4f68efb594cacff9c6c97110ae84828c6e9025f5c0cd0d",
+      "source_manifest_sha256": "5a90827833cdfa6a775ac8bcae267bac1e7bfc16a3f9de34258a64bb148ff240",
+      "source_artifact_sha256": {
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-00-native607-rep71/m2mh-native607-hold384-background-rep71-calibrate.json": "9bba8dccae69c096caf1ab059a94bd371b2db19eeb87223d16fc5c5aa954f0d5",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-00-native607-rep71/m2mh-native607-hold384-background-rep71-warmup.json": "ca025ec0476e709fdad46d8655fc03421a44b6a5324690fa49564d9de9a86467",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-00-native607-rep71/m2mh-native607-train512-background-rep71-calibrate.json": "390496f9fdcb8b722fcd28b803f0c41c8d05f7c6625da7808f387b12ee1685ac",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-00-native607-rep71/m2mh-native607-train512-background-rep71-warmup.json": "e1d706c9723550d61b021c76e4c563f91e9ebad1dcd3d7c6230a0bcc47cec89a",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-01-native607-rep72/m2mh-native607-hold384-background-rep72-calibrate.json": "4afbbda632f1c1e384cdf81654583fdce7a107651e775a37c72f52b004827327",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-01-native607-rep72/m2mh-native607-hold384-background-rep72-warmup.json": "0cdd6bf897ce88d7337d2f3bd5ee70fe357c1869bd531374035923f422ca36b6",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-01-native607-rep72/m2mh-native607-train512-background-rep72-calibrate.json": "e6aa2f8d6045bbc83cefbce30bce9cfdb85d1d57d877a1286baad81788bd7955",
+        "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/calibrate03/session-01-native607-rep72/m2mh-native607-train512-background-rep72-warmup.json": "8a73a8e215b5f8f94f89205c42948c15a0aba64b0bcd18df01df50b6e5e7e87b"
+      },
+      "original_scenes_valid": false,
+      "excluded_scene_evidence": [
+        {
+          "profile": "train512",
+          "phase": "far",
+          "rep": 71,
+          "snapshot": {
+            "arrival_s": 8.713676455249697,
+            "holders": 512,
+            "alive": 376,
+            "prefilled": 367,
+            "median_remaining": 103.5,
+            "state_live_bytes_proxy": 8162508800,
+            "kv_live_bytes_proxy": 1622605824,
+            "state_fraction": 0.8341761045884709,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": [
+            "fewer than 80% holders alive",
+            "fewer than 95% holders prefilled"
+          ]
+        },
+        {
+          "profile": "train512",
+          "phase": "far",
+          "rep": 72,
+          "snapshot": {
+            "arrival_s": 8.713676455249697,
+            "holders": 512,
+            "alive": 376,
+            "prefilled": 367,
+            "median_remaining": 103.5,
+            "state_live_bytes_proxy": 8162508800,
+            "kv_live_bytes_proxy": 1622605824,
+            "state_fraction": 0.8341761045884709,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": [
+            "fewer than 80% holders alive",
+            "fewer than 95% holders prefilled"
+          ]
+        },
+        {
+          "profile": "hold384",
+          "phase": "far",
+          "rep": 71,
+          "snapshot": {
+            "arrival_s": 11.827995864000513,
+            "holders": 384,
+            "alive": 254,
+            "prefilled": 249,
+            "median_remaining": 95.5,
+            "state_live_bytes_proxy": 5514035200,
+            "kv_live_bytes_proxy": 2155216896,
+            "state_fraction": 0.7189795212072789,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": [
+            "fewer than 80% holders alive",
+            "fewer than 95% holders prefilled"
+          ]
+        },
+        {
+          "profile": "hold384",
+          "phase": "far",
+          "rep": 72,
+          "snapshot": {
+            "arrival_s": 11.827995864000513,
+            "holders": 384,
+            "alive": 254,
+            "prefilled": 249,
+            "median_remaining": 95.5,
+            "state_live_bytes_proxy": 5514035200,
+            "kv_live_bytes_proxy": 2155216896,
+            "state_fraction": 0.7189795212072789,
+            "shared_pool_bytes": 19481072000
+          },
+          "errors": [
+            "fewer than 80% holders alive",
+            "fewer than 95% holders prefilled"
+          ]
+        }
+      ]
+    },
+    "plan_sha256": "cf93468c5288442446c26c4662d2658cc49922e50e4f175a446c948252ab9bae",
+    "sessions": [
+      {
+        "rep": 81,
+        "server_policy": "native607",
+        "cases": [
+          [
+            "native607",
+            "train512",
+            "near"
+          ],
+          [
+            "cap512",
+            "train512",
+            "near"
+          ],
+          [
+            "native607",
+            "hold384",
+            "near"
+          ],
+          [
+            "cap512",
+            "hold384",
+            "near"
+          ]
+        ]
+      },
+      {
+        "rep": 81,
+        "server_policy": "slots96",
+        "cases": [
+          [
+            "slots96",
+            "train512",
+            "near"
+          ],
+          [
+            "slots96",
+            "hold384",
+            "near"
+          ]
+        ]
+      },
+      {
+        "rep": 81,
+        "server_policy": "decode32",
+        "cases": [
+          [
+            "decode32",
+            "train512",
+            "near"
+          ],
+          [
+            "decode32",
+            "hold384",
+            "near"
+          ]
+        ]
+      },
+      {
+        "rep": 82,
+        "server_policy": "decode32",
+        "cases": [
+          [
+            "decode32",
+            "hold384",
+            "near"
+          ],
+          [
+            "decode32",
+            "train512",
+            "near"
+          ]
+        ]
+      },
+      {
+        "rep": 82,
+        "server_policy": "slots96",
+        "cases": [
+          [
+            "slots96",
+            "hold384",
+            "near"
+          ],
+          [
+            "slots96",
+            "train512",
+            "near"
+          ]
+        ]
+      },
+      {
+        "rep": 82,
+        "server_policy": "native607",
+        "cases": [
+          [
+            "cap512",
+            "hold384",
+            "near"
+          ],
+          [
+            "native607",
+            "hold384",
+            "near"
+          ],
+          [
+            "cap512",
+            "train512",
+            "near"
+          ],
+          [
+            "native607",
+            "train512",
+            "near"
+          ]
+        ]
+      }
+    ],
+    "initial_gpus": [
+      [
+        {
+          "index": 4,
+          "uuid": "GPU-bfe384be-b1b9-a366-b97f-fb4a19ecca92",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        },
+        {
+          "index": 5,
+          "uuid": "GPU-98c6d507-a0b0-178a-3988-bede27dae961",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        }
+      ],
+      [
+        {
+          "index": 4,
+          "uuid": "GPU-bfe384be-b1b9-a366-b97f-fb4a19ecca92",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        },
+        {
+          "index": 5,
+          "uuid": "GPU-98c6d507-a0b0-178a-3988-bede27dae961",
+          "name": "NVIDIA A800-SXM4-80GB",
+          "memory_mib": 1,
+          "total_mib": 81920,
+          "utilization": 0
+        }
+      ]
+    ],
+    "created_unix_s": 1789628553.223901
+  },
+  "artifact_sha256": {
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-cap512-hold384-near-rep81-measure.json": "1d98a64101c83f38f88e4cff6ffcc3125de4791af6a849c90e97cc2ac50a007a",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-cap512-hold384-near-rep81-warmup.json": "b4a8cb87076d1291151c3e14347435647febd103f3c2d3760a84cc55a77588cd",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-cap512-train512-near-rep81-measure.json": "c2b49af498a00eb4ee6e9c3c4f980451c9edaa5217d8915b63ec129ecf8970ca",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-cap512-train512-near-rep81-warmup.json": "e6c9e6f1b50a4d82c64cf85f718a2b0d242b63f8bcf67671b9b2900361a9390c",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-native607-hold384-near-rep81-measure.json": "8e6be8421bda00f6266b067bb719819f0bce469b8f512443d5cfde55a2f505af",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-native607-hold384-near-rep81-warmup.json": "ef6c1b695cdd43de953217f7ec5eb957c4d96dca4e101ed96feb8a9c5bf7729d",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-native607-train512-near-rep81-measure.json": "2b01161fe009ecbad6735fe64d50ba10683d59779d10ec66849dd2dcdebc518e",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-native607-train512-near-rep81-warmup.json": "a65723dfd1a96ea25542b6e37db651bc98ddc6653da73dbd01e57534c0f6365b",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-01-slots96-rep81/m2mh-slots96-hold384-near-rep81-measure.json": "3a4ec60f8845eb7037deec507c3f1677cc8d4486c84968bdf09711c988d7e478",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-01-slots96-rep81/m2mh-slots96-hold384-near-rep81-warmup.json": "f6725fce21dc09cd271b8e1bb1c13086b297f1510fc0ebbb9eee3f52267bdc1d",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-01-slots96-rep81/m2mh-slots96-train512-near-rep81-measure.json": "5bebd4165f64c9595789cd21488ae94744cc5582a17be49072ad8844011ce2e1",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-01-slots96-rep81/m2mh-slots96-train512-near-rep81-warmup.json": "78823b068cd0cc01788033e9d79def270f0f6b7c71ac66f6b36f194bdc8e4911",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-02-decode32-rep81/m2mh-decode32-hold384-near-rep81-measure.json": "d7171746899ade799b12173ce0bc8795fd239e1721a62d06b747ab4b222f2976",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-02-decode32-rep81/m2mh-decode32-hold384-near-rep81-warmup.json": "6ef227a5738c602798b7348556cbd9a51baa436c18e29c2a001709b358302340",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-02-decode32-rep81/m2mh-decode32-train512-near-rep81-measure.json": "7fd939539106450b08d70ab9765c52e42cfdd20e42a69af1212b4f86c1d4bbc4",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-02-decode32-rep81/m2mh-decode32-train512-near-rep81-warmup.json": "433d3fba6242608c7c0a3da1c28e9a66b461be8b4b491f080473c4febbf965da",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-03-decode32-rep82/m2mh-decode32-hold384-near-rep82-measure.json": "27a4f81837d858f814cd3277c92756b1f8235e9a6fedd1d7776fc210e4845bfd",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-03-decode32-rep82/m2mh-decode32-hold384-near-rep82-warmup.json": "04af0989a5685a5836dfede7b8862696314cd8cda3d8a8e90cf74e0a3267a109",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-03-decode32-rep82/m2mh-decode32-train512-near-rep82-measure.json": "ec8947b3d05a6d5561fd45d8d591a8356635744b8ec970d5bbc211643d2faa6c",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-03-decode32-rep82/m2mh-decode32-train512-near-rep82-warmup.json": "a6193744ebba2139e5242e2e30791f5fa369a55ec0c06d53e927d2e850610ac0",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-04-slots96-rep82/m2mh-slots96-hold384-near-rep82-measure.json": "57c6acc9ba1509914bf61ccc176bb2a1b4c74cfd45ec12812731892bf8a98520",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-04-slots96-rep82/m2mh-slots96-hold384-near-rep82-warmup.json": "828a468fa3dc2cb8b2b27b582613efb2006c3c454aa07d1b21e906511189d986",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-04-slots96-rep82/m2mh-slots96-train512-near-rep82-measure.json": "9679486a22021eec26fd29f08a014cb4b06ea927fb9a906a4e9bac94cbc8010f",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-04-slots96-rep82/m2mh-slots96-train512-near-rep82-warmup.json": "1f7635d06d559d2cc3f61c7b9d8fa226434baee2a376d896561e47ebd78122fb",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-cap512-hold384-near-rep82-measure.json": "99a009787cc9ed7957451cf7e8a1d331df608cc627e5d6892da84ba5cca537ef",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-cap512-hold384-near-rep82-warmup.json": "875c2c28a0a279c93870ce477e1c56e708cdf391394b06129ad8ff86d764d36d",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-cap512-train512-near-rep82-measure.json": "613e297d7b35894a4a09bd1d50a9926f2d95919e97125c594d818f8d8908f86a",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-cap512-train512-near-rep82-warmup.json": "7b6ad2aab07288023fe4aca5edd7f50e203b0e4caca420f4d959e9aa9f2833c0",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-native607-hold384-near-rep82-measure.json": "74ee1095aea8568045895388d461f7c32b62a03c48faec3f74c07270e73580e2",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-native607-hold384-near-rep82-warmup.json": "41e4aa4613628759463525e0df3a442aee7b9f9446a2f6bd7349093edfff1706",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-native607-train512-near-rep82-measure.json": "3e2bc03d8666dbdd50c76c6b35c375c5994b79bd81b67127f2ed7160d4f828b3",
+    "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-native607-train512-near-rep82-warmup.json": "3f19b255f1a11d870992da3b2d01726fed4fd9685d35c55b7b4dbf286979913e"
+  },
+  "rows": [
+    {
+      "experiment": {
+        "run_id": "m2mh-cap512-hold384-near-rep81-measure",
+        "policy": "cap512",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 36.21458035552895,
+        "p95_jct_s": 50.28981202000068,
+        "mean_ttft_s": 11.07427205698871,
+        "p95_ttft_s": 29.32963465099965,
+        "makespan_s": 68.89148624800146,
+        "peak_active": 384,
+        "state_slot_seconds": 11466.405296815032,
+        "blocks": {
+          "prefill_other": 230
+        },
+        "max_lateness_ms": 1.0788749987550583,
+        "holder": {
+          "count": 384,
+          "mean_jct_s": 35.97508738793479,
+          "p95_jct_s": 50.5654453749994,
+          "mean_ttft_s": 9.086515813518067,
+          "p95_ttft_s": 19.596761371998582,
+          "mean_queue_s": 8.744221179770799,
+          "p95_queue_s": 18.949084587999096,
+          "mean_after_activation_s": 27.230866208163995,
+          "mean_holding_s": 27.216544399302183
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 37.651538161093924,
+          "p95_jct_s": 44.38817856999958,
+          "mean_ttft_s": 23.00080951781257,
+          "p95_ttft_s": 39.50842171399927,
+          "mean_queue_s": 21.78640349323433,
+          "p95_queue_s": 38.59256024299975,
+          "mean_after_activation_s": 15.865134667859593,
+          "mean_holding_s": 15.863316366921765
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.03419203599969478,
+          "holder_first_release_after_arrival_s": -1.1042201840000416,
+          "holder_last_release_after_arrival_s": 28.226268573997913,
+          "holders_released_by_first_candidate": 68
+        }
+      },
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 320,
+        "prefilled": 384,
+        "median_remaining": 42.0,
+        "state_live_bytes_proxy": 6946816000,
+        "kv_live_bytes_proxy": 2863760256,
+        "state_fraction": 0.7080945928891214,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "17a768bce75374a7b19e496416ca8d3b2fa6a54ab1c7b9da39ff1134347055d8",
+      "capacity": [
+        607,
+        781725,
+        607,
+        512
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 28.226268573997913,
+        "candidate_prefill_batches_before_last_holder_release": 84,
+        "candidate_prefill_tokens_before_last_holder_release": 329342,
+        "holder_decode_launches_before_last_holder_release": 84,
+        "candidate_prefill_with_holder_decode_batches": 84,
+        "first_holder_decode_launch_after_arrival_s": 0.03530233399851568,
+        "max_interval_without_holder_decode_launch_s": 0.42321302999698673,
+        "batch_modes": {
+          "mixed": 84
+        },
+        "admission_blocks": {
+          "prefill_other": 84
+        }
+      },
+      "health": {
+        "sample_count": 276,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 60.0,
+        "max_memory_mib": 79260.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-cap512-hold384-near-rep81-measure.json",
+      "count": 448
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-cap512-train512-near-rep81-measure",
+        "policy": "cap512",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 29.454271691210042,
+        "p95_jct_s": 40.76774919200034,
+        "mean_ttft_s": 7.660869939578207,
+        "p95_ttft_s": 25.81716634300028,
+        "makespan_s": 61.61218055399877,
+        "peak_active": 512,
+        "state_slot_seconds": 12773.24110427079,
+        "blocks": {
+          "prefill_other": 199
+        },
+        "max_lateness_ms": 1.0806264997960113,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 28.52024461136913,
+          "p95_jct_s": 38.502059312999336,
+          "mean_ttft_s": 5.750308415171958,
+          "p95_ttft_s": 12.199091050002608,
+          "mean_queue_s": 5.448094042205263,
+          "p95_queue_s": 11.84659725399979,
+          "mean_after_activation_s": 23.072150569163867,
+          "mean_holding_s": 23.051662034648025
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 36.92648832993734,
+          "p95_jct_s": 43.522648010999546,
+          "mean_ttft_s": 22.9453621348282,
+          "p95_ttft_s": 39.07761600199956,
+          "mean_queue_s": 21.756072023984245,
+          "p95_queue_s": 38.018262906996824,
+          "mean_after_activation_s": 15.170416305953097,
+          "mean_holding_s": 15.168595977046891
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.026797451502716285,
+          "holder_first_release_after_arrival_s": -0.2868503454974416,
+          "holder_last_release_after_arrival_s": 22.377251181502288,
+          "holders_released_by_first_candidate": 32
+        }
+      },
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 488,
+        "prefilled": 512,
+        "median_remaining": 32.0,
+        "state_live_bytes_proxy": 10593894400,
+        "kv_live_bytes_proxy": 2391032448,
+        "state_fraction": 0.8158609227461087,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "3004f8aa47bcba2646b6641cbe991f7101178517e1e2d28736df80703da910f5",
+      "capacity": [
+        607,
+        781725,
+        607,
+        512
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 22.377251181502288,
+        "candidate_prefill_batches_before_last_holder_release": 65,
+        "candidate_prefill_tokens_before_last_holder_release": 249979,
+        "holder_decode_launches_before_last_holder_release": 65,
+        "candidate_prefill_with_holder_decode_batches": 65,
+        "first_holder_decode_launch_after_arrival_s": 0.02836446550099936,
+        "max_interval_without_holder_decode_launch_s": 0.45214647199827596,
+        "batch_modes": {
+          "mixed": 65
+        },
+        "admission_blocks": {
+          "prefill_other": 65
+        }
+      },
+      "health": {
+        "sample_count": 248,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 61.0,
+        "max_memory_mib": 79694.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-cap512-train512-near-rep81-measure.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-native607-hold384-near-rep81-measure",
+        "policy": "native607",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 37.65744236686827,
+        "p95_jct_s": 52.23811577499873,
+        "mean_ttft_s": 11.275257362654031,
+        "p95_ttft_s": 30.218497447000118,
+        "makespan_s": 69.94683541900304,
+        "peak_active": 384,
+        "state_slot_seconds": 12025.608610095911,
+        "blocks": {
+          "prefill_other": 231
+        },
+        "max_lateness_ms": 2.717137000348868,
+        "holder": {
+          "count": 384,
+          "mean_jct_s": 37.50588828809367,
+          "p95_jct_s": 52.48250728499988,
+          "mean_ttft_s": 9.207994217645828,
+          "p95_ttft_s": 19.774742970999796,
+          "mean_queue_s": 8.8589683619871,
+          "p95_queue_s": 19.126002304001304,
+          "mean_after_activation_s": 28.64691992610657,
+          "mean_holding_s": 28.62953220586174
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 38.56676683951582,
+          "p95_jct_s": 45.434067296999274,
+          "mean_ttft_s": 23.678836232703247,
+          "p95_ttft_s": 40.805786881999666,
+          "mean_queue_s": 22.44130250242216,
+          "p95_queue_s": 39.7389786599997,
+          "mean_after_activation_s": 16.12546433709366,
+          "mean_holding_s": 16.122941297578166
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.011496542999338999,
+          "holder_first_release_after_arrival_s": -0.8739496040006998,
+          "holder_last_release_after_arrival_s": 30.18105799499881,
+          "holders_released_by_first_candidate": 52
+        }
+      },
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 336,
+        "prefilled": 384,
+        "median_remaining": 44.0,
+        "state_live_bytes_proxy": 7294156800,
+        "kv_live_bytes_proxy": 3001751424,
+        "state_fraction": 0.7084520026117902,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "17a768bce75374a7b19e496416ca8d3b2fa6a54ab1c7b9da39ff1134347055d8",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 30.18105799499881,
+        "candidate_prefill_batches_before_last_holder_release": 88,
+        "candidate_prefill_tokens_before_last_holder_release": 344301,
+        "holder_decode_launches_before_last_holder_release": 88,
+        "candidate_prefill_with_holder_decode_batches": 88,
+        "first_holder_decode_launch_after_arrival_s": 0.012540048998744169,
+        "max_interval_without_holder_decode_launch_s": 0.4332425169995986,
+        "batch_modes": {
+          "mixed": 88
+        },
+        "admission_blocks": {
+          "prefill_other": 88
+        }
+      },
+      "health": {
+        "sample_count": 280,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 60.0,
+        "max_memory_mib": 81036.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-native607-hold384-near-rep81-measure.json",
+      "count": 448
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-native607-train512-near-rep81-measure",
+        "policy": "native607",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 29.430924389942692,
+        "p95_jct_s": 40.73481071900096,
+        "mean_ttft_s": 7.6557793089826625,
+        "p95_ttft_s": 25.78103623300194,
+        "makespan_s": 61.55921169599969,
+        "peak_active": 512,
+        "state_slot_seconds": 12762.026250418996,
+        "blocks": {
+          "prefill_other": 199
+        },
+        "max_lateness_ms": 1.5156524996129406,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 28.49865897473436,
+          "p95_jct_s": 38.46068193300016,
+          "mean_ttft_s": 5.748211373390653,
+          "p95_ttft_s": 12.183766311001818,
+          "mean_queue_s": 5.4481490613808035,
+          "p95_queue_s": 11.83883774700007,
+          "mean_after_activation_s": 23.050509913353558,
+          "mean_holding_s": 23.030903501013633
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 36.88904771160935,
+          "p95_jct_s": 43.47452744199836,
+          "mean_ttft_s": 22.916322793718734,
+          "p95_ttft_s": 39.045558740999695,
+          "mean_queue_s": 21.727873190499793,
+          "p95_queue_s": 37.98496055400028,
+          "mean_after_activation_s": 15.161174521109558,
+          "mean_holding_s": 15.15943215468775
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.012820219499189989,
+          "holder_first_release_after_arrival_s": -0.3008236654986831,
+          "holder_last_release_after_arrival_s": 22.338420270500137,
+          "holders_released_by_first_candidate": 32
+        }
+      },
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 488,
+        "prefilled": 512,
+        "median_remaining": 32.0,
+        "state_live_bytes_proxy": 10593894400,
+        "kv_live_bytes_proxy": 2391032448,
+        "state_fraction": 0.8158609227461087,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "3004f8aa47bcba2646b6641cbe991f7101178517e1e2d28736df80703da910f5",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 22.338420270500137,
+        "candidate_prefill_batches_before_last_holder_release": 65,
+        "candidate_prefill_tokens_before_last_holder_release": 249979,
+        "holder_decode_launches_before_last_holder_release": 65,
+        "candidate_prefill_with_holder_decode_batches": 65,
+        "first_holder_decode_launch_after_arrival_s": 0.014359525501276948,
+        "max_interval_without_holder_decode_launch_s": 0.45634336700095446,
+        "batch_modes": {
+          "mixed": 65
+        },
+        "admission_blocks": {
+          "prefill_other": 65
+        }
+      },
+      "health": {
+        "sample_count": 248,
+        "loaded_sm_mhz_range": [
+          1410.0,
+          1410.0
+        ],
+        "max_temperature_c": 59.0,
+        "max_memory_mib": 80014.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81/m2mh-native607-train512-near-rep81-measure.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-slots96-hold384-near-rep81-measure",
+        "policy": "slots96",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 36.16855764706918,
+        "p95_jct_s": 50.23054311299711,
+        "mean_ttft_s": 11.054351064629534,
+        "p95_ttft_s": 29.26915279199966,
+        "makespan_s": 68.77169698599755,
+        "peak_active": 384,
+        "state_slot_seconds": 11453.86804618694,
+        "blocks": {
+          "prefill_other": 230
+        },
+        "max_lateness_ms": 1.0762319995556018,
+        "holder": {
+          "count": 384,
+          "mean_jct_s": 35.934471575080714,
+          "p95_jct_s": 50.507773255001666,
+          "mean_ttft_s": 9.072113968687546,
+          "p95_ttft_s": 19.561210450003273,
+          "mean_queue_s": 8.731047322481848,
+          "p95_queue_s": 18.920345550999627,
+          "mean_after_activation_s": 27.203424252598865,
+          "mean_holding_s": 27.18834986941397
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 37.57307407899998,
+          "p95_jct_s": 44.27313169399713,
+          "mean_ttft_s": 22.94777364028147,
+          "p95_ttft_s": 39.44744403199729,
+          "mean_queue_s": 21.734696684297262,
+          "p95_queue_s": 38.53183498499857,
+          "mean_after_activation_s": 15.838377394702718,
+          "mean_holding_s": 15.836589005187136
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.010384013999100716,
+          "holder_first_release_after_arrival_s": -1.113828281003407,
+          "holder_last_release_after_arrival_s": 28.167193757998575,
+          "holders_released_by_first_candidate": 68
+        }
+      },
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 320,
+        "prefilled": 384,
+        "median_remaining": 42.0,
+        "state_live_bytes_proxy": 6946816000,
+        "kv_live_bytes_proxy": 2863760256,
+        "state_fraction": 0.7080945928891214,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "17a768bce75374a7b19e496416ca8d3b2fa6a54ab1c7b9da39ff1134347055d8",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 3,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 28.167193757998575,
+        "candidate_prefill_batches_before_last_holder_release": 84,
+        "candidate_prefill_tokens_before_last_holder_release": 329342,
+        "holder_decode_launches_before_last_holder_release": 84,
+        "candidate_prefill_with_holder_decode_batches": 84,
+        "first_holder_decode_launch_after_arrival_s": 0.011344055997142277,
+        "max_interval_without_holder_decode_launch_s": 0.4231820799977868,
+        "batch_modes": {
+          "mixed": 84
+        },
+        "admission_blocks": {
+          "prefill_other": 84
+        }
+      },
+      "health": {
+        "sample_count": 276,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 60.0,
+        "max_memory_mib": 79260.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-01-slots96-rep81/m2mh-slots96-hold384-near-rep81-measure.json",
+      "count": 448
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-slots96-train512-near-rep81-measure",
+        "policy": "slots96",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 29.87233184239414,
+        "p95_jct_s": 41.11512047400174,
+        "mean_ttft_s": 7.67761216618232,
+        "p95_ttft_s": 26.031685976999142,
+        "makespan_s": 62.02097570499973,
+        "peak_active": 512,
+        "state_slot_seconds": 13003.623723123746,
+        "blocks": {
+          "prefill_other": 199
+        },
+        "max_lateness_ms": 1.075679999921697,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 28.949524006195325,
+          "p95_jct_s": 39.01298718599719,
+          "mean_ttft_s": 5.745961022697308,
+          "p95_ttft_s": 12.19179048499791,
+          "mean_queue_s": 5.444349769357693,
+          "p95_queue_s": 11.838472446997912,
+          "mean_after_activation_s": 23.505174236837632,
+          "mean_holding_s": 23.485230352747543
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 37.25479453198466,
+          "p95_jct_s": 43.92842301800192,
+          "mean_ttft_s": 23.130821314062416,
+          "p95_ttft_s": 39.13460261799992,
+          "mean_queue_s": 21.953287623156257,
+          "p95_queue_s": 38.24971519600149,
+          "mean_after_activation_s": 15.3015069088284,
+          "mean_holding_s": 15.299777851828196
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.024404082500041113,
+          "holder_first_release_after_arrival_s": -0.21671074949881586,
+          "holder_last_release_after_arrival_s": 22.887508263500422,
+          "holders_released_by_first_candidate": 24
+        }
+      },
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 496,
+        "prefilled": 512,
+        "median_remaining": 32.5,
+        "state_live_bytes_proxy": 10767564800,
+        "kv_live_bytes_proxy": 2428320384,
+        "state_fraction": 0.8159789699485763,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "3004f8aa47bcba2646b6641cbe991f7101178517e1e2d28736df80703da910f5",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 3,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 22.887508263500422,
+        "candidate_prefill_batches_before_last_holder_release": 66,
+        "candidate_prefill_tokens_before_last_holder_release": 253562,
+        "holder_decode_launches_before_last_holder_release": 66,
+        "candidate_prefill_with_holder_decode_batches": 66,
+        "first_holder_decode_launch_after_arrival_s": 0.025963680500353803,
+        "max_interval_without_holder_decode_launch_s": 0.4580185500017251,
+        "batch_modes": {
+          "mixed": 66
+        },
+        "admission_blocks": {
+          "prefill_other": 66
+        }
+      },
+      "health": {
+        "sample_count": 250,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 59.0,
+        "max_memory_mib": 79696.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-01-slots96-rep81/m2mh-slots96-train512-near-rep81-measure.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-decode32-hold384-near-rep81-measure",
+        "policy": "decode32",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 29.792759514037918,
+        "p95_jct_s": 39.89333213300051,
+        "mean_ttft_s": 10.777811861464297,
+        "p95_ttft_s": 26.118342290999863,
+        "makespan_s": 65.37623555800019,
+        "peak_active": 384,
+        "state_slot_seconds": 8709.448783791046,
+        "blocks": {
+          "prefill_other": 228
+        },
+        "max_lateness_ms": 1.7430209986279976,
+        "holder": {
+          "count": 384,
+          "mean_jct_s": 29.026799116195264,
+          "p95_jct_s": 39.375291393000225,
+          "mean_ttft_s": 9.09281749196351,
+          "p95_ttft_s": 19.622327771001437,
+          "mean_queue_s": 8.751488473255089,
+          "p95_queue_s": 18.9787548029999,
+          "mean_after_activation_s": 20.275310642940177,
+          "mean_holding_s": 20.25991685984128
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 34.38852190109384,
+          "p95_jct_s": 40.8835804549999,
+          "mean_ttft_s": 20.88777807846901,
+          "p95_ttft_s": 36.12040129600064,
+          "mean_queue_s": 19.86108926204696,
+          "p95_queue_s": 35.20802617499794,
+          "mean_after_activation_s": 14.527432639046879,
+          "mean_holding_s": 14.525636087687417
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 1.961576149998109,
+          "holder_first_release_after_arrival_s": -1.1191848640019089,
+          "holder_last_release_after_arrival_s": 16.92366923499776,
+          "holders_released_by_first_candidate": 192
+        }
+      },
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 320,
+        "prefilled": 384,
+        "median_remaining": 42.0,
+        "state_live_bytes_proxy": 6946816000,
+        "kv_live_bytes_proxy": 2863760256,
+        "state_fraction": 0.7080945928891214,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "17a768bce75374a7b19e496416ca8d3b2fa6a54ab1c7b9da39ff1134347055d8",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 16.92366923499776,
+        "candidate_prefill_batches_before_last_holder_release": 52,
+        "candidate_prefill_tokens_before_last_holder_release": 207365,
+        "holder_decode_launches_before_last_holder_release": 84,
+        "candidate_prefill_with_holder_decode_batches": 52,
+        "first_holder_decode_launch_after_arrival_s": 0.021199123998485447,
+        "max_interval_without_holder_decode_launch_s": 0.35902852199797053,
+        "batch_modes": {
+          "decode": 32,
+          "mixed": 52
+        },
+        "admission_blocks": {
+          "prefill_other": 52
+        }
+      },
+      "health": {
+        "sample_count": 264,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 60.0,
+        "max_memory_mib": 81036.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-02-decode32-rep81/m2mh-decode32-hold384-near-rep81-measure.json",
+      "count": 448
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-decode32-train512-near-rep81-measure",
+        "policy": "decode32",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 81,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 22.367522716669985,
+        "p95_jct_s": 36.86110057000042,
+        "mean_ttft_s": 7.327996507159646,
+        "p95_ttft_s": 21.77796067500094,
+        "makespan_s": 57.75024254600066,
+        "peak_active": 512,
+        "state_slot_seconds": 8870.483599538089,
+        "blocks": {
+          "prefill_other": 196
+        },
+        "max_lateness_ms": 1.551168501567446,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 21.022394330843582,
+          "p95_jct_s": 27.211354967999796,
+          "mean_ttft_s": 5.749131963906173,
+          "p95_ttft_s": 12.1890690370019,
+          "mean_queue_s": 5.445980742113207,
+          "p95_queue_s": 11.841551550998702,
+          "mean_after_activation_s": 15.576413588730375,
+          "mean_holding_s": 15.557070606945437
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 33.1285498032812,
+          "p95_jct_s": 39.66149286899963,
+          "mean_ttft_s": 19.958912853187428,
+          "p95_ttft_s": 34.89237825199962,
+          "mean_queue_s": 18.982147114406075,
+          "p95_queue_s": 34.00558207599897,
+          "mean_after_activation_s": 14.146402688875128,
+          "mean_holding_s": 14.144741387219142
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.230855360501664,
+          "holder_first_release_after_arrival_s": -0.31055073350034945,
+          "holder_last_release_after_arrival_s": 10.95541708950077,
+          "holders_released_by_first_candidate": 286
+        }
+      },
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 480,
+        "prefilled": 512,
+        "median_remaining": 33.0,
+        "state_live_bytes_proxy": 10420224000,
+        "kv_live_bytes_proxy": 2353680000,
+        "state_fraction": 0.8157430962374541,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "3004f8aa47bcba2646b6641cbe991f7101178517e1e2d28736df80703da910f5",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 10.95541708950077,
+        "candidate_prefill_batches_before_last_holder_release": 32,
+        "candidate_prefill_tokens_before_last_holder_release": 127236,
+        "holder_decode_launches_before_last_holder_release": 65,
+        "candidate_prefill_with_holder_decode_batches": 32,
+        "first_holder_decode_launch_after_arrival_s": 0.0009656894999352517,
+        "max_interval_without_holder_decode_launch_s": 0.3503324800003611,
+        "batch_modes": {
+          "decode": 33,
+          "mixed": 32
+        },
+        "admission_blocks": {
+          "prefill_other": 32
+        }
+      },
+      "health": {
+        "sample_count": 230,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 59.0,
+        "max_memory_mib": 80014.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-02-decode32-rep81/m2mh-decode32-train512-near-rep81-measure.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-decode32-hold384-near-rep82-measure",
+        "policy": "decode32",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 29.816957491330275,
+        "p95_jct_s": 39.97384091799904,
+        "mean_ttft_s": 10.778829970785564,
+        "p95_ttft_s": 26.118611454003258,
+        "makespan_s": 65.49756049500138,
+        "peak_active": 384,
+        "state_slot_seconds": 8720.909257521056,
+        "blocks": {
+          "prefill_other": 228
+        },
+        "max_lateness_ms": 1.1787749999712105,
+        "holder": {
+          "count": 384,
+          "mean_jct_s": 29.048258279955604,
+          "p95_jct_s": 39.38961544199992,
+          "mean_ttft_s": 9.09136638751024,
+          "p95_ttft_s": 19.602508942996792,
+          "mean_queue_s": 8.749285002812238,
+          "p95_queue_s": 18.959406948000833,
+          "mean_after_activation_s": 20.298973277143368,
+          "mean_holding_s": 20.28560757133612
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 34.4291527595783,
+          "p95_jct_s": 40.995930318997125,
+          "mean_ttft_s": 20.90361147043751,
+          "p95_ttft_s": 36.14617144199656,
+          "mean_queue_s": 19.876842414047132,
+          "p95_queue_s": 35.229640128996834,
+          "mean_after_activation_s": 14.552310345531168,
+          "mean_holding_s": 14.550561720749783
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.0087583140002607,
+          "holder_first_release_after_arrival_s": -1.0997460340013276,
+          "holder_last_release_after_arrival_s": 16.934017909999056,
+          "holders_released_by_first_candidate": 192
+        }
+      },
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 320,
+        "prefilled": 384,
+        "median_remaining": 42.0,
+        "state_live_bytes_proxy": 6946816000,
+        "kv_live_bytes_proxy": 2863760256,
+        "state_fraction": 0.7080945928891214,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "054fc065fa4762c7d5a023ece6730e2e8171799714436e5df7994f0760b04d9c",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 16.934017909999056,
+        "candidate_prefill_batches_before_last_holder_release": 52,
+        "candidate_prefill_tokens_before_last_holder_release": 207365,
+        "holder_decode_launches_before_last_holder_release": 84,
+        "candidate_prefill_with_holder_decode_batches": 52,
+        "first_holder_decode_launch_after_arrival_s": 0.025100936999479018,
+        "max_interval_without_holder_decode_launch_s": 0.3587990579981124,
+        "batch_modes": {
+          "decode": 32,
+          "mixed": 52
+        },
+        "admission_blocks": {
+          "prefill_other": 52
+        }
+      },
+      "health": {
+        "sample_count": 264,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 60.0,
+        "max_memory_mib": 81030.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-03-decode32-rep82/m2mh-decode32-hold384-near-rep82-measure.json",
+      "count": 448
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-decode32-train512-near-rep82-measure",
+        "policy": "decode32",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 22.56631351191841,
+        "p95_jct_s": 37.06087305699839,
+        "mean_ttft_s": 7.350722310532989,
+        "p95_ttft_s": 21.912888063998253,
+        "makespan_s": 57.97865397500209,
+        "peak_active": 512,
+        "state_slot_seconds": 8970.76633621284,
+        "blocks": {
+          "prefill_other": 196
+        },
+        "max_lateness_ms": 3.8276204977734096,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 21.21996804541211,
+          "p95_jct_s": 27.628034732999367,
+          "mean_ttft_s": 5.758578893111363,
+          "p95_ttft_s": 12.205477145998884,
+          "mean_queue_s": 5.455231738709152,
+          "p95_queue_s": 11.85526596300042,
+          "mean_after_activation_s": 15.764736306702957,
+          "mean_holding_s": 15.74540684741374
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 33.33707724396879,
+          "p95_jct_s": 39.88137820200063,
+          "mean_ttft_s": 20.087869649905997,
+          "p95_ttft_s": 35.06471278499885,
+          "mean_queue_s": 19.130271919812515,
+          "p95_queue_s": 34.17182130800211,
+          "mean_after_activation_s": 14.206805324156278,
+          "mean_holding_s": 14.204969224015713
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 2.2401555624983303,
+          "holder_first_release_after_arrival_s": -0.2508547225024813,
+          "holder_last_release_after_arrival_s": 11.379199588498523,
+          "holders_released_by_first_candidate": 279
+        }
+      },
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 488,
+        "prefilled": 512,
+        "median_remaining": 33.0,
+        "state_live_bytes_proxy": 10593894400,
+        "kv_live_bytes_proxy": 2391032448,
+        "state_fraction": 0.8158609227461087,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "8132632961165e22ed2780cf6b75cf80dd9c1a5e936edcf909b8263a07f69f8b",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 32,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 32
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 11.379199588498523,
+        "candidate_prefill_batches_before_last_holder_release": 33,
+        "candidate_prefill_tokens_before_last_holder_release": 131083,
+        "holder_decode_launches_before_last_holder_release": 65,
+        "candidate_prefill_with_holder_decode_batches": 33,
+        "first_holder_decode_launch_after_arrival_s": 0.06790235749758722,
+        "max_interval_without_holder_decode_launch_s": 0.3545191599987447,
+        "batch_modes": {
+          "decode": 32,
+          "mixed": 33
+        },
+        "admission_blocks": {
+          "prefill_other": 33
+        }
+      },
+      "health": {
+        "sample_count": 234,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 61.0,
+        "max_memory_mib": 80008.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-03-decode32-rep82/m2mh-decode32-train512-near-rep82-measure.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-slots96-hold384-near-rep82-measure",
+        "policy": "slots96",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 35.89303115762281,
+        "p95_jct_s": 49.87136305099921,
+        "mean_ttft_s": 11.045140898968741,
+        "p95_ttft_s": 29.161806615000387,
+        "makespan_s": 68.63081374800095,
+        "peak_active": 384,
+        "state_slot_seconds": 11334.474123800956,
+        "blocks": {
+          "prefill_other": 230
+        },
+        "max_lateness_ms": 1.0707849983591644,
+        "holder": {
+          "count": 384,
+          "mean_jct_s": 35.63341889845055,
+          "p95_jct_s": 50.14401942399854,
+          "mean_ttft_s": 9.071989146757772,
+          "p95_ttft_s": 19.57330684000044,
+          "mean_queue_s": 8.731159865200548,
+          "p95_queue_s": 18.931129412998416,
+          "mean_after_activation_s": 26.902259033250004,
+          "mean_holding_s": 26.887752859395732
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 37.45070471265632,
+          "p95_jct_s": 44.13279403500201,
+          "mean_ttft_s": 22.884051412234555,
+          "p95_ttft_s": 39.319948815002135,
+          "mean_queue_s": 21.674245084250003,
+          "p95_queue_s": 38.4083539610001,
+          "mean_after_activation_s": 15.776459628406315,
+          "mean_holding_s": 15.774641028015537
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.0437138719998984,
+          "holder_first_release_after_arrival_s": -1.1538562979994822,
+          "holder_last_release_after_arrival_s": 27.79046210999786,
+          "holders_released_by_first_candidate": 72
+        }
+      },
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 316,
+        "prefilled": 384,
+        "median_remaining": 41.5,
+        "state_live_bytes_proxy": 6859980800,
+        "kv_live_bytes_proxy": 2829181824,
+        "state_fraction": 0.7080055383741695,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "054fc065fa4762c7d5a023ece6730e2e8171799714436e5df7994f0760b04d9c",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 3,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 27.79046210999786,
+        "candidate_prefill_batches_before_last_holder_release": 83,
+        "candidate_prefill_tokens_before_last_holder_release": 325592,
+        "holder_decode_launches_before_last_holder_release": 83,
+        "candidate_prefill_with_holder_decode_batches": 83,
+        "first_holder_decode_launch_after_arrival_s": 0.04473710999718605,
+        "max_interval_without_holder_decode_launch_s": 0.42508343100053025,
+        "batch_modes": {
+          "mixed": 83
+        },
+        "admission_blocks": {
+          "prefill_other": 83
+        }
+      },
+      "health": {
+        "sample_count": 276,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 59.0,
+        "max_memory_mib": 81030.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-04-slots96-rep82/m2mh-slots96-hold384-near-rep82-measure.json",
+      "count": 448
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-slots96-train512-near-rep82-measure",
+        "policy": "slots96",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 29.52088638447401,
+        "p95_jct_s": 40.83624262399826,
+        "mean_ttft_s": 7.662230164354146,
+        "p95_ttft_s": 25.887474775001465,
+        "makespan_s": 61.655056144998525,
+        "peak_active": 512,
+        "state_slot_seconds": 12810.506236319929,
+        "blocks": {
+          "prefill_other": 199
+        },
+        "max_lateness_ms": 1.8202474991113604,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 28.58754571456253,
+          "p95_jct_s": 38.57904495299954,
+          "mean_ttft_s": 5.743582272767554,
+          "p95_ttft_s": 12.182893619999959,
+          "mean_queue_s": 5.441389324115242,
+          "p95_queue_s": 11.836139672999707,
+          "mean_after_activation_s": 23.14615639044729,
+          "mean_holding_s": 23.125038208146364
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 36.987611743765854,
+          "p95_jct_s": 43.568681986998854,
+          "mean_ttft_s": 23.011413297046886,
+          "p95_ttft_s": 39.14494723699681,
+          "mean_queue_s": 21.822024205531477,
+          "p95_queue_s": 38.07928366199849,
+          "mean_after_activation_s": 15.165587538234377,
+          "mean_holding_s": 15.163854277327971
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.08739053350109316,
+          "holder_first_release_after_arrival_s": -0.23482542649981042,
+          "holder_last_release_after_arrival_s": 22.45333007750196,
+          "holders_released_by_first_candidate": 32
+        }
+      },
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 488,
+        "prefilled": 512,
+        "median_remaining": 33.0,
+        "state_live_bytes_proxy": 10593894400,
+        "kv_live_bytes_proxy": 2391032448,
+        "state_fraction": 0.8158609227461087,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "8132632961165e22ed2780cf6b75cf80dd9c1a5e936edcf909b8263a07f69f8b",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 3,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 22.45333007750196,
+        "candidate_prefill_batches_before_last_holder_release": 65,
+        "candidate_prefill_tokens_before_last_holder_release": 249979,
+        "holder_decode_launches_before_last_holder_release": 66,
+        "candidate_prefill_with_holder_decode_batches": 65,
+        "first_holder_decode_launch_after_arrival_s": 0.0013241555006970884,
+        "max_interval_without_holder_decode_launch_s": 0.4531667039991589,
+        "batch_modes": {
+          "decode": 1,
+          "mixed": 65
+        },
+        "admission_blocks": {
+          "prefill_other": 65
+        }
+      },
+      "health": {
+        "sample_count": 248,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 58.0,
+        "max_memory_mib": 80008.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-04-slots96-rep82/m2mh-slots96-train512-near-rep82-measure.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-cap512-hold384-near-rep82-measure",
+        "policy": "cap512",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 35.9279091243327,
+        "p95_jct_s": 49.89651102000062,
+        "mean_ttft_s": 11.041135702805791,
+        "p95_ttft_s": 29.182078178000666,
+        "makespan_s": 68.59485792899795,
+        "peak_active": 384,
+        "state_slot_seconds": 11350.782402549976,
+        "blocks": {
+          "prefill_other": 230
+        },
+        "max_lateness_ms": 1.8462049982836959,
+        "holder": {
+          "count": 384,
+          "mean_jct_s": 35.673179311562556,
+          "p95_jct_s": 50.16809365500012,
+          "mean_ttft_s": 9.061482411304638,
+          "p95_ttft_s": 19.548265941000864,
+          "mean_queue_s": 8.722792659343858,
+          "p95_queue_s": 18.90929978299755,
+          "mean_after_activation_s": 26.950386652218697,
+          "mean_holding_s": 26.93533048229158
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 37.45628800095358,
+          "p95_jct_s": 44.10391020600218,
+          "mean_ttft_s": 22.91905545181271,
+          "p95_ttft_s": 39.33768351100298,
+          "mean_queue_s": 21.710579311015636,
+          "p95_queue_s": 38.428001994001534,
+          "mean_after_activation_s": 15.745708689937942,
+          "mean_holding_s": 15.743992146093888
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.08142194000083691,
+          "holder_first_release_after_arrival_s": -1.1710213320011462,
+          "holder_last_release_after_arrival_s": 27.81458546900012,
+          "holders_released_by_first_candidate": 72
+        }
+      },
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 316,
+        "prefilled": 384,
+        "median_remaining": 42.5,
+        "state_live_bytes_proxy": 6859980800,
+        "kv_live_bytes_proxy": 2829181824,
+        "state_fraction": 0.7080055383741695,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "054fc065fa4762c7d5a023ece6730e2e8171799714436e5df7994f0760b04d9c",
+      "capacity": [
+        607,
+        781725,
+        607,
+        512
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 27.81458546900012,
+        "candidate_prefill_batches_before_last_holder_release": 83,
+        "candidate_prefill_tokens_before_last_holder_release": 325592,
+        "holder_decode_launches_before_last_holder_release": 84,
+        "candidate_prefill_with_holder_decode_batches": 83,
+        "first_holder_decode_launch_after_arrival_s": 0.0036802519998673233,
+        "max_interval_without_holder_decode_launch_s": 0.4241934179990494,
+        "batch_modes": {
+          "decode": 1,
+          "mixed": 83
+        },
+        "admission_blocks": {
+          "prefill_other": 83
+        }
+      },
+      "health": {
+        "sample_count": 276,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 58.0,
+        "max_memory_mib": 81030.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-cap512-hold384-near-rep82-measure.json",
+      "count": 448
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-cap512-train512-near-rep82-measure",
+        "policy": "cap512",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 29.4442323699565,
+        "p95_jct_s": 40.744765626001026,
+        "mean_ttft_s": 7.644292413562362,
+        "p95_ttft_s": 25.79253129100107,
+        "makespan_s": 61.621808698997484,
+        "peak_active": 512,
+        "state_slot_seconds": 12776.767893805183,
+        "blocks": {
+          "prefill_other": 199
+        },
+        "max_lateness_ms": 1.0869759988854644,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 28.511229791751852,
+          "p95_jct_s": 38.48252290399978,
+          "mean_ttft_s": 5.734099209704944,
+          "p95_ttft_s": 12.162938866000331,
+          "mean_queue_s": 5.43394725097432,
+          "p95_queue_s": 11.817471045000275,
+          "mean_after_activation_s": 23.07728254077753,
+          "mean_holding_s": 23.05847280775813
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 36.90825299559367,
+          "p95_jct_s": 43.53177386099924,
+          "mean_ttft_s": 22.92583804442171,
+          "p95_ttft_s": 39.05083639899749,
+          "mean_queue_s": 21.737439934312533,
+          "p95_queue_s": 37.99001386499731,
+          "mean_after_activation_s": 15.170813061281137,
+          "mean_holding_s": 15.169215878640955
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.02474321950103331,
+          "holder_first_release_after_arrival_s": -0.29076715350129234,
+          "holder_last_release_after_arrival_s": 22.357218794501023,
+          "holders_released_by_first_candidate": 32
+        }
+      },
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 488,
+        "prefilled": 512,
+        "median_remaining": 32.0,
+        "state_live_bytes_proxy": 10593894400,
+        "kv_live_bytes_proxy": 2391032448,
+        "state_fraction": 0.8158609227461087,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "8132632961165e22ed2780cf6b75cf80dd9c1a5e936edcf909b8263a07f69f8b",
+      "capacity": [
+        607,
+        781725,
+        607,
+        512
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 22.357218794501023,
+        "candidate_prefill_batches_before_last_holder_release": 65,
+        "candidate_prefill_tokens_before_last_holder_release": 249979,
+        "holder_decode_launches_before_last_holder_release": 65,
+        "candidate_prefill_with_holder_decode_batches": 65,
+        "first_holder_decode_launch_after_arrival_s": 0.026316276498619118,
+        "max_interval_without_holder_decode_launch_s": 0.4541300860000774,
+        "batch_modes": {
+          "mixed": 65
+        },
+        "admission_blocks": {
+          "prefill_other": 65
+        }
+      },
+      "health": {
+        "sample_count": 248,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 58.0,
+        "max_memory_mib": 80008.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-cap512-train512-near-rep82-measure.json",
+      "count": 576
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-native607-hold384-near-rep82-measure",
+        "policy": "native607",
+        "profile": "hold384",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 24.09899558900088,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 35.85955666619866,
+        "p95_jct_s": 49.811599658001796,
+        "mean_ttft_s": 11.02465888272541,
+        "p95_ttft_s": 29.099548507998406,
+        "makespan_s": 68.53985656299847,
+        "peak_active": 384,
+        "state_slot_seconds": 11327.556353243854,
+        "blocks": {
+          "prefill_other": 230
+        },
+        "max_lateness_ms": 1.8710240001382772,
+        "holder": {
+          "count": 384,
+          "mean_jct_s": 35.60612105581766,
+          "p95_jct_s": 50.08216063999862,
+          "mean_ttft_s": 9.056036648882733,
+          "p95_ttft_s": 19.54004721199817,
+          "mean_queue_s": 8.718459166593798,
+          "p95_queue_s": 18.90073139800006,
+          "mean_after_activation_s": 26.887661889223864,
+          "mean_holding_s": 26.873958705877204
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 37.38017032848461,
+          "p95_jct_s": 44.046443950999674,
+          "mean_ttft_s": 22.83639228578147,
+          "p95_ttft_s": 39.253701219000504,
+          "mean_queue_s": 21.62916147357805,
+          "p95_queue_s": 38.344660685001145,
+          "mean_after_activation_s": 15.751008854906559,
+          "mean_holding_s": 15.749315784171984
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.046431083998868417,
+          "holder_first_release_after_arrival_s": -1.1364583480035435,
+          "holder_last_release_after_arrival_s": 27.729862801998934,
+          "holders_released_by_first_candidate": 72
+        }
+      },
+      "snapshot": {
+        "arrival_s": 24.09899558900088,
+        "holders": 384,
+        "alive": 316,
+        "prefilled": 384,
+        "median_remaining": 41.5,
+        "state_live_bytes_proxy": 6859980800,
+        "kv_live_bytes_proxy": 2829181824,
+        "state_fraction": 0.7080055383741695,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "054fc065fa4762c7d5a023ece6730e2e8171799714436e5df7994f0760b04d9c",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 27.729862801998934,
+        "candidate_prefill_batches_before_last_holder_release": 83,
+        "candidate_prefill_tokens_before_last_holder_release": 325592,
+        "holder_decode_launches_before_last_holder_release": 83,
+        "candidate_prefill_with_holder_decode_batches": 83,
+        "first_holder_decode_launch_after_arrival_s": 0.04740199299976666,
+        "max_interval_without_holder_decode_launch_s": 0.4215432890014199,
+        "batch_modes": {
+          "mixed": 83
+        },
+        "admission_blocks": {
+          "prefill_other": 83
+        }
+      },
+      "health": {
+        "sample_count": 274,
+        "loaded_sm_mhz_range": [
+          1410.0,
+          1410.0
+        ],
+        "max_temperature_c": 58.0,
+        "max_memory_mib": 79254.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-native607-hold384-near-rep82-measure.json",
+      "count": 448
+    },
+    {
+      "experiment": {
+        "run_id": "m2mh-native607-train512-near-rep82-measure",
+        "policy": "native607",
+        "profile": "train512",
+        "phase": "near",
+        "rep": 82,
+        "stage": "measure",
+        "mode": "mixed-4096",
+        "arrival": 17.694009756500236,
+        "activation_limit": 0
+      },
+      "metrics": {
+        "mean_jct_s": 29.458374628543368,
+        "p95_jct_s": 40.765336151001975,
+        "mean_ttft_s": 7.6642233760624725,
+        "p95_ttft_s": 25.81154062600035,
+        "makespan_s": 61.63277016199936,
+        "peak_active": 512,
+        "state_slot_seconds": 12774.001340607,
+        "blocks": {
+          "prefill_other": 199
+        },
+        "max_lateness_ms": 1.1981129973719362,
+        "holder": {
+          "count": 512,
+          "mean_jct_s": 28.52500782488277,
+          "p95_jct_s": 38.49917806499798,
+          "mean_ttft_s": 5.754518641917969,
+          "p95_ttft_s": 12.185631934997218,
+          "mean_queue_s": 5.453420210468735,
+          "p95_queue_s": 11.839435941001284,
+          "mean_after_activation_s": 23.071587614414035,
+          "mean_holding_s": 23.052923886326163
+        },
+        "candidate": {
+          "count": 64,
+          "mean_jct_s": 36.925309057828144,
+          "p95_jct_s": 43.543035396996856,
+          "mean_ttft_s": 22.941861249218505,
+          "p95_ttft_s": 39.068851963998895,
+          "mean_queue_s": 21.753317440671765,
+          "p95_queue_s": 38.00610717299787,
+          "mean_after_activation_s": 15.17199161715638,
+          "mean_holding_s": 15.170379856375064
+        },
+        "mechanism": {
+          "first_candidate_activation_after_arrival_s": 0.03942583649950393,
+          "holder_first_release_after_arrival_s": -0.27787894850007433,
+          "holder_last_release_after_arrival_s": 22.374457733496456,
+          "holders_released_by_first_candidate": 32
+        }
+      },
+      "snapshot": {
+        "arrival_s": 17.694009756500236,
+        "holders": 512,
+        "alive": 488,
+        "prefilled": 512,
+        "median_remaining": 32.0,
+        "state_live_bytes_proxy": 10593894400,
+        "kv_live_bytes_proxy": 2391032448,
+        "state_fraction": 0.8158609227461087,
+        "shared_pool_bytes": 19481072000
+      },
+      "scene_errors": [],
+      "fingerprint": "8132632961165e22ed2780cf6b75cf80dd9c1a5e936edcf909b8263a07f69f8b",
+      "capacity": [
+        607,
+        781725,
+        607,
+        607
+      ],
+      "control": {
+        "started": true,
+        "finished": true,
+        "delayed": 0,
+        "native_slot_checks": 0,
+        "native_slot_delays": 0,
+        "native_prefill_reasons": {},
+        "diagnostic_limit": 0
+      },
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 22.374457733496456,
+        "candidate_prefill_batches_before_last_holder_release": 65,
+        "candidate_prefill_tokens_before_last_holder_release": 249979,
+        "holder_decode_launches_before_last_holder_release": 65,
+        "candidate_prefill_with_holder_decode_batches": 65,
+        "first_holder_decode_launch_after_arrival_s": 0.040866903496862506,
+        "max_interval_without_holder_decode_launch_s": 0.4527860150010383,
+        "batch_modes": {
+          "mixed": 65
+        },
+        "admission_blocks": {
+          "prefill_other": 65
+        }
+      },
+      "health": {
+        "sample_count": 248,
+        "loaded_sm_mhz_range": [
+          1410.0,
+          1410.0
+        ],
+        "max_temperature_c": 57.0,
+        "max_memory_mib": 80008.0
+      },
+      "source": "/workspace/sglang/benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82/m2mh-native607-train512-near-rep82-measure.json",
+      "count": 576
+    }
+  ],
+  "contrasts": [
+    {
+      "profile": "train512",
+      "phase": "near",
+      "reference": "native607",
+      "treatment": "cap512",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": -0.07932914698162977,
+            "p95_jct_s": -0.0808607488729828,
+            "makespan_s": -0.08604538060145142,
+            "state_slot_seconds": -0.0878767495986449,
+            "candidate_mean_jct_s": -0.10149521511288208,
+            "candidate_mean_ttft_s": -0.12671902630655252,
+            "candidate_p95_ttft_s": -0.08210219557237851
+          },
+          "scene_matched": true,
+          "triggered": false,
+          "constrained_gain": false
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": 0.04800759975795107,
+            "p95_jct_s": 0.05046082515976772,
+            "makespan_s": 0.017785121410355324,
+            "state_slot_seconds": -0.02165768676874404,
+            "candidate_mean_jct_s": 0.046190709488070976,
+            "candidate_mean_ttft_s": 0.06984265410175042,
+            "candidate_p95_ttft_s": 0.046112348061844076
+          },
+          "scene_matched": true,
+          "triggered": false,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": -0.01566077361183935,
+        "p95_jct_s": -0.015199961856607536,
+        "makespan_s": -0.03413012959554805,
+        "state_slot_seconds": -0.05476721818369447,
+        "candidate_mean_jct_s": -0.02765225281240555,
+        "candidate_mean_ttft_s": -0.02843818610240105,
+        "candidate_p95_ttft_s": -0.017994923755267216
+      },
+      "screen_positive": false
+    },
+    {
+      "profile": "train512",
+      "phase": "near",
+      "reference": "native607",
+      "treatment": "slots96",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": -1.4998083193142489,
+            "p95_jct_s": -0.9336234740950524,
+            "makespan_s": -0.7501135837807388,
+            "state_slot_seconds": -1.8930965033614355,
+            "candidate_mean_jct_s": -0.9914780756462921,
+            "candidate_mean_ttft_s": -0.9360075884533923,
+            "candidate_p95_ttft_s": -0.22805123007939357
+          },
+          "scene_matched": false,
+          "triggered": false,
+          "constrained_gain": false
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": -0.21220368305749326,
+            "p95_jct_s": -0.17393815356663483,
+            "makespan_s": -0.03615930768743154,
+            "state_slot_seconds": -0.2857749481901544,
+            "candidate_mean_jct_s": -0.16872624096426087,
+            "candidate_mean_ttft_s": -0.3031665437814045,
+            "candidate_p95_ttft_s": -0.19477222690863358
+          },
+          "scene_matched": true,
+          "triggered": false,
+          "constrained_gain": false
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": -0.856006001185871,
+        "p95_jct_s": -0.5537808138308437,
+        "makespan_s": -0.3931364457340852,
+        "state_slot_seconds": -1.089435725775795,
+        "candidate_mean_jct_s": -0.5801021583052764,
+        "candidate_mean_ttft_s": -0.6195870661173983,
+        "candidate_p95_ttft_s": -0.21141172849401357
+      },
+      "screen_positive": false
+    },
+    {
+      "profile": "train512",
+      "phase": "near",
+      "reference": "native607",
+      "treatment": "decode32",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": 23.999931431601432,
+            "p95_jct_s": 9.509581806387608,
+            "makespan_s": 6.187488509126812,
+            "state_slot_seconds": 30.493140936402177,
+            "candidate_mean_jct_s": 10.194076945891672,
+            "candidate_mean_ttft_s": 12.905255206746869,
+            "candidate_p95_ttft_s": 10.63675517246227
+          },
+          "scene_matched": false,
+          "triggered": true,
+          "constrained_gain": true
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": 23.395931389734493,
+            "p95_jct_s": 9.087287003550278,
+            "makespan_s": 5.928852747316999,
+            "state_slot_seconds": 29.773247262031642,
+            "candidate_mean_jct_s": 9.717540368422858,
+            "candidate_mean_ttft_s": 12.440104873399173,
+            "candidate_p95_ttft_s": 10.248929716925844
+          },
+          "scene_matched": true,
+          "triggered": true,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 23.697931410667962,
+        "p95_jct_s": 9.298434404968944,
+        "makespan_s": 6.058170628221905,
+        "state_slot_seconds": 30.133194099216908,
+        "candidate_mean_jct_s": 9.955808657157265,
+        "candidate_mean_ttft_s": 12.672680040073022,
+        "candidate_p95_ttft_s": 10.442842444694056
+      },
+      "screen_positive": false
+    },
+    {
+      "profile": "train512",
+      "phase": "near",
+      "reference": "cap512",
+      "treatment": "decode32",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": 24.06017384790722,
+            "p95_jct_s": 9.58269391719694,
+            "makespan_s": 6.268140444426224,
+            "state_slot_seconds": 30.554167676579723,
+            "candidate_mean_jct_s": 10.28513324289503,
+            "candidate_mean_ttft_s": 13.015481142081063,
+            "candidate_p95_ttft_s": 10.7100641702037
+          },
+          "scene_matched": false,
+          "triggered": true,
+          "constrained_gain": true
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": 23.35913795143117,
+            "p95_jct_s": 9.04138853765251,
+            "makespan_s": 5.912119103467121,
+            "state_slot_seconds": 29.788453458857017,
+            "candidate_mean_jct_s": 9.675818988374298,
+            "candidate_mean_ttft_s": 12.378907977177498,
+            "candidate_p95_ttft_s": 10.20752429799679
+          },
+          "scene_matched": true,
+          "triggered": true,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 23.709655899669194,
+        "p95_jct_s": 9.312041227424725,
+        "makespan_s": 6.090129773946672,
+        "state_slot_seconds": 30.171310567718372,
+        "candidate_mean_jct_s": 9.980476115634664,
+        "candidate_mean_ttft_s": 12.697194559629281,
+        "candidate_p95_ttft_s": 10.458794234100244
+      },
+      "screen_positive": false
+    },
+    {
+      "profile": "train512",
+      "phase": "near",
+      "reference": "slots96",
+      "treatment": "decode32",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": 25.122943750489203,
+            "p95_jct_s": 10.346606929417275,
+            "makespan_s": 6.885949649216476,
+            "state_slot_seconds": 31.784525695217436,
+            "candidate_mean_jct_s": 11.075741473116747,
+            "candidate_mean_ttft_s": 13.712908927045413,
+            "candidate_p95_ttft_s": 10.840085454321425
+          },
+          "scene_matched": false,
+          "triggered": true,
+          "constrained_gain": true
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": 23.55814382393761,
+            "p95_jct_s": 9.245144323785551,
+            "makespan_s": 5.962855927582618,
+            "state_slot_seconds": 29.973365839523055,
+            "candidate_mean_jct_s": 9.869613980719766,
+            "candidate_mean_ttft_s": 12.704754851002892,
+            "candidate_p95_ttft_s": 10.423400055426926
+          },
+          "scene_matched": true,
+          "triggered": true,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 24.340543787213406,
+        "p95_jct_s": 9.795875626601413,
+        "makespan_s": 6.424402788399547,
+        "state_slot_seconds": 30.878945767370247,
+        "candidate_mean_jct_s": 10.472677726918256,
+        "candidate_mean_ttft_s": 13.208831889024154,
+        "candidate_p95_ttft_s": 10.631742754874175
+      },
+      "screen_positive": false
+    },
+    {
+      "profile": "hold384",
+      "phase": "near",
+      "reference": "native607",
+      "treatment": "cap512",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": 3.831545428079238,
+            "p95_jct_s": 3.729659322686583,
+            "makespan_s": 1.508787588001251,
+            "state_slot_seconds": 4.650104052209124,
+            "candidate_mean_jct_s": 2.37310190462776,
+            "candidate_mean_ttft_s": 2.8634292168220794,
+            "candidate_p95_ttft_s": 3.1793656418195266
+          },
+          "scene_matched": false,
+          "triggered": false,
+          "constrained_gain": true
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": -0.1906115537632199,
+            "p95_jct_s": -0.17046503742463118,
+            "makespan_s": -0.08024727327658311,
+            "state_slot_seconds": -0.2050402450610713,
+            "candidate_mean_jct_s": -0.20363115470066243,
+            "candidate_mean_ttft_s": -0.3619799703769624,
+            "candidate_p95_ttft_s": -0.21394744799714155
+          },
+          "scene_matched": true,
+          "triggered": false,
+          "constrained_gain": false
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 1.8204669371580091,
+        "p95_jct_s": 1.779597142630976,
+        "makespan_s": 0.7142701573623339,
+        "state_slot_seconds": 2.2225319035740263,
+        "candidate_mean_jct_s": 1.0847353749635487,
+        "candidate_mean_ttft_s": 1.2507246232225584,
+        "candidate_p95_ttft_s": 1.4827090969111925
+      },
+      "screen_positive": false
+    },
+    {
+      "profile": "hold384",
+      "phase": "near",
+      "reference": "native607",
+      "treatment": "slots96",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": 3.9537595392007754,
+            "p95_jct_s": 3.8431184437216044,
+            "makespan_s": 1.6800451742613456,
+            "state_slot_seconds": 4.754358656151294,
+            "candidate_mean_jct_s": 2.57655189155679,
+            "candidate_mean_ttft_s": 3.0874093018646573,
+            "candidate_p95_ttft_s": 3.328799549755939
+          },
+          "scene_matched": false,
+          "triggered": false,
+          "constrained_gain": true
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": -0.09334887136433655,
+            "p95_jct_s": -0.11997886718703357,
+            "makespan_s": -0.13270699643043027,
+            "state_slot_seconds": -0.06107028154506486,
+            "candidate_mean_jct_s": -0.18869465695815507,
+            "candidate_mean_ttft_s": -0.20869814223132654,
+            "candidate_p95_ttft_s": -0.16876776952070996
+          },
+          "scene_matched": true,
+          "triggered": false,
+          "constrained_gain": false
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 1.9302053339182195,
+        "p95_jct_s": 1.8615697882672855,
+        "makespan_s": 0.7736690889154576,
+        "state_slot_seconds": 2.3466441873031147,
+        "candidate_mean_jct_s": 1.1939286172993175,
+        "candidate_mean_ttft_s": 1.4393555798166653,
+        "candidate_p95_ttft_s": 1.5800158901176145
+      },
+      "screen_positive": false
+    },
+    {
+      "profile": "hold384",
+      "phase": "near",
+      "reference": "native607",
+      "treatment": "decode32",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": 20.884803530230844,
+            "p95_jct_s": 23.631755201833787,
+            "makespan_s": 6.534391203867266,
+            "state_slot_seconds": 27.575817023687563,
+            "candidate_mean_jct_s": 10.833796246930712,
+            "candidate_mean_ttft_s": 11.787142437259892,
+            "candidate_p95_ttft_s": 11.482159624927748
+          },
+          "scene_matched": false,
+          "triggered": true,
+          "constrained_gain": true
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": 16.85073586133918,
+            "p95_jct_s": 19.749935371574452,
+            "makespan_s": 4.438725466547711,
+            "state_slot_seconds": 23.01155707758926,
+            "candidate_mean_jct_s": 7.894607068329918,
+            "candidate_mean_ttft_s": 8.463599640243348,
+            "candidate_p95_ttft_s": 7.916526800025081
+          },
+          "scene_matched": false,
+          "triggered": true,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 18.867769695785015,
+        "p95_jct_s": 21.690845286704118,
+        "makespan_s": 5.486558335207489,
+        "state_slot_seconds": 25.29368705063841,
+        "candidate_mean_jct_s": 9.364201657630314,
+        "candidate_mean_ttft_s": 10.12537103875162,
+        "candidate_p95_ttft_s": 9.699343212476414
+      },
+      "screen_positive": false
+    },
+    {
+      "profile": "hold384",
+      "phase": "near",
+      "reference": "cap512",
+      "treatment": "decode32",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": 17.732694341467365,
+            "p95_jct_s": 20.67313332343617,
+            "makespan_s": 5.102590873633887,
+            "state_slot_seconds": 24.043773455223782,
+            "candidate_mean_jct_s": 8.666355796778111,
+            "candidate_mean_ttft_s": 9.186769873065375,
+            "candidate_p95_ttft_s": 8.57543852934559
+          },
+          "scene_matched": true,
+          "triggered": true,
+          "constrained_gain": true
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": 17.008926436144023,
+            "p95_jct_s": 19.886500877835232,
+            "makespan_s": 4.515349295136034,
+            "state_slot_seconds": 23.169091360945423,
+            "candidate_mean_jct_s": 8.081781198655378,
+            "candidate_mean_ttft_s": 8.793748004199685,
+            "candidate_p95_ttft_s": 8.113116442440585
+          },
+          "scene_matched": false,
+          "triggered": true,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 17.370810388805694,
+        "p95_jct_s": 20.2798171006357,
+        "makespan_s": 4.808970084384961,
+        "state_slot_seconds": 23.6064324080846,
+        "candidate_mean_jct_s": 8.374068497716745,
+        "candidate_mean_ttft_s": 8.990258938632529,
+        "candidate_p95_ttft_s": 8.344277485893087
+      },
+      "screen_positive": false
+    },
+    {
+      "profile": "hold384",
+      "phase": "near",
+      "reference": "slots96",
+      "treatment": "decode32",
+      "samples": [
+        {
+          "rep": 81,
+          "gain_percent": {
+            "mean_jct_s": 17.62801324632835,
+            "p95_jct_s": 20.57953256993921,
+            "makespan_s": 4.937294812848232,
+            "state_slot_seconds": 23.96063278648935,
+            "candidate_mean_jct_s": 8.47562318486478,
+            "candidate_mean_ttft_s": 8.976886359888242,
+            "candidate_p95_ttft_s": 8.43411485240455
+          },
+          "scene_matched": true,
+          "triggered": true,
+          "constrained_gain": true
+        },
+        {
+          "rep": 82,
+          "gain_percent": {
+            "mean_jct_s": 16.928282372167732,
+            "p95_jct_s": 19.84610310907045,
+            "makespan_s": 4.565373892409705,
+            "state_slot_seconds": 23.058545440513605,
+            "candidate_mean_jct_s": 8.068077693760715,
+            "candidate_mean_ttft_s": 8.65423655156725,
+            "candidate_p95_ttft_s": 8.071672188430354
+          },
+          "scene_matched": false,
+          "triggered": true,
+          "constrained_gain": true
+        }
+      ],
+      "mean_gain_percent": {
+        "mean_jct_s": 17.27814780924804,
+        "p95_jct_s": 20.21281783950483,
+        "makespan_s": 4.751334352628969,
+        "state_slot_seconds": 23.509589113501477,
+        "candidate_mean_jct_s": 8.271850439312747,
+        "candidate_mean_ttft_s": 8.815561455727746,
+        "candidate_p95_ttft_s": 8.252893520417452
+      },
+      "screen_positive": false
+    }
+  ],
+  "server_logs": [
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-00-native607-rep81",
+      "allocation_retry_warnings": 16,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-01-slots96-rep81",
+      "allocation_retry_warnings": 9,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-02-decode32-rep81",
+      "allocation_retry_warnings": 8,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-03-decode32-rep82",
+      "allocation_retry_warnings": 8,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-04-slots96-rep82",
+      "allocation_retry_warnings": 8,
+      "custom_all_reduce_fallback_warnings": 2
+    },
+    {
+      "session": "benchmark/test_motivation/Ledger/results/m2_mixed_holdout_20260917/near_measure01/session-05-native607-rep82",
+      "allocation_retry_warnings": 16,
+      "custom_all_reduce_fallback_warnings": 2
+    }
+  ],
+  "scope": "Near-only amendment after failed far background calibration; two repeats, not full Mixed tuning, state causality or SOTA superiority."
+}

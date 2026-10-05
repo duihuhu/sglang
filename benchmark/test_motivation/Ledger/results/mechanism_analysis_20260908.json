@@ -1,0 +1,1298 @@
+{
+  "date": "2026-09-08",
+  "status": "Exact model checks; synthetic time units; no GPU or empirical PASS",
+  "source_probe": {
+    "path": "python/sglang/srt/managers/schedule_policy.py",
+    "sha256": "7f43e1f8d574d556e05053eedfdda90a7e728580f7a20f451628960fc7268c6e",
+    "method_lines": {
+      "_tenant": 363,
+      "_sort_by_tenant_vtc": 475,
+      "_vtc_admission_cost": 500,
+      "_vtc_output_cost": 508
+    },
+    "scope": "Actual queue/cost methods only; not the full SGLang runtime or VTC proof",
+    "equal_counter_queue_Y_X": [
+      {
+        "weights": [
+          0,
+          1,
+          0
+        ],
+        "order": [
+          "Y",
+          "X"
+        ]
+      },
+      {
+        "weights": [
+          54,
+          1,
+          0
+        ],
+        "order": [
+          "Y",
+          "X"
+        ]
+      },
+      {
+        "weights": [
+          1,
+          2,
+          3
+        ],
+        "order": [
+          "Y",
+          "X"
+        ]
+      }
+    ]
+  },
+  "M1": {
+    "resident_token_total": 4,
+    "state_slot_capacity": 1,
+    "packed_lengths": [
+      4
+    ],
+    "split_lengths": [
+      2,
+      2
+    ],
+    "packed_feasible": true,
+    "split_feasible": false,
+    "split_state_time_over_packed_with_constant_step_time": {
+      "exact": "1",
+      "decimal": 1.0
+    },
+    "interpretation": "Snapshot insufficiency does not imply a state-time multiplier",
+    "admission_example": {
+      "scope": "Same A aggregate P=2,O=8 but different requests; not equivalent application semantics",
+      "split": {
+        "completion": {
+          "A1": {
+            "exact": "4",
+            "decimal": 4.0
+          },
+          "A2": {
+            "exact": "4",
+            "decimal": 4.0
+          },
+          "B": {
+            "exact": "5",
+            "decimal": 5.0
+          }
+        },
+        "mean_completion": {
+          "exact": "13/3",
+          "decimal": 4.333333333333333
+        },
+        "makespan": {
+          "exact": "5",
+          "decimal": 5.0
+        },
+        "admissions": [
+          [],
+          [],
+          [],
+          [],
+          [
+            "B"
+          ]
+        ]
+      },
+      "packed": {
+        "completion": {
+          "A": {
+            "exact": "8",
+            "decimal": 8.0
+          },
+          "B": {
+            "exact": "1",
+            "decimal": 1.0
+          }
+        },
+        "mean_completion": {
+          "exact": "9/2",
+          "decimal": 4.5
+        },
+        "makespan": {
+          "exact": "8",
+          "decimal": 8.0
+        },
+        "admissions": [
+          [
+            "B"
+          ],
+          [],
+          [],
+          [],
+          [],
+          [],
+          [],
+          []
+        ]
+      },
+      "split_with_state_cap_3": {
+        "completion": {
+          "A1": {
+            "exact": "4",
+            "decimal": 4.0
+          },
+          "A2": {
+            "exact": "4",
+            "decimal": 4.0
+          },
+          "B": {
+            "exact": "1",
+            "decimal": 1.0
+          }
+        },
+        "mean_completion": {
+          "exact": "3",
+          "decimal": 3.0
+        },
+        "makespan": {
+          "exact": "4",
+          "decimal": 4.0
+        },
+        "admissions": [
+          [
+            "B"
+          ],
+          [],
+          [],
+          []
+        ]
+      },
+      "B_split_completion": {
+        "exact": "5",
+        "decimal": 5.0
+      },
+      "B_packed_completion": {
+        "exact": "1",
+        "decimal": 1.0
+      },
+      "queue_only_headroom_after_full_state_commitment": {
+        "exact": "0",
+        "decimal": 0.0
+      }
+    }
+  },
+  "M2": [
+    {
+      "tau2_over_tau1": {
+        "exact": "1",
+        "decimal": 1.0
+      },
+      "service_gap_budget": 0,
+      "all_schedules": 3,
+      "admissible_schedules": 1,
+      "parallel": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "1",
+            "decimal": 1.0
+          }
+        },
+        "mean_completion": {
+          "exact": "1",
+          "decimal": 1.0
+        },
+        "makespan": {
+          "exact": "1",
+          "decimal": 1.0
+        },
+        "admissions": [
+          [
+            "A",
+            "B"
+          ]
+        ]
+      },
+      "serial": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A"
+          ],
+          [
+            "B"
+          ]
+        ]
+      },
+      "best_worst_completion": {
+        "exact": "1",
+        "decimal": 1.0
+      },
+      "parallel_worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      }
+    },
+    {
+      "tau2_over_tau1": {
+        "exact": "1",
+        "decimal": 1.0
+      },
+      "service_gap_budget": 1,
+      "all_schedules": 3,
+      "admissible_schedules": 3,
+      "parallel": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "1",
+            "decimal": 1.0
+          }
+        },
+        "mean_completion": {
+          "exact": "1",
+          "decimal": 1.0
+        },
+        "makespan": {
+          "exact": "1",
+          "decimal": 1.0
+        },
+        "admissions": [
+          [
+            "A",
+            "B"
+          ]
+        ]
+      },
+      "serial": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A"
+          ],
+          [
+            "B"
+          ]
+        ]
+      },
+      "best_worst_completion": {
+        "exact": "1",
+        "decimal": 1.0
+      },
+      "parallel_worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      }
+    },
+    {
+      "tau2_over_tau1": {
+        "exact": "3/2",
+        "decimal": 1.5
+      },
+      "service_gap_budget": 0,
+      "all_schedules": 3,
+      "admissible_schedules": 1,
+      "parallel": {
+        "completion": {
+          "A": {
+            "exact": "3/2",
+            "decimal": 1.5
+          },
+          "B": {
+            "exact": "3/2",
+            "decimal": 1.5
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "admissions": [
+          [
+            "A",
+            "B"
+          ]
+        ]
+      },
+      "serial": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A"
+          ],
+          [
+            "B"
+          ]
+        ]
+      },
+      "best_worst_completion": {
+        "exact": "3/2",
+        "decimal": 1.5
+      },
+      "parallel_worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      }
+    },
+    {
+      "tau2_over_tau1": {
+        "exact": "3/2",
+        "decimal": 1.5
+      },
+      "service_gap_budget": 1,
+      "all_schedules": 3,
+      "admissible_schedules": 3,
+      "parallel": {
+        "completion": {
+          "A": {
+            "exact": "3/2",
+            "decimal": 1.5
+          },
+          "B": {
+            "exact": "3/2",
+            "decimal": 1.5
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "admissions": [
+          [
+            "A",
+            "B"
+          ]
+        ]
+      },
+      "serial": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A"
+          ],
+          [
+            "B"
+          ]
+        ]
+      },
+      "best_worst_completion": {
+        "exact": "3/2",
+        "decimal": 1.5
+      },
+      "parallel_worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      }
+    },
+    {
+      "tau2_over_tau1": {
+        "exact": "2",
+        "decimal": 2.0
+      },
+      "service_gap_budget": 0,
+      "all_schedules": 3,
+      "admissible_schedules": 1,
+      "parallel": {
+        "completion": {
+          "A": {
+            "exact": "2",
+            "decimal": 2.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A",
+            "B"
+          ]
+        ]
+      },
+      "serial": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A"
+          ],
+          [
+            "B"
+          ]
+        ]
+      },
+      "best_worst_completion": {
+        "exact": "2",
+        "decimal": 2.0
+      },
+      "parallel_worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      }
+    },
+    {
+      "tau2_over_tau1": {
+        "exact": "2",
+        "decimal": 2.0
+      },
+      "service_gap_budget": 1,
+      "all_schedules": 3,
+      "admissible_schedules": 3,
+      "parallel": {
+        "completion": {
+          "A": {
+            "exact": "2",
+            "decimal": 2.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A",
+            "B"
+          ]
+        ]
+      },
+      "serial": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A"
+          ],
+          [
+            "B"
+          ]
+        ]
+      },
+      "best_worst_completion": {
+        "exact": "2",
+        "decimal": 2.0
+      },
+      "parallel_worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      }
+    },
+    {
+      "tau2_over_tau1": {
+        "exact": "5/2",
+        "decimal": 2.5
+      },
+      "service_gap_budget": 0,
+      "all_schedules": 3,
+      "admissible_schedules": 1,
+      "parallel": {
+        "completion": {
+          "A": {
+            "exact": "5/2",
+            "decimal": 2.5
+          },
+          "B": {
+            "exact": "5/2",
+            "decimal": 2.5
+          }
+        },
+        "mean_completion": {
+          "exact": "5/2",
+          "decimal": 2.5
+        },
+        "makespan": {
+          "exact": "5/2",
+          "decimal": 2.5
+        },
+        "admissions": [
+          [
+            "A",
+            "B"
+          ]
+        ]
+      },
+      "serial": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A"
+          ],
+          [
+            "B"
+          ]
+        ]
+      },
+      "best_worst_completion": {
+        "exact": "5/2",
+        "decimal": 2.5
+      },
+      "parallel_worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      }
+    },
+    {
+      "tau2_over_tau1": {
+        "exact": "5/2",
+        "decimal": 2.5
+      },
+      "service_gap_budget": 1,
+      "all_schedules": 3,
+      "admissible_schedules": 3,
+      "parallel": {
+        "completion": {
+          "A": {
+            "exact": "5/2",
+            "decimal": 2.5
+          },
+          "B": {
+            "exact": "5/2",
+            "decimal": 2.5
+          }
+        },
+        "mean_completion": {
+          "exact": "5/2",
+          "decimal": 2.5
+        },
+        "makespan": {
+          "exact": "5/2",
+          "decimal": 2.5
+        },
+        "admissions": [
+          [
+            "A",
+            "B"
+          ]
+        ]
+      },
+      "serial": {
+        "completion": {
+          "A": {
+            "exact": "1",
+            "decimal": 1.0
+          },
+          "B": {
+            "exact": "2",
+            "decimal": 2.0
+          }
+        },
+        "mean_completion": {
+          "exact": "3/2",
+          "decimal": 1.5
+        },
+        "makespan": {
+          "exact": "2",
+          "decimal": 2.0
+        },
+        "admissions": [
+          [
+            "A"
+          ],
+          [
+            "B"
+          ]
+        ]
+      },
+      "best_worst_completion": {
+        "exact": "2",
+        "decimal": 2.0
+      },
+      "parallel_worst_completion_headroom": {
+        "exact": "1/5",
+        "decimal": 0.2
+      }
+    }
+  ],
+  "M3": [
+    {
+      "background_context": 1,
+      "scope": "Exactly two work-conserving nonpreemptive schedules in this model",
+      "schedules": 2,
+      "X_first": {
+        "completion": {
+          "X": {
+            "exact": "10",
+            "decimal": 10.0
+          },
+          "Y": {
+            "exact": "17",
+            "decimal": 17.0
+          },
+          "Z": {
+            "exact": "14",
+            "decimal": 14.0
+          }
+        },
+        "mean_completion": {
+          "exact": "41/3",
+          "decimal": 13.666666666666666
+        },
+        "makespan": {
+          "exact": "17",
+          "decimal": 17.0
+        },
+        "admissions": [
+          [
+            "X"
+          ],
+          [
+            "Y"
+          ],
+          []
+        ]
+      },
+      "Y_first": {
+        "completion": {
+          "X": {
+            "exact": "17",
+            "decimal": 17.0
+          },
+          "Y": {
+            "exact": "8",
+            "decimal": 8.0
+          },
+          "Z": {
+            "exact": "8",
+            "decimal": 8.0
+          }
+        },
+        "mean_completion": {
+          "exact": "11",
+          "decimal": 11.0
+        },
+        "makespan": {
+          "exact": "17",
+          "decimal": 17.0
+        },
+        "admissions": [
+          [
+            "Y"
+          ],
+          [],
+          [
+            "X"
+          ]
+        ]
+      },
+      "X_first_XY_service_gap": 9,
+      "Y_first_XY_service_gap": 6,
+      "mean_completion_optimum_first": [
+        "Y"
+      ],
+      "Y_first_mean_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      },
+      "X_first_mean_headroom": {
+        "exact": "8/41",
+        "decimal": 0.1951219512195122
+      },
+      "worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      },
+      "X_first_worst_slowdown_ratio": {
+        "exact": "17/5",
+        "decimal": 3.4
+      },
+      "Y_first_worst_slowdown_ratio": {
+        "exact": "17/9",
+        "decimal": 1.8888888888888888
+      },
+      "mean_optimum_with_XY_gap_budget_6": {
+        "exact": "11",
+        "decimal": 11.0
+      }
+    },
+    {
+      "background_context": 9,
+      "scope": "Exactly two work-conserving nonpreemptive schedules in this model",
+      "schedules": 2,
+      "X_first": {
+        "completion": {
+          "X": {
+            "exact": "18",
+            "decimal": 18.0
+          },
+          "Y": {
+            "exact": "33",
+            "decimal": 33.0
+          },
+          "Z": {
+            "exact": "30",
+            "decimal": 30.0
+          }
+        },
+        "mean_completion": {
+          "exact": "27",
+          "decimal": 27.0
+        },
+        "makespan": {
+          "exact": "33",
+          "decimal": 33.0
+        },
+        "admissions": [
+          [
+            "X"
+          ],
+          [
+            "Y"
+          ],
+          []
+        ]
+      },
+      "Y_first": {
+        "completion": {
+          "X": {
+            "exact": "33",
+            "decimal": 33.0
+          },
+          "Y": {
+            "exact": "24",
+            "decimal": 24.0
+          },
+          "Z": {
+            "exact": "24",
+            "decimal": 24.0
+          }
+        },
+        "mean_completion": {
+          "exact": "27",
+          "decimal": 27.0
+        },
+        "makespan": {
+          "exact": "33",
+          "decimal": 33.0
+        },
+        "admissions": [
+          [
+            "Y"
+          ],
+          [],
+          [
+            "X"
+          ]
+        ]
+      },
+      "X_first_XY_service_gap": 9,
+      "Y_first_XY_service_gap": 6,
+      "mean_completion_optimum_first": [
+        "X"
+      ],
+      "Y_first_mean_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      },
+      "X_first_mean_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      },
+      "worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      },
+      "X_first_worst_slowdown_ratio": {
+        "exact": "33/5",
+        "decimal": 6.6
+      },
+      "Y_first_worst_slowdown_ratio": {
+        "exact": "24/5",
+        "decimal": 4.8
+      },
+      "mean_optimum_with_XY_gap_budget_6": {
+        "exact": "27",
+        "decimal": 27.0
+      }
+    },
+    {
+      "background_context": 100,
+      "scope": "Exactly two work-conserving nonpreemptive schedules in this model",
+      "schedules": 2,
+      "X_first": {
+        "completion": {
+          "X": {
+            "exact": "109",
+            "decimal": 109.0
+          },
+          "Y": {
+            "exact": "215",
+            "decimal": 215.0
+          },
+          "Z": {
+            "exact": "212",
+            "decimal": 212.0
+          }
+        },
+        "mean_completion": {
+          "exact": "536/3",
+          "decimal": 178.66666666666666
+        },
+        "makespan": {
+          "exact": "215",
+          "decimal": 215.0
+        },
+        "admissions": [
+          [
+            "X"
+          ],
+          [
+            "Y"
+          ],
+          []
+        ]
+      },
+      "Y_first": {
+        "completion": {
+          "X": {
+            "exact": "215",
+            "decimal": 215.0
+          },
+          "Y": {
+            "exact": "206",
+            "decimal": 206.0
+          },
+          "Z": {
+            "exact": "206",
+            "decimal": 206.0
+          }
+        },
+        "mean_completion": {
+          "exact": "209",
+          "decimal": 209.0
+        },
+        "makespan": {
+          "exact": "215",
+          "decimal": 215.0
+        },
+        "admissions": [
+          [
+            "Y"
+          ],
+          [],
+          [
+            "X"
+          ]
+        ]
+      },
+      "X_first_XY_service_gap": 9,
+      "Y_first_XY_service_gap": 6,
+      "mean_completion_optimum_first": [
+        "X"
+      ],
+      "Y_first_mean_headroom": {
+        "exact": "91/627",
+        "decimal": 0.14513556618819776
+      },
+      "X_first_mean_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      },
+      "worst_completion_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      },
+      "X_first_worst_slowdown_ratio": {
+        "exact": "43",
+        "decimal": 43.0
+      },
+      "Y_first_worst_slowdown_ratio": {
+        "exact": "206/5",
+        "decimal": 41.2
+      },
+      "mean_optimum_with_XY_gap_budget_6": {
+        "exact": "209",
+        "decimal": 209.0
+      }
+    }
+  ],
+  "M3_prefill_sensitivity": [
+    {
+      "prefill_time_per_input_token": {
+        "exact": "0",
+        "decimal": 0.0
+      },
+      "X_first": {
+        "completion": {
+          "X": {
+            "exact": "109",
+            "decimal": 109.0
+          },
+          "Y": {
+            "exact": "215",
+            "decimal": 215.0
+          },
+          "Z": {
+            "exact": "212",
+            "decimal": 212.0
+          }
+        },
+        "mean_completion": {
+          "exact": "536/3",
+          "decimal": 178.66666666666666
+        },
+        "makespan": {
+          "exact": "215",
+          "decimal": 215.0
+        },
+        "admissions": [
+          [
+            "X"
+          ],
+          [
+            "Y"
+          ],
+          []
+        ]
+      },
+      "Y_first": {
+        "completion": {
+          "X": {
+            "exact": "215",
+            "decimal": 215.0
+          },
+          "Y": {
+            "exact": "206",
+            "decimal": 206.0
+          },
+          "Z": {
+            "exact": "206",
+            "decimal": 206.0
+          }
+        },
+        "mean_completion": {
+          "exact": "209",
+          "decimal": 209.0
+        },
+        "makespan": {
+          "exact": "215",
+          "decimal": 215.0
+        },
+        "admissions": [
+          [
+            "Y"
+          ],
+          [],
+          [
+            "X"
+          ]
+        ]
+      },
+      "Y_first_mean_headroom": {
+        "exact": "91/627",
+        "decimal": 0.14513556618819776
+      }
+    },
+    {
+      "prefill_time_per_input_token": {
+        "exact": "1",
+        "decimal": 1.0
+      },
+      "X_first": {
+        "completion": {
+          "X": {
+            "exact": "117",
+            "decimal": 117.0
+          },
+          "Y": {
+            "exact": "224",
+            "decimal": 224.0
+          },
+          "Z": {
+            "exact": "221",
+            "decimal": 221.0
+          }
+        },
+        "mean_completion": {
+          "exact": "562/3",
+          "decimal": 187.33333333333334
+        },
+        "makespan": {
+          "exact": "224",
+          "decimal": 224.0
+        },
+        "admissions": [
+          [
+            "X"
+          ],
+          [
+            "Y"
+          ],
+          []
+        ]
+      },
+      "Y_first": {
+        "completion": {
+          "X": {
+            "exact": "224",
+            "decimal": 224.0
+          },
+          "Y": {
+            "exact": "207",
+            "decimal": 207.0
+          },
+          "Z": {
+            "exact": "207",
+            "decimal": 207.0
+          }
+        },
+        "mean_completion": {
+          "exact": "638/3",
+          "decimal": 212.66666666666666
+        },
+        "makespan": {
+          "exact": "224",
+          "decimal": 224.0
+        },
+        "admissions": [
+          [
+            "Y"
+          ],
+          [],
+          [
+            "X"
+          ]
+        ]
+      },
+      "Y_first_mean_headroom": {
+        "exact": "38/319",
+        "decimal": 0.11912225705329153
+      }
+    },
+    {
+      "prefill_time_per_input_token": {
+        "exact": "7",
+        "decimal": 7.0
+      },
+      "X_first": {
+        "completion": {
+          "X": {
+            "exact": "165",
+            "decimal": 165.0
+          },
+          "Y": {
+            "exact": "278",
+            "decimal": 278.0
+          },
+          "Z": {
+            "exact": "275",
+            "decimal": 275.0
+          }
+        },
+        "mean_completion": {
+          "exact": "718/3",
+          "decimal": 239.33333333333334
+        },
+        "makespan": {
+          "exact": "278",
+          "decimal": 278.0
+        },
+        "admissions": [
+          [
+            "X"
+          ],
+          [
+            "Y"
+          ],
+          []
+        ]
+      },
+      "Y_first": {
+        "completion": {
+          "X": {
+            "exact": "278",
+            "decimal": 278.0
+          },
+          "Y": {
+            "exact": "213",
+            "decimal": 213.0
+          },
+          "Z": {
+            "exact": "213",
+            "decimal": 213.0
+          }
+        },
+        "mean_completion": {
+          "exact": "704/3",
+          "decimal": 234.66666666666666
+        },
+        "makespan": {
+          "exact": "278",
+          "decimal": 278.0
+        },
+        "admissions": [
+          [
+            "Y"
+          ],
+          [],
+          [
+            "X"
+          ]
+        ]
+      },
+      "Y_first_mean_headroom": {
+        "exact": "0",
+        "decimal": 0.0
+      }
+    }
+  ],
+  "static_execution_cost_floor": {
+    "X_alone": {
+      "exact": "9",
+      "decimal": 9.0
+    },
+    "X_first_with_context_100_Z": {
+      "exact": "109",
+      "decimal": 109.0
+    },
+    "minimax_relative_error": {
+      "exact": "50/59",
+      "decimal": 0.847457627118644
+    },
+    "scope": "A single constant predicting these two execution times, not token service"
+  },
+  "gain_limit": "M3 gains are mean residual completion, not p95 or worst slowdown; finite X/Y gap <=9 is not a steady-state fairness guarantee."
+}

@@ -1,0 +1,52 @@
+{
+  "arrival1": {
+    "request_tax": "token-vtc",
+    "strongest_static": "instant-share",
+    "lifecycle_oracle": "lifecycle-s0-k1"
+  },
+  "arrival3": {
+    "request_tax": "request-tax-r32768-i1-o1",
+    "strongest_static": "request-tax-r32768-i1-o1",
+    "lifecycle_oracle": "lifecycle-s0-k1"
+  },
+  "base": {
+    "request_tax": "token-vtc",
+    "strongest_static": "instant-share",
+    "lifecycle_oracle": "lifecycle-s0-k1"
+  },
+  "kv393": {
+    "request_tax": "token-vtc",
+    "strongest_static": "instant-share",
+    "lifecycle_oracle": "lifecycle-s0-k1"
+  },
+  "output1k": {
+    "request_tax": "request-tax-r65536-i1-o1",
+    "strongest_static": "request-tax-r65536-i1-o1",
+    "lifecycle_oracle": "lifecycle-s0-k1"
+  },
+  "output2k": {
+    "request_tax": "request-tax-r1024-i1-o1",
+    "strongest_static": "request-tax-r1024-i1-o1",
+    "lifecycle_oracle": "lifecycle-s1-k1"
+  },
+  "relaxed": {
+    "request_tax": "token-vtc",
+    "strongest_static": "fcfs",
+    "lifecycle_oracle": "lifecycle-s0.25-k1"
+  },
+  "split32": {
+    "request_tax": "token-vtc",
+    "strongest_static": "instant-share",
+    "lifecycle_oracle": "lifecycle-s0-k1"
+  },
+  "split4": {
+    "request_tax": "token-vtc",
+    "strongest_static": "fcfs",
+    "lifecycle_oracle": "lifecycle-s0-k1"
+  },
+  "state96": {
+    "request_tax": "token-vtc",
+    "strongest_static": "vector-debt",
+    "lifecycle_oracle": "lifecycle-s0.5-k1"
+  }
+}

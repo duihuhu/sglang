@@ -1,0 +1,14 @@
+{
+  "global_request_tax": "token-vtc",
+  "per_cell_request_tax": {
+    "f1-base": "request-tax-r1024",
+    "f16-base": "token-vtc",
+    "f16-fast": "token-vtc",
+    "f16-full": "token-vtc",
+    "f16-kv-relaxed": "token-vtc",
+    "f16-slow": "request-tax-r8192",
+    "f16-state-relaxed": "token-vtc",
+    "f32-base": "token-vtc",
+    "f4-base": "token-vtc"
+  }
+}

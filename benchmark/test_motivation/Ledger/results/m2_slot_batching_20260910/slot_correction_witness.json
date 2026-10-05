@@ -1,0 +1,18 @@
+{
+  "classification": "actual legacy and corrected gate source witness; GPU effects measured separately",
+  "running_requests": 2,
+  "existing_continuations": 1,
+  "selected_new_requests": 4,
+  "free_request_slots_before": 5,
+  "runtime_cap": 8,
+  "actual_gate_blocks_next_candidate": true,
+  "corrected_gate_blocks_next_candidate": false,
+  "actual_allocator_accepts_continuation_plus_five_new": true,
+  "new_slots_consumed": 5,
+  "active_requests_if_candidate_added": 8,
+  "scope": "Request-slot gate only. Other budgets and serving semantics require separate checks. Not hybrid-exclusive.",
+  "source_hashes": {
+    "/workspace/sglang/python/sglang/srt/managers/scheduler.py": "768c839c9b5772447491aff04edfaac9d0f316d4c9ada2bccfbb8f8c1740a58b",
+    "/workspace/sglang/python/sglang/srt/mem_cache/memory_pool.py": "41e87128dbdf9178dad65f695e7a98428ecfeebc1e3407fee57df5067f4205c3"
+  }
+}

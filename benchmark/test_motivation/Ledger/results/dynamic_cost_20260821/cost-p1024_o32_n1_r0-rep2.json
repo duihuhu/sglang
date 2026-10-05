@@ -1,0 +1,257 @@
+{
+  "schema_version": 1,
+  "experiment": {
+    "mode": "cost",
+    "run_id": "cost-p1024_o32_n1_r0-rep2",
+    "base_url": "http://127.0.0.1:30000",
+    "timeout_seconds": 3600,
+    "slo_seconds": 20,
+    "arrival_gap_ms": 1,
+    "prompt_len": 1024,
+    "output_len": 32,
+    "count": 1,
+    "reuse_fraction": 0.0,
+    "pair": null,
+    "order": null,
+    "candidate": null,
+    "background_count": 64,
+    "candidate_count": 8,
+    "candidate_delay_s": 0.75
+  },
+  "server": {
+    "version": "0.0.0.dev16772+g0077f84d3.d20260820",
+    "model_path": "/models/Kimi-Linear-48B-A3B",
+    "max_total_num_tokens": 1458422,
+    "internal_states": [
+      {
+        "max_mamba_cache_size": 485,
+        "effective_max_running_requests_per_dp": 97
+      }
+    ]
+  },
+  "summary": {
+    "overall": {
+      "requests": 1,
+      "completed": 1,
+      "mean_jct_s": 0.2040581852197647,
+      "p95_jct_s": 0.2040581852197647,
+      "mean_ttft_s": 0.049380937591195107,
+      "p95_ttft_s": 0.049380937591195107,
+      "p95_itl_s": 0.005027111619710922,
+      "max_itl_s": 0.005490049719810486,
+      "slo_goodput": 1,
+      "mean_cached_tokens": 0.0,
+      "total_retractions": 0
+    },
+    "groups": {
+      "measured": {
+        "requests": 1,
+        "completed": 1,
+        "mean_jct_s": 0.2040581852197647,
+        "p95_jct_s": 0.2040581852197647,
+        "mean_ttft_s": 0.049380937591195107,
+        "p95_ttft_s": 0.049380937591195107,
+        "p95_itl_s": 0.005027111619710922,
+        "max_itl_s": 0.005490049719810486,
+        "slo_goodput": 1,
+        "mean_cached_tokens": 0.0,
+        "total_retractions": 0,
+        "scheduler_active_resources": {
+          "active_request_seconds": 0.1995891835540533,
+          "state_slot_seconds": 0.5987675506621599,
+          "kv_token_seconds": 207.02229466475546,
+          "peak_active_requests": 1,
+          "peak_state_slots": 3,
+          "peak_kv_tokens": 1056,
+          "current_active_requests": 0,
+          "current_state_slots": 0,
+          "current_kv_tokens": 0
+        }
+      }
+    }
+  },
+  "scheduler_resource_trace": {
+    "schema_version": 2,
+    "measurement_scope": "active requests only; inactive radix cache excluded",
+    "state_unit": "physically assigned recurrent-state slots",
+    "kv_unit": "allocated active KV token slots",
+    "elapsed_seconds": 0.46620506420731544,
+    "observation_count": 68,
+    "system": {
+      "active_request_seconds": 0.1995891835540533,
+      "state_slot_seconds": 0.5987675506621599,
+      "kv_token_seconds": 207.02229466475546,
+      "peak_active_requests": 1,
+      "peak_state_slots": 3,
+      "peak_kv_tokens": 1056,
+      "current_active_requests": 0,
+      "current_state_slots": 0,
+      "current_kv_tokens": 0
+    },
+    "tenants": {
+      "measured": {
+        "active_request_seconds": 0.1995891835540533,
+        "state_slot_seconds": 0.5987675506621599,
+        "kv_token_seconds": 207.02229466475546,
+        "peak_active_requests": 1,
+        "peak_state_slots": 3,
+        "peak_kv_tokens": 1056,
+        "current_active_requests": 0,
+        "current_state_slots": 0,
+        "current_kv_tokens": 0
+      }
+    },
+    "run_id": "cost-p1024_o32_n1_r0-rep2"
+  },
+  "requests": [
+    {
+      "rid": "cost-p1024_o32_n1_r0-rep2-measured-0000",
+      "group": "measured",
+      "input_len": 1024,
+      "output_len": 32,
+      "common_prefix_len": 0,
+      "scheduled_arrival_s": 0.0,
+      "submitted_s": 0.0003405120223760605,
+      "first_token_s": 0.04972144961357117,
+      "finished_s": 0.20439869724214077,
+      "completion_tokens": 32,
+      "cached_tokens": 0,
+      "prompt_tokens": 1024,
+      "num_retractions": 0,
+      "success": true,
+      "error": null,
+      "token_events": [
+        [
+          0.04972144961357117,
+          1
+        ],
+        [
+          0.054003745317459106,
+          2
+        ],
+        [
+          0.05895272269845009,
+          3
+        ],
+        [
+          0.06391926296055317,
+          4
+        ],
+        [
+          0.06891484558582306,
+          5
+        ],
+        [
+          0.07388830371201038,
+          6
+        ],
+        [
+          0.07890372723340988,
+          7
+        ],
+        [
+          0.08390330336987972,
+          8
+        ],
+        [
+          0.08889003843069077,
+          9
+        ],
+        [
+          0.09389234334230423,
+          10
+        ],
+        [
+          0.09890820644795895,
+          11
+        ],
+        [
+          0.10391674935817719,
+          12
+        ],
+        [
+          0.10889854095876217,
+          13
+        ],
+        [
+          0.11390756256878376,
+          14
+        ],
+        [
+          0.1189119927585125,
+          15
+        ],
+        [
+          0.12393026612699032,
+          16
+        ],
+        [
+          0.12892757542431355,
+          17
+        ],
+        [
+          0.13391945883631706,
+          18
+        ],
+        [
+          0.13892846181988716,
+          19
+        ],
+        [
+          0.143907206133008,
+          20
+        ],
+        [
+          0.14889850839972496,
+          21
+        ],
+        [
+          0.15387907810509205,
+          22
+        ],
+        [
+          0.1588937472552061,
+          23
+        ],
+        [
+          0.1639047060161829,
+          24
+        ],
+        [
+          0.16889665089547634,
+          25
+        ],
+        [
+          0.1738980282098055,
+          26
+        ],
+        [
+          0.17891581170260906,
+          27
+        ],
+        [
+          0.18395176157355309,
+          28
+        ],
+        [
+          0.18891608715057373,
+          29
+        ],
+        [
+          0.19389813393354416,
+          30
+        ],
+        [
+          0.1988888941705227,
+          31
+        ],
+        [
+          0.20437894389033318,
+          32
+        ]
+      ],
+      "latency_s": 0.2040581852197647,
+      "ttft_s": 0.049380937591195107
+    }
+  ]
+}

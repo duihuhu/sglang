@@ -1,0 +1,32 @@
+{
+  "source": "benchmark/test_motivation/Ledger/results/vtc_state_tax_20260826/analysis.json",
+  "source_sha256": "f46d139cc3ff28ffbd0356003aa851cd9970a728939537557946ed024ed0284f",
+  "cell": "f16-base",
+  "policy": "local token-VTC",
+  "input_weight": 1,
+  "output_weight": 2,
+  "rows": [
+    {
+      "tenant": "packed",
+      "requests_per_wave": 1,
+      "input_per_request": 16384,
+      "output_per_request": 512,
+      "offered_token_charge": 17408,
+      "fixed_state_per_initial_resident_token_relative_to_packed": 1,
+      "mean_p95_slowdown_ratio": 1.2095948799520622
+    },
+    {
+      "tenant": "split",
+      "requests_per_wave": 16,
+      "input_per_request": 1024,
+      "output_per_request": 32,
+      "offered_token_charge": 17408,
+      "fixed_state_per_initial_resident_token_relative_to_packed": 16,
+      "mean_p95_slowdown_ratio": 10.341447982901292
+    }
+  ],
+  "panel_a": "Offered workload charge, not measured backlogged-window fairness",
+  "panel_b": "Analytical S/L for identical active state size S; no aggregate memory or state-time claim",
+  "panel_c": "Mean of per-run mixed/isolated p95 ratios, not a ratio of pooled request quantiles; CI unavailable in this compact input",
+  "causality": "Juxtaposition of observations, not proof that state tax alone causes slowdown"
+}

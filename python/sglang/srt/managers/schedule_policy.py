@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 import os
 import random
-from collections import Counter, defaultdict
+import time
+from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
@@ -36,6 +37,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, Union
 import torch
 
 from sglang.srt.dllm.config import DllmConfig
+from sglang.srt.distributed.parallel_state import get_tp_group
 from sglang.srt.layers.attention.dsa.utils import is_dsa_prefill_cp_in_seq_split
 from sglang.srt.layers.utils.cp_utils import is_prefill_context_parallel_enabled
 from sglang.srt.managers.schedule_batch import (
@@ -65,6 +67,9 @@ from sglang.srt.server_args import ServerArgs
 
 if TYPE_CHECKING:
     from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
+    from sglang.srt.managers.scheduler_components.tenant_resource_tracker import (
+        TenantResourceTracker,
+    )
 
 # Clip the estimation of max_new_tokens for the request whose max_new_tokens is very large.
 # This can prevent the server from being too conservative.
@@ -211,6 +216,10 @@ class CacheAgnosticPolicy(Enum):
     LOF = "lof"  # longest output first
     RANDOM = "random"
     ROUTING_KEY = "routing-key"  # prioritize by routing key frequency in running batch
+    TENANT_VTC = "tenant-vtc"
+    TENANT_INSTANT_SHARE = "tenant-instant-share"
+    TENANT_VECTOR_DEBT = "tenant-vector-debt"
+    TENANT_LIFECYCLE_COST = "tenant-lifecycle-cost"
 
 
 class SchedulePolicy:
@@ -223,6 +232,9 @@ class SchedulePolicy:
         enable_hierarchical_cache: bool,
         enable_priority_scheduling: bool,
         schedule_low_priority_values_first: bool,
+        tenant_resource_tracker: Optional[TenantResourceTracker] = None,
+        state_capacity: Optional[int] = None,
+        kv_capacity: Optional[int] = None,
     ):
         self.policy = self._validate_and_adjust_policy(policy, tree_cache)
         self.tree_cache = tree_cache
@@ -230,6 +242,46 @@ class SchedulePolicy:
         self.enable_priority_scheduling = enable_priority_scheduling
         self.schedule_low_priority_values_first = schedule_low_priority_values_first
         self.priority_sign = 1 if schedule_low_priority_values_first else -1
+        self.tenant_resource_tracker = tenant_resource_tracker
+        self.state_capacity = state_capacity
+        self.kv_capacity = kv_capacity
+        self.tenant_counters: Dict[str, float] = defaultdict(float)
+        self.tenant_vector_lifts: Dict[str, float] = defaultdict(float)
+        self.tenant_lifecycle_lifts: Dict[str, float] = defaultdict(float)
+        self.last_client_left_queue: Optional[str] = None
+        self.vtc_input_weight = float(
+            os.environ.get("SGLANG_TENANT_VTC_INPUT_WEIGHT", "1")
+        )
+        self.vtc_output_weight = float(
+            os.environ.get("SGLANG_TENANT_VTC_OUTPUT_WEIGHT", "1")
+        )
+        self.vtc_request_weight = float(
+            os.environ.get("SGLANG_TENANT_VTC_REQUEST_WEIGHT", "0")
+        )
+        self.vtc_input_quadratic_weight = float(
+            os.environ.get("SGLANG_TENANT_VTC_INPUT_QUADRATIC_WEIGHT", "0")
+        )
+        self.vtc_input_output_weight = float(
+            os.environ.get("SGLANG_TENANT_VTC_INPUT_OUTPUT_WEIGHT", "0")
+        )
+        self.vtc_output_quadratic_weight = float(
+            os.environ.get("SGLANG_TENANT_VTC_OUTPUT_QUADRATIC_WEIGHT", "0")
+        )
+        self.lifecycle_state_weight = float(
+            os.environ.get("SGLANG_TENANT_LIFECYCLE_STATE_WEIGHT", "1")
+        )
+        self.lifecycle_kv_weight = float(
+            os.environ.get("SGLANG_TENANT_LIFECYCLE_KV_WEIGHT", "1")
+        )
+        self._vtc_input_charged_rids: Set[str] = set()
+        self._vtc_output_lengths: Dict[str, int] = {}
+        self._vtc_trace_started_at = time.perf_counter()
+        self._vtc_counter_observations = 0
+        self._vtc_current_counter_gap = 0.0
+        self._vtc_max_counter_gap = 0.0
+        self._vtc_queued_at: Dict[str, float] = {}
+        self._vtc_queue_waits: Dict[str, List[float]] = defaultdict(list)
+        self._vtc_peak_waiting_requests: Dict[str, int] = defaultdict(int)
 
         # It is used to find the matching prefix for in-batch prefix caching.
         self.waiting_queue_radix_tree = RadixCache.create_simulated()
@@ -238,6 +290,19 @@ class SchedulePolicy:
         self, waiting_queue: List[Req], running_batch: Optional[ScheduleBatch] = None
     ) -> None:
         policy = self._determine_active_policy(waiting_queue)
+
+        if policy == CacheAgnosticPolicy.TENANT_VTC:
+            self._sort_by_tenant_vtc(waiting_queue)
+            return
+        if policy == CacheAgnosticPolicy.TENANT_INSTANT_SHARE:
+            self._sort_by_tenant_instant_share(waiting_queue)
+            return
+        if policy == CacheAgnosticPolicy.TENANT_VECTOR_DEBT:
+            self._sort_by_tenant_vector_debt(waiting_queue)
+            return
+        if policy == CacheAgnosticPolicy.TENANT_LIFECYCLE_COST:
+            self._sort_by_tenant_lifecycle_cost(waiting_queue)
+            return
 
         # Populate req.num_matched_prefix_tokens at schedule time. Cache-aware policies
         # set it in _compute_prefix_matches; do the same full match for
@@ -284,8 +349,341 @@ class SchedulePolicy:
             elif policy == CacheAgnosticPolicy.ROUTING_KEY:
                 if running_batch is not None:
                     SchedulePolicy._sort_by_routing_key(waiting_queue, running_batch)
+            elif policy in (
+                CacheAgnosticPolicy.TENANT_VTC,
+                CacheAgnosticPolicy.TENANT_INSTANT_SHARE,
+                CacheAgnosticPolicy.TENANT_VECTOR_DEBT,
+                CacheAgnosticPolicy.TENANT_LIFECYCLE_COST,
+            ):
+                raise AssertionError("tenant fair policies must return before this branch")
             else:
                 raise ValueError(f"Unknown CacheAgnostic Policy: {policy=}")
+
+    @staticmethod
+    def _tenant(req: Req) -> str:
+        return req.extra_key if req.extra_key else "__default_tenant__"
+
+    def on_request_queued(
+        self, req: Req, waiting_queue: List[Req], *, is_retracted: bool = False
+    ) -> None:
+        if self.policy not in (
+            CacheAgnosticPolicy.TENANT_VTC,
+            CacheAgnosticPolicy.TENANT_VECTOR_DEBT,
+            CacheAgnosticPolicy.TENANT_LIFECYCLE_COST,
+        ):
+            return
+
+        tenant = self._tenant(req)
+        if self.policy == CacheAgnosticPolicy.TENANT_VTC and not is_retracted:
+            self._vtc_queued_at.setdefault(req.rid, time.perf_counter())
+            waiting_counts = Counter(self._tenant(item) for item in waiting_queue)
+            waiting_counts[tenant] += 1
+            for item, count in waiting_counts.items():
+                self._vtc_peak_waiting_requests[item] = max(
+                    self._vtc_peak_waiting_requests[item], count
+                )
+        self._vtc_output_lengths.setdefault(req.rid, len(req.output_ids))
+        if is_retracted or any(self._tenant(item) == tenant for item in waiting_queue):
+            return
+
+        active_tenants = {self._tenant(item) for item in waiting_queue}
+        if self.policy == CacheAgnosticPolicy.TENANT_VTC:
+            if active_tenants:
+                floor = min(self.tenant_counters[item] for item in active_tenants)
+            elif self.last_client_left_queue is not None:
+                floor = self.tenant_counters[self.last_client_left_queue]
+            else:
+                floor = 0.0
+            self.tenant_counters[tenant] = max(self.tenant_counters[tenant], floor)
+            self._observe_vtc_counters()
+        elif self.policy == CacheAgnosticPolicy.TENANT_VECTOR_DEBT:
+            effective = self._synchronized_effective_vector_debts(
+                active_tenants | {tenant}
+            )
+            if active_tenants:
+                floor = min(effective[item] for item in active_tenants)
+            elif self.last_client_left_queue is not None:
+                floor = self._synchronized_effective_vector_debts(
+                    {self.last_client_left_queue}
+                )[self.last_client_left_queue]
+            else:
+                floor = 0.0
+            self.tenant_vector_lifts[tenant] = max(
+                self.tenant_vector_lifts[tenant], floor - effective[tenant]
+            )
+        else:
+            effective = self._synchronized_effective_lifecycle_costs(
+                active_tenants | {tenant}
+            )
+            if active_tenants:
+                floor = min(effective[item] for item in active_tenants)
+            elif self.last_client_left_queue is not None:
+                floor = self._synchronized_effective_lifecycle_costs(
+                    {self.last_client_left_queue}
+                )[self.last_client_left_queue]
+            else:
+                floor = 0.0
+            self.tenant_lifecycle_lifts[tenant] = max(
+                self.tenant_lifecycle_lifts[tenant], floor - effective[tenant]
+            )
+
+    def on_requests_admitted(
+        self, admitted: List[Req], remaining_waiting_queue: List[Req]
+    ) -> None:
+        if self.policy not in (
+            CacheAgnosticPolicy.TENANT_VTC,
+            CacheAgnosticPolicy.TENANT_VECTOR_DEBT,
+            CacheAgnosticPolicy.TENANT_LIFECYCLE_COST,
+        ):
+            return
+
+        for req in admitted:
+            tenant = self._tenant(req)
+            queued_at = self._vtc_queued_at.pop(req.rid, None)
+            if self.policy == CacheAgnosticPolicy.TENANT_VTC and queued_at is not None:
+                self._vtc_queue_waits[tenant].append(time.perf_counter() - queued_at)
+            if (
+                self.policy == CacheAgnosticPolicy.TENANT_VTC
+                and req.rid not in self._vtc_input_charged_rids
+            ):
+                self.tenant_counters[tenant] += self._vtc_admission_cost(req)
+                self._vtc_input_charged_rids.add(req.rid)
+            self._vtc_output_lengths.setdefault(req.rid, len(req.output_ids))
+
+        if not remaining_waiting_queue and admitted:
+            self.last_client_left_queue = self._tenant(admitted[-1])
+        if self.policy == CacheAgnosticPolicy.TENANT_VTC:
+            self._observe_vtc_counters()
+
+    def on_batch_processed(self, batch: ScheduleBatch) -> None:
+        if self.policy != CacheAgnosticPolicy.TENANT_VTC:
+            return
+        for req in batch.reqs:
+            output_len = len(req.output_ids)
+            previous = self._vtc_output_lengths.get(req.rid, output_len)
+            delta = max(0, output_len - previous)
+            if delta:
+                self.tenant_counters[self._tenant(req)] += self._vtc_output_cost(
+                    req, previous, output_len
+                )
+            if req.finished():
+                self._vtc_output_lengths.pop(req.rid, None)
+            else:
+                self._vtc_output_lengths[req.rid] = output_len
+        self._observe_vtc_counters()
+
+    def _sort_by_tenant_vtc(self, waiting_queue: List[Req]) -> None:
+        queues = defaultdict(deque)
+        tenant_order: Dict[str, int] = {}
+        for req in waiting_queue:
+            tenant = self._tenant(req)
+            tenant_order.setdefault(tenant, len(tenant_order))
+            queues[tenant].append(req)
+
+        shadow = dict(self.tenant_counters)
+        ordered = []
+        while queues:
+            tenant = min(
+                queues,
+                key=lambda item: (shadow.get(item, 0.0), tenant_order[item]),
+            )
+            req = queues[tenant].popleft()
+            ordered.append(req)
+            if req.rid not in self._vtc_input_charged_rids:
+                shadow[tenant] = shadow.get(tenant, 0.0) + self._vtc_admission_cost(
+                    req
+                )
+            if not queues[tenant]:
+                del queues[tenant]
+        waiting_queue[:] = ordered
+
+    def _vtc_admission_cost(self, req: Req) -> float:
+        input_len = len(req.origin_input_ids)
+        return (
+            self.vtc_request_weight
+            + self.vtc_input_weight * input_len
+            + self.vtc_input_quadratic_weight * input_len * input_len
+        )
+
+    def _vtc_output_cost(self, req: Req, previous: int, current: int) -> float:
+        input_len = len(req.origin_input_ids)
+        return (
+            self.vtc_output_weight * (current - previous)
+            + self.vtc_input_output_weight
+            * input_len
+            * (current - previous)
+            + self.vtc_output_quadratic_weight
+            * (current * current - previous * previous)
+        )
+
+    def _observe_vtc_counters(self) -> None:
+        if not self.tenant_counters:
+            return
+        values = list(self.tenant_counters.values())
+        gap = max(values) - min(values)
+        self._vtc_current_counter_gap = gap
+        self._vtc_max_counter_gap = max(self._vtc_max_counter_gap, gap)
+        self._vtc_counter_observations += 1
+
+    def vtc_snapshot(self) -> dict:
+        queue_waits = {}
+        for tenant, values in sorted(self._vtc_queue_waits.items()):
+            ordered = sorted(values)
+            p95_index = max(0, int(0.95 * len(ordered) + 0.999999) - 1)
+            queue_waits[tenant] = {
+                "admitted_requests": len(values),
+                "mean_seconds": sum(values) / len(values),
+                "p95_seconds": ordered[p95_index],
+                "max_seconds": ordered[-1],
+                "peak_waiting_requests": self._vtc_peak_waiting_requests[tenant],
+            }
+        return {
+            "schema_version": 1,
+            "measurement_scope": "virtual counters after queue, admission, and decode updates",
+            "elapsed_seconds": time.perf_counter() - self._vtc_trace_started_at,
+            "observation_count": self._vtc_counter_observations,
+            "current_counter_gap": self._vtc_current_counter_gap,
+            "max_counter_gap": self._vtc_max_counter_gap,
+            "counters": dict(sorted(self.tenant_counters.items())),
+            "queue_waits": queue_waits,
+            "weights": {
+                "request": self.vtc_request_weight,
+                "input": self.vtc_input_weight,
+                "input_quadratic": self.vtc_input_quadratic_weight,
+                "output": self.vtc_output_weight,
+                "input_output": self.vtc_input_output_weight,
+                "output_quadratic": self.vtc_output_quadratic_weight,
+            },
+        }
+
+    def _effective_vector_debts(self, tenants: Set[str]) -> Dict[str, float]:
+        raw: Dict[str, float] = {}
+        if self.tenant_resource_tracker is not None:
+            if self.state_capacity is None or self.kv_capacity is None:
+                raise ValueError("vector debt policy requires resource capacities")
+            raw = self.tenant_resource_tracker.normalized_dominant_debts(
+                state_capacity=self.state_capacity, kv_capacity=self.kv_capacity
+            )
+        return {
+            tenant: raw.get(tenant, 0.0) + self.tenant_vector_lifts[tenant]
+            for tenant in tenants
+        }
+
+    def _instant_dominant_shares(self, tenants: Set[str]) -> Dict[str, float]:
+        raw: Dict[str, float] = {}
+        if self.tenant_resource_tracker is not None:
+            if self.state_capacity is None or self.kv_capacity is None:
+                raise ValueError("instant-share policy requires resource capacities")
+            raw = self.tenant_resource_tracker.current_normalized_dominant_shares(
+                state_capacity=self.state_capacity, kv_capacity=self.kv_capacity
+            )
+        return {tenant: raw.get(tenant, 0.0) for tenant in tenants}
+
+    def _synchronized_instant_dominant_shares(
+        self, tenants: Set[str]
+    ) -> Dict[str, float]:
+        if (
+            not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+        ):
+            return self._instant_dominant_shares(tenants)
+
+        tp_group = get_tp_group()
+        local = (
+            self._instant_dominant_shares(tenants)
+            if tp_group.rank_in_group == 0
+            else None
+        )
+        return tp_group.broadcast_object(local, src=0)
+
+    def _sort_by_tenant_instant_share(self, waiting_queue: List[Req]) -> None:
+        tenants = {self._tenant(req) for req in waiting_queue}
+        shares = self._synchronized_instant_dominant_shares(tenants)
+        tenant_order: Dict[str, int] = {}
+        for req in waiting_queue:
+            tenant_order.setdefault(self._tenant(req), len(tenant_order))
+        waiting_queue.sort(
+            key=lambda req: (
+                shares[self._tenant(req)],
+                tenant_order[self._tenant(req)],
+            )
+        )
+
+    def _synchronized_effective_vector_debts(
+        self, tenants: Set[str]
+    ) -> Dict[str, float]:
+        if (
+            not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+        ):
+            return self._effective_vector_debts(tenants)
+
+        tp_group = get_tp_group()
+        local = (
+            self._effective_vector_debts(tenants)
+            if tp_group.rank_in_group == 0
+            else None
+        )
+        return tp_group.broadcast_object(local, src=0)
+
+    def _sort_by_tenant_vector_debt(self, waiting_queue: List[Req]) -> None:
+        tenants = {self._tenant(req) for req in waiting_queue}
+        effective = self._synchronized_effective_vector_debts(tenants)
+        tenant_order: Dict[str, int] = {}
+        for req in waiting_queue:
+            tenant_order.setdefault(self._tenant(req), len(tenant_order))
+        waiting_queue.sort(
+            key=lambda req: (
+                effective[self._tenant(req)],
+                tenant_order[self._tenant(req)],
+            )
+        )
+
+    def _effective_lifecycle_costs(self, tenants: Set[str]) -> Dict[str, float]:
+        raw: Dict[str, float] = {}
+        if self.tenant_resource_tracker is not None:
+            if self.state_capacity is None or self.kv_capacity is None:
+                raise ValueError("lifecycle cost policy requires resource capacities")
+            raw = self.tenant_resource_tracker.normalized_lifecycle_costs(
+                state_capacity=self.state_capacity,
+                kv_capacity=self.kv_capacity,
+                state_weight=self.lifecycle_state_weight,
+                kv_weight=self.lifecycle_kv_weight,
+            )
+        return {
+            tenant: raw.get(tenant, 0.0) + self.tenant_lifecycle_lifts[tenant]
+            for tenant in tenants
+        }
+
+    def _synchronized_effective_lifecycle_costs(
+        self, tenants: Set[str]
+    ) -> Dict[str, float]:
+        if (
+            not torch.distributed.is_available()
+            or not torch.distributed.is_initialized()
+        ):
+            return self._effective_lifecycle_costs(tenants)
+
+        tp_group = get_tp_group()
+        local = (
+            self._effective_lifecycle_costs(tenants)
+            if tp_group.rank_in_group == 0
+            else None
+        )
+        return tp_group.broadcast_object(local, src=0)
+
+    def _sort_by_tenant_lifecycle_cost(self, waiting_queue: List[Req]) -> None:
+        tenants = {self._tenant(req) for req in waiting_queue}
+        effective = self._synchronized_effective_lifecycle_costs(tenants)
+        tenant_order: Dict[str, int] = {}
+        for req in waiting_queue:
+            tenant_order.setdefault(self._tenant(req), len(tenant_order))
+        waiting_queue.sort(
+            key=lambda req: (
+                effective[self._tenant(req)],
+                tenant_order[self._tenant(req)],
+            )
+        )
 
     def _determine_active_policy(self, waiting_queue: List[Req]) -> Policy:
         if self.policy == CacheAwarePolicy.LPM and len(waiting_queue) > 128:

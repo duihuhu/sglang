@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "method": "scipy.optimize.nnls",
+  "features": [
+    "1",
+    "P/1024",
+    "(P/1024)^2",
+    "O/32",
+    "(P/1024)*(O/32)",
+    "(O/32)^2"
+  ],
+  "formal_artifacts": 27,
+  "raw_scheduler_weights": {
+    "request_weight": 0.022738909628242068,
+    "input_weight": 1.411522451610567e-05,
+    "input_quadratic_weight": 2.986613958613459e-09,
+    "output_weight": 0.004957532824990934,
+    "input_output_weight": 2.208254382979676e-08,
+    "output_quadratic_weight": 7.2453783812026626e-09
+  },
+  "scaled_coefficients": [
+    0.022738909628242068,
+    0.014453989904492206,
+    0.0031316917182670663,
+    0.15864105039970988,
+    0.0007236007962147802,
+    7.4192674623515265e-06
+  ],
+  "residual_norm": 0.009256297200153668,
+  "median_relative_error": 0.0017667693985695529,
+  "max_relative_error": 0.016253257463773613,
+  "gate": {
+    "median_limit": 0.2,
+    "max_limit": 0.35,
+    "passed": true
+  },
+  "rows": [
+    {
+      "prompt": 1024,
+      "output": 32,
+      "median_jct_s": 0.20299600809812546,
+      "predicted_cost": 0.19969666171438835,
+      "relative_error": 0.016253257463773613
+    },
+    {
+      "prompt": 1024,
+      "output": 128,
+      "median_jct_s": 0.6791017204523087,
+      "predicted_cost": 0.6779019043140976,
+      "relative_error": 0.0017667693985695529
+    },
+    {
+      "prompt": 1024,
+      "output": 512,
+      "median_jct_s": 2.5875591803342104,
+      "predicted_cost": 2.5920583428561583,
+      "relative_error": 0.0017387670033374141
+    },
+    {
+      "prompt": 4096,
+      "output": 32,
+      "median_jct_s": 0.2880029920488596,
+      "predicted_cost": 0.29220480959051526,
+      "relative_error": 0.014589492670766506
+    },
+    {
+      "prompt": 4096,
+      "output": 128,
+      "median_jct_s": 0.7755197323858738,
+      "predicted_cost": 0.7769224593561576,
+      "relative_error": 0.0018087572910212052
+    },
+    {
+      "prompt": 4096,
+      "output": 512,
+      "median_jct_s": 2.7227330710738897,
+      "predicted_cost": 2.7171285265619503,
+      "relative_error": 0.0020584259880198088
+    },
+    {
+      "prompt": 16384,
+      "output": 32,
+      "median_jct_s": 1.2268443815410137,
+      "predicted_cost": 1.225941910383095,
+      "relative_error": 0.0007356036115885074
+    },
+    {
+      "prompt": 16384,
+      "output": 128,
+      "median_jct_s": 1.7369120996445417,
+      "predicted_cost": 1.7367091888124693,
+      "relative_error": 0.00011682274083644917
+    },
+    {
+      "prompt": 16384,
+      "output": 512,
+      "median_jct_s": 3.7800083886832,
+      "predicted_cost": 3.78111377067319,
+      "relative_error": 0.0002924284489155028
+    }
+  ]
+}

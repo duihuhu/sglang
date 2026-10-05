@@ -1,0 +1,41 @@
+{
+  "overall": {
+    "requests": 8,
+    "completed": 8,
+    "mean_jct_s": 1.525622239569202,
+    "p95_jct_s": 1.528735102340579,
+    "mean_ttft_s": 0.2265168810263276,
+    "p95_ttft_s": 0.24298137817531823,
+    "p95_itl_s": 0.01019003102555871,
+    "max_itl_s": 0.1238054446876049,
+    "slo_goodput": 8,
+    "mean_cached_tokens": 0.0,
+    "total_retractions": 0
+  },
+  "groups": {
+    "measured": {
+      "requests": 8,
+      "completed": 8,
+      "mean_jct_s": 1.525622239569202,
+      "p95_jct_s": 1.528735102340579,
+      "mean_ttft_s": 0.2265168810263276,
+      "p95_ttft_s": 0.24298137817531823,
+      "p95_itl_s": 0.01019003102555871,
+      "max_itl_s": 0.1238054446876049,
+      "slo_goodput": 8,
+      "mean_cached_tokens": 0.0,
+      "total_retractions": 0,
+      "scheduler_active_resources": {
+        "active_request_seconds": 11.869601933285594,
+        "state_slot_seconds": 35.60880579985678,
+        "kv_token_seconds": 12824.334723711014,
+        "peak_active_requests": 8,
+        "peak_state_slots": 24,
+        "peak_kv_tokens": 9216,
+        "current_active_requests": 0,
+        "current_state_slots": 0,
+        "current_kv_tokens": 0
+      }
+    }
+  }
+}

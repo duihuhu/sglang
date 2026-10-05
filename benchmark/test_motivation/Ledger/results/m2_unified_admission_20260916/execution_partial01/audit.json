@@ -1,0 +1,484 @@
+{
+  "analysis": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/partial_analysis02/analysis.json",
+  "analysis_sha256": "3f5f18db4d120ac780ff5e46fff304a4694ce33b1d2ee9e94a59740b8d6fdd59",
+  "complete": false,
+  "rows": [
+    {
+      "experiment": {
+        "run_id": "m2ua-native-kv-far-rep51-screen",
+        "policy": "native",
+        "profile": "kv",
+        "phase": "far",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 115.5441352268681,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 29.198791067115963,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 116,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 17.143235380761325,
+        "max_interval_without_holder_decode_launch_s": 17.143235380761325,
+        "batch_modes": {
+          "extend": 128,
+          "decode": 116
+        },
+        "admission_blocks": {
+          "prefill_other": 126,
+          "prefill_no_token": 1
+        }
+      },
+      "health": {
+        "sample_count": 578,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 62.0,
+        "max_memory_mib": 71948.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-far-rep51-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-native-kv-near-rep51-screen",
+        "policy": "native",
+        "profile": "kv",
+        "phase": "near",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 119.8455872037448,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 19.158711339812726,
+        "candidate_prefill_batches_before_last_holder_release": 96,
+        "candidate_prefill_tokens_before_last_holder_release": 393216,
+        "holder_decode_launches_before_last_holder_release": 35,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 17.13396050548181,
+        "max_interval_without_holder_decode_launch_s": 17.13396050548181,
+        "batch_modes": {
+          "extend": 96,
+          "decode": 35
+        },
+        "admission_blocks": {
+          "prefill_other": 95,
+          "prefill_no_token": 1
+        }
+      },
+      "health": {
+        "sample_count": 590,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 61.0,
+        "max_memory_mib": 72110.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-kv-near-rep51-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-native-state-far-rep51-screen",
+        "policy": "native",
+        "profile": "state",
+        "phase": "far",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 31.030942850746214,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 111,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 23.01168445404619,
+        "max_interval_without_holder_decode_launch_s": 23.01168445404619,
+        "batch_modes": {
+          "extend": 128,
+          "decode": 111
+        },
+        "admission_blocks": {
+          "prefill_other": 127
+        }
+      },
+      "health": {
+        "sample_count": 162,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 60.0,
+        "max_memory_mib": 78644.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-far-rep51-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-native-state-near-rep51-screen",
+        "policy": "native",
+        "profile": "state",
+        "phase": "near",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 25.570267653092742,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 31,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 22.992590541020036,
+        "max_interval_without_holder_decode_launch_s": 22.992590541020036,
+        "batch_modes": {
+          "extend": 128,
+          "decode": 31
+        },
+        "admission_blocks": {
+          "prefill_other": 127
+        }
+      },
+      "health": {
+        "sample_count": 166,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 61.0,
+        "max_memory_mib": 81008.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-00-native-rep51/m2ua-native-state-near-rep51-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-kv-far-rep51-screen",
+        "policy": "decode32",
+        "profile": "kv",
+        "phase": "far",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 115.5441352268681,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 29.46224087383598,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 118,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.05230568442493677,
+        "max_interval_without_holder_decode_launch_s": 17.160644626244903,
+        "batch_modes": {
+          "decode": 118,
+          "extend": 128
+        },
+        "admission_blocks": {
+          "prefill_other": 126,
+          "prefill_no_token": 1
+        }
+      },
+      "health": {
+        "sample_count": 586,
+        "loaded_sm_mhz_range": [
+          1395.0,
+          1410.0
+        ],
+        "max_temperature_c": 61.0,
+        "max_memory_mib": 71582.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-far-rep51-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-kv-near-rep51-screen",
+        "policy": "decode32",
+        "profile": "kv",
+        "phase": "near",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 119.8455872037448,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 19.635941836517304,
+        "candidate_prefill_batches_before_last_holder_release": 96,
+        "candidate_prefill_tokens_before_last_holder_release": 393216,
+        "holder_decode_launches_before_last_holder_release": 43,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.013108867686241865,
+        "max_interval_without_holder_decode_launch_s": 17.16023003682494,
+        "batch_modes": {
+          "decode": 43,
+          "extend": 96
+        },
+        "admission_blocks": {
+          "prefill_other": 95,
+          "prefill_no_token": 1
+        }
+      },
+      "health": {
+        "sample_count": 592,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 61.0,
+        "max_memory_mib": 71596.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-kv-near-rep51-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-state-far-rep51-screen",
+        "policy": "decode32",
+        "profile": "state",
+        "phase": "far",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 31.064174805767834,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 112,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.004182989709079266,
+        "max_interval_without_holder_decode_launch_s": 23.032330952584743,
+        "batch_modes": {
+          "decode": 112,
+          "extend": 128
+        },
+        "admission_blocks": {
+          "prefill_other": 127
+        }
+      },
+      "health": {
+        "sample_count": 162,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 61.0,
+        "max_memory_mib": 78656.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-far-rep51-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-state-near-rep51-screen",
+        "policy": "decode32",
+        "profile": "state",
+        "phase": "near",
+        "rep": 51,
+        "stage": "screen",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 2.186916284263134,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 31,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.008845359086990356,
+        "max_interval_without_holder_decode_launch_s": 0.2507075350731611,
+        "batch_modes": {
+          "decode": 31
+        },
+        "admission_blocks": {}
+      },
+      "health": {
+        "sample_count": 172,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 62.0,
+        "max_memory_mib": 75594.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-01-decode32-rep51/m2ua-decode32-state-near-rep51-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-kv-far-rep52-screen",
+        "policy": "decode32",
+        "profile": "kv",
+        "phase": "far",
+        "rep": 52,
+        "stage": "screen",
+        "arrival": 115.5441352268681,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 29.18787422310561,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 113,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.03756529185920954,
+        "max_interval_without_holder_decode_launch_s": 17.114779267460108,
+        "batch_modes": {
+          "decode": 113,
+          "extend": 128
+        },
+        "admission_blocks": {
+          "prefill_other": 126,
+          "prefill_no_token": 1
+        }
+      },
+      "health": {
+        "sample_count": 588,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 61.0,
+        "max_memory_mib": 71838.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-far-rep52-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-kv-near-rep52-screen",
+        "policy": "decode32",
+        "profile": "kv",
+        "phase": "near",
+        "rep": 52,
+        "stage": "screen",
+        "arrival": 119.8455872037448,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 1.642859164159745,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 30,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.00371372839435935,
+        "max_interval_without_holder_decode_launch_s": 0.08125883154571056,
+        "batch_modes": {
+          "decode": 30
+        },
+        "admission_blocks": {}
+      },
+      "health": {
+        "sample_count": 588,
+        "loaded_sm_mhz_range": [
+          1380.0,
+          1410.0
+        ],
+        "max_temperature_c": 61.0,
+        "max_memory_mib": 70678.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-kv-near-rep52-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-state-far-rep52-screen",
+        "policy": "decode32",
+        "profile": "state",
+        "phase": "far",
+        "rep": 52,
+        "stage": "screen",
+        "arrival": 8.634797419421375,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 31.308578186668456,
+        "candidate_prefill_batches_before_last_holder_release": 128,
+        "candidate_prefill_tokens_before_last_holder_release": 524288,
+        "holder_decode_launches_before_last_holder_release": 112,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.061691307462751865,
+        "max_interval_without_holder_decode_launch_s": 23.17812069132924,
+        "batch_modes": {
+          "decode": 112,
+          "extend": 128
+        },
+        "admission_blocks": {
+          "prefill_other": 127
+        }
+      },
+      "health": {
+        "sample_count": 162,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 66.0,
+        "max_memory_mib": 80208.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-far-rep52-screen.json"
+    },
+    {
+      "experiment": {
+        "run_id": "m2ua-decode32-state-near-rep52-screen",
+        "policy": "decode32",
+        "profile": "state",
+        "phase": "near",
+        "rep": 52,
+        "stage": "screen",
+        "arrival": 13.789265418425202,
+        "activation_limit": 0
+      },
+      "scene_errors": [],
+      "execution": {
+        "valid_window": true,
+        "arrival_to_last_holder_release_s": 2.2830523904412985,
+        "candidate_prefill_batches_before_last_holder_release": 0,
+        "candidate_prefill_tokens_before_last_holder_release": 0,
+        "holder_decode_launches_before_last_holder_release": 32,
+        "candidate_prefill_with_holder_decode_batches": 0,
+        "first_holder_decode_launch_after_arrival_s": 0.021494204178452492,
+        "max_interval_without_holder_decode_launch_s": 0.2551418822258711,
+        "batch_modes": {
+          "decode": 32
+        },
+        "admission_blocks": {}
+      },
+      "health": {
+        "sample_count": 170,
+        "loaded_sm_mhz_range": [
+          1365.0,
+          1410.0
+        ],
+        "max_temperature_c": 62.0,
+        "max_memory_mib": 76138.0
+      },
+      "source": "benchmark/test_motivation/Ledger/results/m2_unified_admission_20260916/screen01/session-02-decode32-rep52/m2ua-decode32-state-near-rep52-screen.json"
+    }
+  ],
+  "scope": "CPU-observed scheduler ordering, not GPU execution times or proof of state-capacity mediation. The no-holder-launch interval includes the arrival and last-release boundary intervals."
+}
