@@ -20,6 +20,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.linear import (
     ColumnParallelLinear,
@@ -37,9 +38,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.llama import LlamaMLP as LoopCoderMLP
-from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import add_prefix, make_layers
-from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +63,7 @@ class LoopGateProjection(nn.Module):
         super().__init__()
         self.total_num_heads = total_num_heads
         self.head_dim = head_dim
-        tp_size = get_parallel().tp_size
+        tp_size = get_tensor_model_parallel_world_size()
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
 
@@ -131,7 +130,7 @@ class LoopCoderAttention(nn.Module):
         super().__init__()
         self.layer_id = layer_id
         self.hidden_size = hidden_size
-        tp_size = get_parallel().tp_size
+        tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -167,7 +166,8 @@ class LoopCoderAttention(nn.Module):
             prefix=add_prefix("o_proj", prefix),
         )
 
-        rope_theta, rope_scaling = get_rope_config(config)
+        rope_theta = config.rope_parameters["rope_theta"]
+        rope_scaling = config.rope_parameters
         max_position_embeddings = getattr(
             config, "max_position_embeddings", max_position
         )

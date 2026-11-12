@@ -8,8 +8,7 @@ import hashlib
 import json
 import os
 import tempfile
-from collections import defaultdict
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Generator, Iterable
 from pathlib import Path
 
 import filelock
@@ -25,49 +24,10 @@ try:
 except ImportError:
     HAS_RUNAI_MODEL_STREAMER = False
 
-from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
-from sglang.multimodal_gen.runtime.loader.weight_load_plan import WeightLoadPlan
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
-
-
-def _disable_runai_streamer_rank_discovery_collective() -> None:
-    """RunAI Model Streamer's ``find_local_ranks()`` fires a full-world
-    collective on the first ``stream_files()`` of every streamer instance even
-    when the caller passes ``is_distributed=False`` — it only populates an env
-    var for the library's distributed-streaming path, which this loader never
-    uses (each rank loads its own full copy). Ranks reach it with divergent
-    timing, so it can fire out of lockstep and hang
-    (https://github.com/run-ai/runai-model-streamer/issues/84).
-
-    Patch it to the single-process early return it already has; the only
-    behavior lost is the collective this loader never wanted.
-    """
-    try:
-        from runai_model_streamer.distributed_streamer.distributed_streamer import (
-            _distributedStreamerParams,
-        )
-    except ImportError:
-        return
-    if not hasattr(_distributedStreamerParams, "find_local_ranks"):
-        logger.warning(
-            "runai_model_streamer find_local_ranks not found; skipping the "
-            "rank-discovery-collective workaround (multi-rank loads may hang, "
-            "see run-ai/runai-model-streamer#84)."
-        )
-        return
-
-    def _find_local_ranks_no_collective(self):
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        return 1, rank, [[rank]]
-
-    _distributedStreamerParams.find_local_ranks = _find_local_ranks_no_collective
-
-
-if HAS_RUNAI_MODEL_STREAMER:
-    _disable_runai_streamer_rank_discovery_collective()
 
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
@@ -91,12 +51,6 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
     hash_name = hashlib.sha256(model_name.encode()).hexdigest()
     # add hash to avoid conflict with old users' lock files
     lock_file_name = hash_name + model_name + ".lock"
-    # Linux filesystems commonly cap one filename at 255 bytes. Absolute
-    # snapshot paths can exceed that even though the full path is valid.
-    # The digest is already collision-resistant, so fall back to it alone
-    # while preserving the historical name for ordinary paths.
-    if len(os.fsencode(lock_file_name)) > 255:
-        lock_file_name = hash_name + ".lock"
     # mode 0o666 is required for the filelock to be shared across users
     lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name), mode=0o666)
     return lock
@@ -108,10 +62,7 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
 # So, we use the index_file to
 # look up which safetensors files should be used.
 def filter_duplicate_safetensors_files(
-    hf_weights_files: list[str],
-    hf_folder: str,
-    index_file: str,
-    key_filter: Callable[[str], bool] | None = None,
+    hf_weights_files: list[str], hf_folder: str, index_file: str
 ) -> list[str]:
     # model.safetensors.index.json is a mapping from keys in the
     # torch state_dict to safetensors file holding that weight.
@@ -125,9 +76,6 @@ def filter_duplicate_safetensors_files(
         weight_map = json.load(f)["weight_map"]
     weight_files_in_index = set()
     for weight_name in weight_map:
-        # remove only shards whose indexed tensors are all filtered
-        if key_filter is not None and not key_filter(weight_name):
-            continue
         weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
     # Filter out any fields that are not found in the index file.
     hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
@@ -160,87 +108,47 @@ def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[s
 _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
 
 
-def _scan_safetensors_files(
-    hf_weights_files: list[str],
-) -> tuple[list[str], dict[str, set[str]]]:
-    """Validate headers and detect cross-file duplicate keys in one pass."""
-    corrupted_files: list[str] = []
-    key_to_file: dict[str, str] = {}
-    duplicate_files_by_key: dict[str, set[str]] = defaultdict(set)
+def _validate_safetensors_file(file_path: str) -> bool:
+    """
+    Validate that a safetensors file is readable and not corrupted.
 
-    for st_file in hf_weights_files:
-        try:
-            with safe_open(st_file, framework="pt", device="cpu") as f:
-                for name in f.keys():  # noqa: SIM118
-                    previous_file = key_to_file.get(name)
-                    if previous_file is None:
-                        key_to_file[name] = st_file
-                    elif previous_file != st_file:
-                        duplicate_files_by_key[name].update((previous_file, st_file))
-        except Exception as e:
-            logger.error(
-                "Corrupted safetensors file detected: %s - %s: %s",
-                st_file,
-                type(e).__name__,
-                str(e),
-            )
-            corrupted_files.append(st_file)
+    Args:
+        file_path: Path to the safetensors file
 
-    return corrupted_files, duplicate_files_by_key
-
-
-def _raise_if_duplicate_safetensors_keys(
-    duplicate_files_by_key: dict[str, set[str]],
-) -> None:
-    if not duplicate_files_by_key:
-        return
-
-    examples = []
-    for key in sorted(duplicate_files_by_key)[:8]:
-        files = ", ".join(
-            sorted(os.path.basename(p) for p in duplicate_files_by_key[key])
+    Returns:
+        True if file is valid, False if corrupted
+    """
+    try:
+        with safe_open(file_path, framework="pt", device="cpu") as f:
+            _ = list(f.keys())
+        return True
+    except Exception as e:
+        logger.error(
+            "Corrupted safetensors file detected: %s - %s: %s",
+            file_path,
+            type(e).__name__,
+            str(e),
         )
-        examples.append(f"{key} [{files}]")
-
-    raise ValueError(
-        "Duplicate tensor names detected across safetensors files. Refusing to load "
-        "because final weights would depend on file or streamer ordering. "
-        f"Found {len(duplicate_files_by_key)} duplicate tensor name(s). "
-        f"Examples: {examples}. "
-        "This usually means multiple precision variants or consolidated+sharded "
-        "checkpoints were passed together."
-    )
+        return False
 
 
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     to_cpu: bool = True,
-    use_runai_model_streamer: bool | None = None,
-    key_filter: Callable[[str], bool] | None = None,
-    clone_streamed_tensors: bool = True,
-    weight_load_plan: WeightLoadPlan | None = None,
+    use_runai_model_streamer: bool = HAS_RUNAI_MODEL_STREAMER,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     enable_tqdm = (
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     )
-    if weight_load_plan is not None:
-        checkpoint_device = torch.device(weight_load_plan.checkpoint_load_device)
-        to_cpu = checkpoint_device.type == "cpu"
-        device = str(checkpoint_device)
-    else:
-        device = "cpu" if to_cpu else str(get_local_torch_device())
-    if use_runai_model_streamer is None:
-        use_runai_model_streamer = (
-            HAS_RUNAI_MODEL_STREAMER and envs.SGLANG_USE_RUNAI_MODEL_STREAMER
-        )
-    if key_filter is not None:
-        # streamer filters after materializing all tensors, so it cannot skip
-        # a checkpoint partition at load time
-        use_runai_model_streamer = False
+    device = "cpu" if to_cpu else str(get_local_torch_device())
 
     # Validate files before loading
-    corrupted_files, duplicate_files_by_key = _scan_safetensors_files(hf_weights_files)
+    corrupted_files = [
+        st_file
+        for st_file in hf_weights_files
+        if not _validate_safetensors_file(st_file)
+    ]
 
     if corrupted_files:
         # Delete corrupted files (both symlink and blob if applicable)
@@ -271,27 +179,14 @@ def safetensors_weights_iterator(
             "Please retry - the files will be re-downloaded automatically."
         )
 
-    _raise_if_duplicate_safetensors_keys(duplicate_files_by_key)
-
     if use_runai_model_streamer:
-        logger.info(
-            "Loading safetensors with Run:ai Model Streamer to %s",
-            "cpu" if to_cpu else device,
-        )
         with SafetensorsStreamer() as streamer:
-            if to_cpu:
-                streamer.stream_files(hf_weights_files)
-            else:
-                streamer.stream_files(hf_weights_files, device=device)
+            streamer.stream_files(hf_weights_files)
             for name, tensor in streamer.get_tensors():
-                if key_filter is not None and not key_filter(name):
-                    continue
                 if to_cpu:
                     yield name, tensor.clone().detach()
-                elif clone_streamed_tensors:
-                    yield name, tensor.clone().detach()
                 else:
-                    yield name, tensor
+                    yield name, tensor.to(device)
     else:
         for st_file in tqdm(
             hf_weights_files,
@@ -301,8 +196,6 @@ def safetensors_weights_iterator(
         ):
             with safe_open(st_file, framework="pt", device=device) as f:
                 for name in f.keys():  # noqa: SIM118
-                    if key_filter is not None and not key_filter(name):
-                        continue
                     param = f.get_tensor(name)
                     yield name, param
 

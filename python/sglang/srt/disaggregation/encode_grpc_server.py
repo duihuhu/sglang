@@ -26,9 +26,7 @@ from sglang.srt.disaggregation.encode_server import (
     handle_scheduler_receive_url_request,
     launch_encoder,
 )
-from sglang.srt.managers.io_struct import async_sock_send, wrap_as_pickle
 from sglang.srt.managers.schedule_batch import Modality
-from sglang.srt.runtime_context import get_disagg
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils import random_uuid
 from sglang.srt.utils.network import NetworkAddress, get_zmq_socket
@@ -97,7 +95,7 @@ class SGLangEncoderServer(SGLangEncoderServicer):
                 "part_idx": request.part_idx,
             }
             for socket in self.send_sockets:
-                await async_sock_send(socket, wrap_as_pickle(request_dict))
+                await socket.send_pyobj(request_dict)
 
             # gRPC encode is image-only; encoder.encode() requires modality
             (
@@ -118,13 +116,13 @@ class SGLangEncoderServer(SGLangEncoderServicer):
                 context.set_details(error_msg)
                 return sglang_encoder_pb2.EncodeResponse()
 
-            if get_disagg().encoder_transfer_backend == "mooncake":
+            if self.server_args.encoder_transfer_backend == "mooncake":
                 return sglang_encoder_pb2.EncodeResponse(
                     embedding_size=nbytes,
                     embedding_len=embedding_len,
                     embedding_dim=embedding_dim,
                 )
-            elif get_disagg().encoder_transfer_backend == "zmq_to_scheduler":
+            elif self.server_args.encoder_transfer_backend == "zmq_to_scheduler":
                 embedding_ports = list(request.embedding_port)
                 logger.info(f"embedding_port = {embedding_ports}")
                 if not embedding_ports:
@@ -142,7 +140,7 @@ class SGLangEncoderServer(SGLangEncoderServicer):
                     await asyncio.gather(*tasks)
                     self.encoder.embedding_to_send.pop(request.req_id, None)
                 return sglang_encoder_pb2.EncodeResponse()
-            elif get_disagg().encoder_transfer_backend == "zmq_to_tokenizer":
+            elif self.server_args.encoder_transfer_backend == "zmq_to_tokenizer":
                 embedding_port = (
                     request.embedding_port[0] if request.embedding_port else 0
                 )
@@ -260,7 +258,7 @@ async def serve_grpc_encoder(server_args: ServerArgs):
     )
     reflection.enable_server_reflection(SERVICE_NAMES, server)
 
-    listen_addr = NetworkAddress(server_args.host, server_args.port).to_host_port_str()
+    listen_addr = f"{server_args.host}:{server_args.port}"
     server.add_insecure_port(listen_addr)
 
     await server.start()

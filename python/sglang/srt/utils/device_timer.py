@@ -1,44 +1,23 @@
 from collections import deque
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Deque, Dict, List, Optional
+from typing import Callable, Deque, Dict, Optional
 
 import torch
-
-
-def device_timer_ctx(timer: Optional["DeviceTimer"], category: str):
-    """Timing context for one forward segment; no-op when the timer is absent.
-
-    A segment that skips this stays out of the fwd_occupancy numerator while
-    still counting in its wall-clock denominator, i.e. reads as GPU idle.
-    """
-    if timer is None:
-        return nullcontext()
-    return timer.wrap(metadata={"category": category})
 
 
 class DeviceTimer:
     def __init__(self, reporter: Callable):
         self._intervals: Deque[_TimingInterval] = deque()
-        self._reporters: List[Callable] = [reporter]
-        self._in_wrap = False
-
-    def add_reporter(self, reporter: Callable):
-        self._reporters.append(reporter)
+        self._reporter = reporter
 
     @contextmanager
     def wrap(self, metadata: Dict):
-        # Not re-entrant: a nested wrap would end the wrong interval and leave
-        # an un-ended one at the head of the queue for _report() to trip over.
-        assert not self._in_wrap, "DeviceTimer.wrap is not re-entrant"
-        interval = _TimingInterval.create()
-        self._intervals.append(interval)
-        self._in_wrap = True
+        self._intervals.append(_TimingInterval.create())
         try:
             yield
         finally:
-            self._in_wrap = False
-            interval.end(metadata=metadata)
+            self._intervals[-1].end(metadata=metadata)
             self._report()
 
     def _report(self):
@@ -48,9 +27,7 @@ class DeviceTimer:
                 break
 
             self._intervals.popleft()
-            elapsed = interval.elapsed_time() / 1000.0
-            for reporter in self._reporters:
-                reporter(t=elapsed, **interval.metadata)
+            self._reporter(t=interval.elapsed_time() / 1000.0, **interval.metadata)
 
 
 class GapTimer(DeviceTimer):

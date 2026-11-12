@@ -23,9 +23,8 @@ RUN apt-get update && \
 
 WORKDIR /opt
 
-ENV UV_PYTHON_INSTALL_DIR=/usr/local/share/uv/python
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    mv /root/.local/bin/uv /root/.local/bin/uvx /usr/local/bin/ && \
+    source $HOME/.local/bin/env && \
     uv venv --python 3.12
 
 RUN echo -e '[[index]]\nname = "torch"\nurl = "https://download.pytorch.org/whl/cpu"\n\n[[index]]\nname = "torchvision"\nurl = "https://download.pytorch.org/whl/cpu"\n\n[[index]]\nname = "torchaudio"\nurl = "https://download.pytorch.org/whl/cpu"\n\n[[index]]\nname = "triton"\nurl = "https://download.pytorch.org/whl/cpu"' > .venv/uv.toml
@@ -33,22 +32,20 @@ RUN echo -e '[[index]]\nname = "torch"\nurl = "https://download.pytorch.org/whl/
 ENV UV_CONFIG_FILE=/opt/.venv/uv.toml
 
 WORKDIR /sgl-workspace
-RUN source /opt/.venv/bin/activate && \
+RUN source $HOME/.local/bin/env && \
+    source /opt/.venv/bin/activate && \
     git clone ${SGLANG_REPO} sglang && \
     cd sglang && \
     git checkout ${VER_SGLANG} && \
     cd python && \
     cp pyproject_cpu.toml pyproject.toml && \
     uv pip install . && \
-    cd sglang/kernels/aot && \
+    cd ../sgl-kernel && \
     cp pyproject_cpu.toml pyproject.toml && \
-    uv pip install . && \
-    source /sgl-workspace/sglang/scripts/ci/utils/sgl_eval_ref.sh && \
-    uv pip install "$SGL_EVAL_SPEC"
+    uv pip install .
 
 ENV SGLANG_USE_CPU_ENGINE=1
 ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4:/usr/lib/x86_64-linux-gnu/libtbbmalloc.so:/opt/.venv/lib/libiomp5.so
-ENV PATH="/opt/.venv/bin:$PATH"
 RUN echo 'source /opt/.venv/bin/activate' >> /root/.bashrc
 
 WORKDIR /sgl-workspace/sglang

@@ -9,15 +9,11 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
+# 1. ArchConfig contains all fields from diffuser's/transformer's config.json (i.e. all fields related to the architecture of the model)
+# 2. ArchConfig should be inherited & overridden by each model arch_config
+# 3. Any field in ArchConfig is fixed upon initialization, and should be hidden away from users
 @dataclass
 class ArchConfig:
-    """Static model metadata loaded from a Diffusers/Transformers config.
-
-    This includes architecture fields and checkpoint compatibility mappings.
-    Runtime capabilities, backend selection, hardware policies, and deployment
-    settings belong to the runtime model or server configuration instead.
-    """
-
     stacked_params_mapping: list[tuple[str, str, str]] = field(
         default_factory=list
     )  # mapping from huggingface weight names to custom names
@@ -46,8 +42,8 @@ class ArchConfig:
 
 @dataclass
 class ModelConfig:
-    # Static component metadata; this is intentionally separate from runtime
-    # capabilities and deployment settings.
+    # Every model config parameter can be categorized into either ArchConfig or everything else
+    # Diffuser/Transformer parameters
     arch_config: ArchConfig = field(default_factory=ArchConfig)
 
     # sglang-diffusion-specific parameters here
@@ -73,7 +69,9 @@ class ModelConfig:
 
     # This should be used only when loading from transformers/diffusers
     def update_model_arch(self, source_model_dict: dict[str, Any]) -> None:
-        """Load static architecture metadata from a source model config."""
+        """
+        Update arch_config with source_model_dict
+        """
         arch_config = self.arch_config
 
         for key, value in source_model_dict.items():

@@ -16,12 +16,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import ray
 
-from sglang.srt.runtime_context import publish
-from sglang.srt.server_args import PortArgs, ServerArgs
+if TYPE_CHECKING:
+    from sglang.srt.server_args import PortArgs, ServerArgs
+
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +50,7 @@ class SchedulerActor:
     ):
         import dataclasses
 
-        from sglang.srt.environ import envs
-        from sglang.srt.managers.scheduler import Scheduler, configure_scheduler_process
-        from sglang.srt.utils.numa_utils import (
-            get_numa_node_if_available,
-            numa_bind_to_node,
-        )
+        from sglang.srt.managers.scheduler import Scheduler, configure_scheduler
 
         # Override dist_init_addr if provided (for multi-node)
         if dist_init_addr:
@@ -75,14 +71,9 @@ class SchedulerActor:
             actual_gpu_id = gpu_id
             logger.info(f"[TP{tp_rank}] Using passed gpu_id: {gpu_id}")
 
-        # This actor takes the place of run_scheduler_process, which is where
-        # a forked scheduler publishes.
-        publish(server_args, role="scheduler")
-
         # Configure worker (logging, process title, etc.)
-        dp_rank = configure_scheduler_process(
+        dp_rank = configure_scheduler(
             server_args,
-            actual_gpu_id,
             tp_rank,
             attn_cp_rank,
             moe_dp_rank,
@@ -90,18 +81,6 @@ class SchedulerActor:
             pp_rank,
             dp_rank,
         )
-
-        # Ray actors can't use the numactl subprocess-wrapping approach
-        # (SGLANG_NUMA_BIND_V2's normal path), so bind in-process via libnuma.
-        # The V1 path inside configure_scheduler_process already handles
-        # SGLANG_NUMA_BIND_V2=False.
-        if envs.SGLANG_NUMA_BIND_V2.get():
-            numa_node = get_numa_node_if_available(server_args, actual_gpu_id)
-            if numa_node is not None:
-                numa_bind_to_node(numa_node)
-                logger.info(
-                    f"[TP{tp_rank}] Bound to NUMA node {numa_node} for GPU {actual_gpu_id}"
-                )
 
         # Create scheduler (loads model into GPU, initializes NCCL)
         self.scheduler = Scheduler(
@@ -129,7 +108,7 @@ class SchedulerActor:
             import torch
 
             # Need to set the GPU id for the event loop for nccl to work
-            torch.cuda.set_device(self.scheduler.ps.gpu_id)
+            torch.cuda.set_device(self.scheduler.gpu_id)
             self.scheduler.run_event_loop()
         except Exception as e:
             logger.error(f"Scheduler PP{self._pp_rank} TP{self._tp_rank} crashed: {e}")

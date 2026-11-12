@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import enum
 import random
-from collections.abc import Callable
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -29,8 +28,6 @@ class AttentionBackendEnum(enum.Enum):
     FA = enum.auto()
     SLIDING_TILE_ATTN = enum.auto()
     TORCH_SDPA = enum.auto()
-    TORCH_CUDNN_SDPA = enum.auto()
-    DYNAMIC_CUDNN_SDPA = enum.auto()
     SAGE_ATTN = enum.auto()
     SAGE_ATTN_3 = enum.auto()
     VIDEO_SPARSE_ATTN = enum.auto()
@@ -40,11 +37,6 @@ class AttentionBackendEnum(enum.Enum):
     AITER_SAGE = enum.auto()
     SLA_ATTN = enum.auto()
     SAGE_SLA_ATTN = enum.auto()
-    LASER_ATTN = enum.auto()
-    BLOCK_SPARSE_ATTN = enum.auto()
-    RAIN_FUSION_ATTN = enum.auto()
-    SOL_ATTN = enum.auto()
-    SUBBLOCK_SPARSE_ATTN = enum.auto()
     NO_ATTENTION = enum.auto()
 
     def __str__(self):
@@ -59,11 +51,6 @@ class AttentionBackendEnum(enum.Enum):
             AttentionBackendEnum.VMOBA_ATTN,
             AttentionBackendEnum.SLA_ATTN,
             AttentionBackendEnum.SAGE_SLA_ATTN,
-            AttentionBackendEnum.LASER_ATTN,
-            AttentionBackendEnum.BLOCK_SPARSE_ATTN,
-            AttentionBackendEnum.RAIN_FUSION_ATTN,
-            AttentionBackendEnum.SOL_ATTN,
-            AttentionBackendEnum.SUBBLOCK_SPARSE_ATTN,
         }
 
 
@@ -75,7 +62,6 @@ class PlatformEnum(enum.Enum):
     MPS = enum.auto()
     NPU = enum.auto()
     MUSA = enum.auto()
-    XPU = enum.auto()
     OOT = enum.auto()
     UNSPECIFIED = enum.auto()
 
@@ -126,6 +112,10 @@ class Platform:
     @lru_cache(maxsize=1)
     def is_cuda(self) -> bool:
         return self.is_cuda_static()
+
+    @lru_cache(maxsize=1)
+    def is_npu(self) -> bool:
+        return self._enum == PlatformEnum.NPU
 
     @lru_cache(maxsize=1)
     def is_rocm(self) -> bool:
@@ -209,29 +199,8 @@ class Platform:
         return True
 
     @classmethod
-    @lru_cache(maxsize=1)
-    def is_float64_supported(cls) -> bool:
-        return True
-
-    @classmethod
-    def get_modelopt_fp4_quantize_op(cls) -> Callable | None:
-        return None
-
-    @classmethod
-    def get_modelopt_fp4_gemm_op(cls) -> tuple[Callable | None, str | None]:
-        return None, None
-
-    @classmethod
-    def get_modelopt_flashinfer_fp4_backend(cls) -> str:
-        return "auto"
-
-    @classmethod
     def get_local_torch_device(cls) -> torch.device:
         raise NotImplementedError
-
-    @classmethod
-    def set_device(cls, device: torch.device) -> None:
-        torch.get_device_module(device).set_device(device)
 
     @classmethod
     def get_attn_backend_cls_str(
@@ -296,8 +265,6 @@ class Platform:
             return torch.device("cuda", local_rank)
         elif self.is_npu():
             return torch.device("npu", local_rank)
-        elif self.is_xpu():
-            return torch.device("xpu", local_rank)
         elif self.is_musa():
             return torch.device("musa", local_rank)
         elif self.is_mps():
@@ -315,10 +282,6 @@ class Platform:
             return "mccl"
         elif self.is_mps():
             return "gloo"
-        elif self.is_cpu():
-            return "gloo"
-        elif self.is_xpu():
-            return "xccl"
         else:
             raise NotImplementedError(
                 "No Accelerators(AMD/NV/MTT GPU, AMD MI instinct accelerators) available"
@@ -390,7 +353,7 @@ class Platform:
     @classmethod
     def get_available_gpu_memory(
         cls,
-        device_id: int | None = None,
+        device_id: int = 0,
         distributed: bool = False,
         empty_cache: bool = True,
         cpu_group: Any = None,
@@ -413,8 +376,8 @@ class Platform:
         return CpuArchEnum.UNSPECIFIED
 
     @classmethod
-    def enable_dit_layerwise_offload_by_default(cls) -> bool:
-        """Whether automatic DiT layerwise offload is enabled on this platform."""
+    def enable_dit_layerwise_offload_for_wan_by_default(cls) -> bool:
+        """Whether to enable DIT layerwise offload by default on the current platform."""
         return True
 
     @classmethod

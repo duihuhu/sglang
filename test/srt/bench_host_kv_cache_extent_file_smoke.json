@@ -1,0 +1,169 @@
+{
+  "compute_interference": [
+    {
+      "compute_after_over_baseline_ratio": 0.7264149216189686,
+      "compute_after_transfer_ms": 0.06004655733704567,
+      "compute_only_ms": 0.08266151417046785,
+      "concurrent_over_max_ratio": 1.019104820370669,
+      "concurrent_wall_ms": 5.909127474296838,
+      "extent_count": 1,
+      "max_of_isolated_ms": 5.798351019620895,
+      "tokens": 128,
+      "transfer_only_ms": 5.798351019620895
+    },
+    {
+      "compute_after_over_baseline_ratio": 0.6917191155076282,
+      "compute_after_transfer_ms": 0.0571785494685173,
+      "compute_only_ms": 0.08266151417046785,
+      "concurrent_over_max_ratio": 1.0167465745251312,
+      "concurrent_wall_ms": 6.077898025978357,
+      "extent_count": 2,
+      "max_of_isolated_ms": 5.977790511678904,
+      "tokens": 128,
+      "transfer_only_ms": 5.977790511678904
+    }
+  ],
+  "config": {
+    "cuda_iters": 2,
+    "device": 0,
+    "extents": [
+      1,
+      2
+    ],
+    "gemm_size": 512,
+    "head_dim": 8,
+    "head_num": 2,
+    "layer_num": 2,
+    "metadata_iters": 3,
+    "output_json": "/workspace/sglang/test/srt/bench_host_kv_cache_extent_file_smoke.json",
+    "page_size": 16,
+    "pages_per_extent": 8,
+    "sample_pages": 8,
+    "seed": 0,
+    "storage_pages": 4,
+    "wall_iters": 2,
+    "warmup": 1
+  },
+  "hicache_file_backend": [
+    {
+      "batch_get_restore_ms": 0.44852192513644695,
+      "batch_get_restore_us_per_page": 112.13048128411174,
+      "batch_set_ms": 0.4755159607157111,
+      "batch_set_us_per_page": 118.87899017892778,
+      "correct": true,
+      "extent_count": 1,
+      "file_bytes": 16384,
+      "keys": 4,
+      "pages": 4
+    },
+    {
+      "batch_get_restore_ms": 0.33830199390649796,
+      "batch_get_restore_us_per_page": 84.57549847662449,
+      "batch_set_ms": 0.4827779484912753,
+      "batch_set_us_per_page": 120.69448712281883,
+      "correct": true,
+      "extent_count": 2,
+      "file_bytes": 16384,
+      "keys": 4,
+      "pages": 4
+    }
+  ],
+  "metadata": [
+    {
+      "descriptor_ms": 0.19142598224182925,
+      "descriptor_us_per_page": 23.928247780228656,
+      "descriptors": 8,
+      "extent_count": 1,
+      "group_ms": 0.5178663413971663,
+      "group_us_per_token": 4.045830792165361,
+      "groups": 1,
+      "pages": 8,
+      "tokens": 128
+    },
+    {
+      "descriptor_ms": 0.18925200371692577,
+      "descriptor_us_per_page": 23.65650046461572,
+      "descriptors": 8,
+      "extent_count": 2,
+      "group_ms": 0.5207023350521922,
+      "group_us_per_token": 4.067986992595252,
+      "groups": 2,
+      "pages": 8,
+      "tokens": 128
+    }
+  ],
+  "storage_marshalling": [
+    {
+      "correct": true,
+      "extent_count": 1,
+      "file_read_restore_ms": 0.44479500502347946,
+      "file_write_ms": 0.8520970586687326,
+      "pack_ms": 0.18689234275370836,
+      "pack_us_per_page": 46.72308568842709,
+      "page_bytes": 4096,
+      "pages": 4
+    },
+    {
+      "correct": true,
+      "extent_count": 2,
+      "file_read_restore_ms": 0.3452120581641793,
+      "file_write_ms": 0.2828560536727309,
+      "pack_ms": 0.1802853075787425,
+      "pack_us_per_page": 45.071326894685626,
+      "page_bytes": 4096,
+      "pages": 4
+    }
+  ],
+  "transfer_page_first": [
+    {
+      "backup_event_ms": 1.9635200500488281,
+      "correct": true,
+      "event_ms_per_token": 0.045504000037908554,
+      "extent_count": 1,
+      "groups": 1,
+      "layout": "page_first",
+      "pages": 8,
+      "restore_event_ms": 3.860991954803467,
+      "roundtrip_wall_ms": 5.780178064014763,
+      "tokens": 128
+    },
+    {
+      "backup_event_ms": 1.9911680221557617,
+      "correct": true,
+      "event_ms_per_token": 0.04652000032365322,
+      "extent_count": 2,
+      "groups": 2,
+      "layout": "page_first",
+      "pages": 8,
+      "restore_event_ms": 3.9633920192718506,
+      "roundtrip_wall_ms": 5.935136578045785,
+      "tokens": 128
+    }
+  ],
+  "transfer_page_head": [
+    {
+      "backup_event_ms": 1.9578880071640015,
+      "correct": true,
+      "event_ms_per_token": 0.045591999776661396,
+      "extent_count": 1,
+      "groups": 1,
+      "layout": "page_head",
+      "pages": 8,
+      "restore_event_ms": 3.8778879642486572,
+      "roundtrip_wall_ms": 5.827295477502048,
+      "tokens": 128
+    },
+    {
+      "backup_event_ms": 1.9993599653244019,
+      "correct": true,
+      "event_ms_per_token": 0.046843999065458775,
+      "extent_count": 2,
+      "groups": 2,
+      "layout": "page_head",
+      "pages": 8,
+      "restore_event_ms": 3.9966719150543213,
+      "roundtrip_wall_ms": 5.96502103144303,
+      "tokens": 128
+    }
+  ]
+}

@@ -14,7 +14,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding import (
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
 logger = init_logger(__name__)
 
@@ -48,20 +47,11 @@ class HeliosDecodingStage(DecodingStage):
         # Load VAE if needed
         self.load_model()
 
-        vae_dtype = PRECISION_TO_TYPE[server_args.pipeline_config.vae_precision]
         # Decode each chunk separately and concatenate in pixel space
         video_chunks = []
-        with self.use_declared_component(
-            component_name=self.component_name,
-            module=self.vae,
-        ) as vae:
-            assert vae is not None
-            self.vae = vae
-            for chunk_latents in latent_chunks:
-                chunk_video = self.decode(
-                    chunk_latents, server_args, vae_dtype=vae_dtype
-                )
-                video_chunks.append(chunk_video)
+        for chunk_latents in latent_chunks:
+            chunk_video = self.decode(chunk_latents, server_args)
+            video_chunks.append(chunk_video)
 
         frames = torch.cat(video_chunks, dim=2)
         frames = server_args.pipeline_config.post_decoding(frames, server_args)
@@ -74,4 +64,5 @@ class HeliosDecodingStage(DecodingStage):
             metrics=batch.metrics,
         )
 
+        self.offload_model()
         return output_batch

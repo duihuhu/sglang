@@ -115,18 +115,9 @@ class DPMSolverMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
         model_output: torch.Tensor,
         timestep: int,
         sample: torch.Tensor,
-        generator: torch.Generator | None = None,
-        variance_noise: torch.Tensor | None = None,
-        return_dict: bool = True,
+        **kwargs,
     ):
-        return self._inner.step(
-            model_output,
-            timestep,
-            sample,
-            generator=generator,
-            variance_noise=variance_noise,
-            return_dict=return_dict,
-        )
+        return self._inner.step(model_output, timestep, sample, **kwargs)
 
     @property
     def sigmas(self):

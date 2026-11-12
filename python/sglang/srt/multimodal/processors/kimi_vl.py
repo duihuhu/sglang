@@ -1,7 +1,6 @@
 import re
 from typing import Dict, List, Union
 
-from sglang.srt.managers.schedule_batch import MultimodalProcessorOutput
 from sglang.srt.models.kimi_vl import KimiVLForConditionalGeneration
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor as SGLangBaseProcessor,
@@ -9,13 +8,11 @@ from sglang.srt.multimodal.processors.base_processor import (
 from sglang.srt.multimodal.processors.base_processor import (
     MultimodalSpecialTokens,
 )
-from sglang.srt.multimodal.processors.kimi_common import KimiGridMMDataMixin
 
 
 # Compatible with KimiVLForConditionalGeneration
-class KimiVLImageProcessor(KimiGridMMDataMixin, SGLangBaseProcessor):
+class KimiVLImageProcessor(SGLangBaseProcessor):
     models = [KimiVLForConditionalGeneration]
-    gpu_image_decode = False  # KimiVL HF processor does not support tensor inputs
 
     def __init__(self, hf_config, server_args, _processor, *args, **kwargs):
         super().__init__(hf_config, server_args, _processor, *args, **kwargs)
@@ -34,33 +31,18 @@ class KimiVLImageProcessor(KimiGridMMDataMixin, SGLangBaseProcessor):
         *args,
         **kwargs,
     ):
-        base_output = await self.load_mm_data(
+        base_output = self.load_mm_data(
             prompt=input_text,
             image_data=image_data,
             multimodal_tokens=self.mm_tokens,
         )
-        expected_image_count = len(image_data or [])
-        if len(base_output.images) != expected_image_count:
-            raise ValueError(
-                "Kimi image placeholders must map one-to-one to image data: "
-                f"expected {expected_image_count}, loaded {len(base_output.images)}"
-            )
 
         mm_items, input_ids, _ = self.process_and_combine_mm_data(
             base_output, self.mm_tokens
         )
 
-        return MultimodalProcessorOutput(
-            input_ids=input_ids.tolist(),
-            mm_items=mm_items,
-            im_token_id=self.mm_tokens.image_token_id,
-        )
-
-    def get_mm_data(self, prompt, embeddings, **kwargs):
-        img_grid_thw = kwargs.get("img_grid_thw", None)
-        return self._build_kimi_mm_data_from_grids(
-            prompt=prompt,
-            embeddings=embeddings,
-            image_token_id=self.mm_tokens.image_token_id,
-            img_grid_thw=img_grid_thw,
-        )
+        return {
+            "input_ids": input_ids.tolist(),
+            "mm_items": mm_items,
+            "im_token_id": self.mm_tokens.image_token_id,
+        }

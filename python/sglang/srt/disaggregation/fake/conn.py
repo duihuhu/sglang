@@ -10,7 +10,6 @@ from sglang.srt.disaggregation.base.conn import (
     BaseKVSender,
     KVArgs,
     KVPoll,
-    KVTransferMetric,
 )
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.server_args import ServerArgs
@@ -28,8 +27,6 @@ class FakeKVManager(BaseKVManager):
         is_mla_backend: Optional[bool] = False,
     ):
         super().__init__(args, disaggregation_mode, server_args, is_mla_backend)
-        self.kv_args = args
-        self.req_to_decode_prefix_len = {}
 
     def register_to_bootstrap(self):
         pass
@@ -43,26 +40,17 @@ class FakeKVSender(BaseKVSender):
         bootstrap_room: int,
         dest_tp_ranks: List[int],
         pp_rank: int,
-        req_has_disagg_prefill_dp_rank: bool = False,
     ):
-        self.kv_mgr = mgr
         self.has_sent = False
-        self.conclude_state: Optional[KVPoll] = None
 
     def poll(self) -> KVPoll:
-        if self.conclude_state is not None:
-            return self.conclude_state
-        if not self.has_sent:
+        if self.has_sent is False:
             # Assume handshake completed instantly
             return KVPoll.WaitingForInput
-
-        # Assume transfer completed instantly
-        logger.debug("FakeKVSender poll success")
-        self.conclude_state = KVPoll.Success
-        return KVPoll.Success
-
-    def get_transfer_metric(self) -> KVTransferMetric:
-        return KVTransferMetric()
+        else:
+            # Assume transfer completed instantly
+            logger.debug("FakeKVSender poll success")
+            return KVPoll.Success
 
     def init(
         self,
@@ -77,8 +65,7 @@ class FakeKVSender(BaseKVSender):
     def send(
         self,
         kv_indices: npt.NDArray[np.int32],
-        state_indices: Optional[List] = None,
-        num_kv_tokens: Optional[int] = None,
+        state_indices: Optional[List[int]] = None,
     ):
         self.has_sent = True
         logger.debug(
@@ -88,9 +75,6 @@ class FakeKVSender(BaseKVSender):
     def failure_exception(self):
         raise Exception("Fake KVSender Exception")
 
-    def abort(self):
-        self.conclude_state = KVPoll.Failed
-
 
 class FakeKVReceiver(BaseKVReceiver):
     def __init__(
@@ -98,43 +82,29 @@ class FakeKVReceiver(BaseKVReceiver):
         mgr: BaseKVManager,
         bootstrap_addr: str,
         bootstrap_room: Optional[int] = None,
+        prefill_dp_rank: Optional[int] = None,
     ):
-        self.bootstrap_done = False
-        self.has_sent_metadata = False
-        self.require_staging: bool = False
-        self.conclude_state: Optional[KVPoll] = None
+        self.has_init = False
 
     def poll(self) -> KVPoll:
-        if self.conclude_state is not None:
-            return self.conclude_state
-        if not self.bootstrap_done:
-            return KVPoll.Bootstrapping
-        if not self.has_sent_metadata:
+        if self.has_init is False:
+            # Assume handshake completed instantly
             return KVPoll.WaitingForInput
-        logger.debug("FakeKVReceiver poll success")
-        self.conclude_state = KVPoll.Success
-        return KVPoll.Success
+        else:
+            # Assume transfer completed instantly
+            logger.debug("FakeKVReceiver poll success")
+            return KVPoll.Success
 
     def init(
         self,
-        prefill_dp_rank: int,
-    ):
-        self.bootstrap_done = True
-
-    def send_metadata(
-        self,
         kv_indices: list[int],
         aux_index: Optional[int] = None,
-        state_indices: Optional[List] = None,
-        decode_prefix_len: Optional[int] = None,
+        state_indices: Optional[List[int]] = None,
     ):
-        self.has_sent_metadata = True
+        self.has_init = True
         logger.debug(
-            f"FakeKVReceiver send_metadata with kv_indices: {kv_indices}, aux_index: {aux_index}, state_indices: {state_indices}"
+            f"FakeKVReceiver init with kv_indices: {kv_indices}, aux_index: {aux_index}, state_indices: {state_indices}"
         )
 
     def failure_exception(self):
         raise Exception("Fake KVReceiver Exception")
-
-    def abort(self):
-        self.conclude_state = KVPoll.Failed

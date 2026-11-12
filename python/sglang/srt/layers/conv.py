@@ -14,14 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from sglang.kernels.fused_op import BaseFusedOp
-from sglang.srt.layers.amx_utils import PackWeightMethod
-from sglang.srt.utils import cpu_has_amx_support, is_cpu, use_intel_amx_backend
-
-_is_cpu = is_cpu()
-_is_cpu_amx_available = cpu_has_amx_support()
-if _is_cpu and _is_cpu_amx_available:
-    conv3d_embed = torch.ops.sgl_kernel.conv3d_embed_cpu
+from sglang.srt.layers.utils.multi_platform import MultiPlatformOp
 
 _VALID_PADDING_STRINGS = {"same", "valid"}
 _VALID_PADDING_MODES = {"zeros", "reflect", "replicate", "circular"}
@@ -98,7 +91,7 @@ def _validate_conv_args(
             raise ValueError("padding='same' is not supported for strided convolutions")
 
 
-class Conv2dLayer(BaseFusedOp):
+class Conv2dLayer(MultiPlatformOp):
     """Drop-in replacement for nn.Conv2d. Linear optimization disabled by default."""
 
     def __init__(
@@ -204,7 +197,7 @@ class Conv2dLayer(BaseFusedOp):
         return self._forward_conv(x)
 
 
-class Conv3dLayer(BaseFusedOp):
+class Conv3dLayer(MultiPlatformOp):
     """Drop-in replacement for nn.Conv3d with automatic linear optimization."""
 
     def __init__(
@@ -258,8 +251,6 @@ class Conv3dLayer(BaseFusedOp):
         else:
             self.register_parameter("bias", None)
 
-        if _is_cpu and _is_cpu_amx_available and self.bias is not None:
-            self.quant_method = PackWeightMethod(weight_names=["weight"])
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -297,16 +288,6 @@ class Conv3dLayer(BaseFusedOp):
             self.dilation,
             self.groups,
         )
-
-    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        if use_intel_amx_backend(self):
-            return conv3d_embed(
-                x,
-                self.weight,
-                self.bias,
-                is_vnni=True,
-            )
-        return self.forward_native(x)
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         if self.enable_linear:

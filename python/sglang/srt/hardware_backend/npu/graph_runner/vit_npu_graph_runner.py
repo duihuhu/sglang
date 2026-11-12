@@ -27,6 +27,7 @@ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
 )
 from sglang.srt.layers.attention.vision import VisionAttention
 from sglang.srt.multimodal.vit_cuda_graph_runner import ViTCudaGraphRunner
+from sglang.srt.server_args import get_global_server_args
 
 
 class ViTNpuGraphRunner(ViTCudaGraphRunner):
@@ -69,19 +70,17 @@ class ViTNpuGraphRunner(ViTCudaGraphRunner):
         graph = torch_npu.npu.NPUGraph()
         vit = self.vit
 
-        backend = self._attn_backend
+        override_backend = get_global_server_args().mm_attention_backend
         with torch_npu.npu.graph(graph, pool=ViTNpuGraphRunner._graph_memory_pool):
             y = None
             deepstack_outs: List[torch.Tensor] = []
             deepstack_capture_idx = 0
 
             for layer_num, blk in enumerate(vit.blocks):
-                if backend == "ascend_attn":
+                if override_backend == "ascend_attn":
                     cu_seq_lens = self.cu_seq_lens[graph_key]
                 else:
-                    raise RuntimeError(
-                        f"ViT NPU graph does not support attention backend: {backend}"
-                    )
+                    raise RuntimeError("Not supported ViT attention backend")
 
                 if layer_num == 0:
                     y = blk(
@@ -165,9 +164,8 @@ class ViTNpuGraphRunner(ViTCudaGraphRunner):
                 self.sin_cos_ws[graph_key] = (rotary_pos_emb_cos, rotary_pos_emb_sin)
 
         if graph_key not in self.cu_seq_lens:
-            # TND fused attention expects cumulative seqlens (cu_seqlens[1:]),
-            # not per-sequence lengths.
-            self.cu_seq_lens[graph_key] = cu_seqlens[1:].to("cpu").to(torch.int32)
+            seq_lens = cu_seqlens[1:] - cu_seqlens[:-1]
+            self.cu_seq_lens[graph_key] = seq_lens.to("cpu").to(torch.int32)
 
         if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
             self._create_graph(

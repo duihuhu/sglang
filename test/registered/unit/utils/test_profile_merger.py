@@ -13,15 +13,15 @@ import shutil
 import tempfile
 import unittest
 
-from sglang.srt.managers.io_struct import ProfileReq, ProfileReqType
+from sglang.srt.managers.io_struct import ProfileReq, ProfileReqInput, ProfileReqType
 from sglang.srt.utils.profile_merger import ProfileMerger
-from sglang.test.ci.ci_register import register_cpu_ci
-from sglang.test.test_utils import CustomTestCase
+from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 
-register_cpu_ci(est_time=8, suite="base-a-test-cpu")
+register_cuda_ci(est_time=8, suite="stage-b-test-small-1-gpu")
+register_amd_ci(est_time=8, suite="stage-b-test-small-1-gpu-amd")
 
 
-class TestProfileMerger(CustomTestCase):
+class TestProfileMerger(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.profile_id = "test_profile_123"
@@ -200,19 +200,48 @@ class TestProfileMerger(CustomTestCase):
             empty_merger.merge_chrome_traces()
 
 
-class TestProfileMergerIntegration(CustomTestCase):
+class TestProfileMergerIntegration(unittest.TestCase):
 
     def test_data_structures_merge_profiles(self):
-        # Test ProfileReq
-        req = ProfileReq()
-        self.assertFalse(req.merge_profiles)
-        self.assertEqual(req.req_type, ProfileReqType.START_PROFILE)
+        # Test ProfileReqInput
+        req_input = ProfileReqInput()
+        self.assertFalse(req_input.merge_profiles)
 
-        req = ProfileReq(merge_profiles=True)
+        req_input = ProfileReqInput(merge_profiles=True)
+        self.assertTrue(req_input.merge_profiles)
+
+        # Test ProfileReq
+        req = ProfileReq(type=ProfileReqType.START_PROFILE)
+        self.assertFalse(req.merge_profiles)
+
+        req = ProfileReq(type=ProfileReqType.START_PROFILE, merge_profiles=True)
         self.assertTrue(req.merge_profiles)
 
+    def test_integration_parameters(self):
+        import inspect
 
-class TestProfileMergerEdgeCases(CustomTestCase):
+        # Test TokenizerManager
+        from sglang.srt.managers.tokenizer_communicator_mixin import (
+            TokenizerCommunicatorMixin,
+        )
+
+        sig = inspect.signature(TokenizerCommunicatorMixin.start_profile)
+        self.assertIn("merge_profiles", sig.parameters)
+
+        # Test SchedulerProfilerMixin
+        from sglang.srt.managers.scheduler_profiler_mixin import SchedulerProfilerMixin
+
+        sig = inspect.signature(SchedulerProfilerMixin.init_profile)
+        self.assertIn("merge_profiles", sig.parameters)
+
+        # Test CLI profiler
+        from sglang.profiler import run_profile
+
+        sig = inspect.signature(run_profile)
+        self.assertIn("merge_profiles", sig.parameters)
+
+
+class TestProfileMergerEdgeCases(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.profile_id = "test_edge_cases"

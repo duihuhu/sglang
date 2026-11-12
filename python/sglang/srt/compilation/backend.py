@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/v0.10.0/vllm/compilation/backend.py
 
 
@@ -23,10 +21,7 @@ from sglang.srt.compilation.compiler_interface import EagerAdapter, InductorAdap
 from sglang.srt.compilation.cuda_piecewise_backend import CUDAPiecewiseBackend
 from sglang.srt.compilation.npu_piecewise_backend import NPUPiecewiseBackend
 from sglang.srt.compilation.pass_manager import PostGradPassManager
-from sglang.srt.compilation.xpu_piecewise_backend import XPUPiecewiseBackend
-from sglang.srt.environ import envs
-from sglang.srt.platforms import current_platform
-from sglang.srt.utils.common import is_npu, is_xpu
+from sglang.srt.utils.common import is_npu
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +47,7 @@ def make_backend(
     sglang_backend,
 ):
 
-    if current_platform.is_out_of_tree():
-        backend_cls = current_platform.get_piecewise_backend_cls()
-    elif is_xpu():
-        backend_cls = XPUPiecewiseBackend
-    elif is_npu():
-        backend_cls = NPUPiecewiseBackend
-    else:
-        backend_cls = CUDAPiecewiseBackend
+    backend_cls = CUDAPiecewiseBackend if not is_npu() else NPUPiecewiseBackend
     return backend_cls(
         graph,
         compile_config,
@@ -268,6 +256,9 @@ def split_graph(
     return split_gm, outputs
 
 
+# we share the global graph pool among all the backends
+global_graph_pool = None
+
 compilation_start_time = 0.0
 
 
@@ -402,7 +393,9 @@ class SGLangBackend:
         self.inductor_config["post_grad_custom_post_pass"] = self.post_grad_pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
-        base_cache_dir = envs.SGLANG_CACHE_DIR.get()
+        base_cache_dir = os.path.expanduser(
+            os.getenv("SGLANG_CACHE_DIR", "~/.cache/sglang/")
+        )
 
         cache_hash = self.compiler_manager.compute_hash()
         cache_dir = os.path.join(

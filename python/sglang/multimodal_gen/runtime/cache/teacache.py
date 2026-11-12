@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
+from sglang.multimodal_gen.configs.models import DiTConfig
+
 if TYPE_CHECKING:
     from sglang.multimodal_gen.configs.sample.teacache import TeaCacheParams
 
@@ -125,7 +127,7 @@ class TeaCacheMixin:
     # Models that support CFG cache separation (wan/hunyuan/zimage)
     # Models not in this set (flux/qwen) auto-disable TeaCache when CFG is enabled
     _CFG_SUPPORTED_PREFIXES: set[str] = {"wan", "hunyuan", "zimage"}
-    prefix: str
+    config: DiTConfig
 
     def _init_teacache_state(self) -> None:
         """Initialize TeaCache state. Call this in subclass __init__."""
@@ -133,7 +135,9 @@ class TeaCacheMixin:
         self.cnt = 0
         self.enable_teacache = True
         # Flag indicating if this model supports CFG cache separation
-        self._supports_cfg_cache = self.prefix.lower() in self._CFG_SUPPORTED_PREFIXES
+        self._supports_cfg_cache = (
+            self.config.prefix.lower() in self._CFG_SUPPORTED_PREFIXES
+        )
 
         # Always initialize positive cache fields (used in all modes)
         self.previous_modulated_input: torch.Tensor | None = None
@@ -293,7 +297,7 @@ class TeaCacheMixin:
             do_cfg=do_cfg,
             is_cfg_negative=is_cfg_negative,
             teacache_thresh=teacache_params.teacache_thresh,
-            coefficients=teacache_params.get_coefficients(),
+            coefficients=teacache_params.coefficients,
             teacache_params=teacache_params,
         )
 

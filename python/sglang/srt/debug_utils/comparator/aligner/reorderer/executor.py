@@ -8,10 +8,8 @@ from sglang.srt.debug_utils.comparator.aligner.reorderer.types import (
     ZigzagToNaturalThdParams,
 )
 from sglang.srt.debug_utils.comparator.dims_spec import (
-    apply_dim_names,
-    get_dim_names,
     resolve_dim_by_name,
-    without_dim_names,
+    strip_dim_names,
 )
 
 
@@ -49,8 +47,8 @@ def _reorder_zigzag_to_natural_thd(
     Each seq in seq_lens is independently reordered from zigzag to natural order
     along the given dim.
     """
-    names: tuple[Optional[str], ...] = get_dim_names(tensor)
-    stripped: torch.Tensor = without_dim_names(tensor)
+    stripped: torch.Tensor = strip_dim_names(tensor)
+    names: tuple[Optional[str], ...] = tensor.names
 
     split_sizes: list[int] = list(seq_lens)
     remainder: int = stripped.shape[dim] - sum(split_sizes)
@@ -76,7 +74,7 @@ def _reorder_zigzag_to_natural_thd(
     result: torch.Tensor = torch.cat(reordered_segments, dim=dim)
 
     if names[0] is not None:
-        result = apply_dim_names(result, list(names))
+        result = result.refine_names(*names)
     return result
 
 
@@ -88,8 +86,8 @@ def _reorder_zigzag_to_natural(
     Generalized from Megatron-LM _undo_attention_load_balancing
     (megatron/core/ssm/mamba_context_parallel.py:360-373).
     """
-    names: tuple[Optional[str], ...] = get_dim_names(tensor)
-    stripped: torch.Tensor = without_dim_names(tensor)
+    stripped: torch.Tensor = strip_dim_names(tensor)
+    names: tuple[Optional[str], ...] = tensor.names
 
     num_chunks: int = cp_size * 2
     chunks: tuple[torch.Tensor, ...] = stripped.chunk(num_chunks, dim=dim)
@@ -99,5 +97,5 @@ def _reorder_zigzag_to_natural(
     result: torch.Tensor = torch.cat([chunks[i] for i in order], dim=dim)
 
     if names[0] is not None:
-        result = apply_dim_names(result, list(names))
+        result = result.refine_names(*names)
     return result

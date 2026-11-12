@@ -4,6 +4,7 @@ Usage:
     python3 -m pytest test/registered/hicache/test_hicache_storage_file_backend.py -v
 """
 
+import concurrent.futures
 import json
 import os
 import random
@@ -19,20 +20,21 @@ import requests
 from sglang.benchmark.utils import get_tokenizer
 from sglang.srt.utils import kill_process_tree
 from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
-from sglang.test.run_eval import run_eval
+from sglang.test.few_shot_gsm8k import run_eval as run_eval_few_shot_gsm8k
 from sglang.test.test_utils import (
     DEFAULT_MLA_MODEL_NAME_FOR_TEST,
     DEFAULT_MODEL_NAME_FOR_TEST,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
+    flush_cache_with_retry,
     is_in_ci,
     popen_launch_server,
 )
 from sglang.utils import wait_for_http_ready
 
-register_cuda_ci(est_time=148, stage="base-b", runner_config="2-gpu-large")
-register_amd_ci(est_time=526, suite="stage-b-test-2-gpu-large-amd")
+register_cuda_ci(est_time=200, suite="stage-b-test-large-2-gpu")
+register_amd_ci(est_time=526, suite="stage-b-test-large-2-gpu-amd")
 
 
 class HiCacheStorageBaseMixin:
@@ -62,13 +64,11 @@ class HiCacheStorageBaseMixin:
     @classmethod
     def tearDownClass(cls):
         """Clean up test environment"""
-        if hasattr(cls, "process") and cls.process:
-            kill_process_tree(cls.process.pid)
+        kill_process_tree(cls.process.pid)
 
         import shutil
 
-        if hasattr(cls, "temp_dir"):
-            shutil.rmtree(cls.temp_dir, ignore_errors=True)
+        shutil.rmtree(cls.temp_dir, ignore_errors=True)
 
     @classmethod
     def _get_model_name(cls):
@@ -169,14 +169,9 @@ class HiCacheStorageBaseMixin:
         meta = response_json.get("meta_info", {})
         return int(meta.get("cached_tokens", 0))
 
-    def flush_cache(self):
+    def flush_cache(self) -> bool:
         """Flush device cache to force remote storage access."""
-        res = requests.post(
-            f"{self.base_url}/flush_cache",
-            params={"timeout": 30},
-            timeout=40,
-        )
-        res.raise_for_status()
+        return flush_cache_with_retry(self.base_url)
 
     def gen_prompt(self, token_num: int) -> str:
         """Generate a random prompt of specified token length using tokenizer vocabulary."""
@@ -190,7 +185,8 @@ class HiCacheStorageBaseMixin:
         self.send_request(self.gen_prompt(1), max_tokens=150)
 
         # Flush device cache to force remote storage access
-        self.flush_cache()
+        time.sleep(2)
+        self.assertTrue(self.flush_cache(), "Cache flush should succeed")
 
     def test_basic_backup_and_prefetch(self):
         """Test storage and retrieval of large context through remote cache"""
@@ -237,6 +233,263 @@ class TestHiCacheStoragePageFirstLayout(HiCacheStorageBaseMixin, CustomTestCase)
 
 
 @unittest.skipIf(is_in_ci(), "To reduce the CI execution time.")
+class TestHiCacheStoragePageFirstRuntimeExtentGrow(
+    HiCacheStorageBaseMixin, CustomTestCase
+):
+    """Real serving test that forces HiCache storage allocations into an appended extent."""
+
+    @classmethod
+    def _get_model_name(cls):
+        """Use the local model cache available in the remote GPU test environment."""
+        return "/mnt/data/models/Llama-3.1-8B-Instruct"
+
+    @classmethod
+    def _get_additional_server_args_and_env(cls):
+        """Grow host KV after startup and reserve the old extent to force new-extent use."""
+        server_args = {"--hicache-mem-layout": "page_first"}
+        env_vars = {
+            "SGLANG_TEST_HICACHE_GROW_EXTENT_TOKENS": "8192",
+            "SGLANG_TEST_HICACHE_RESERVE_OLD_EXTENT": "1",
+        }
+        return server_args, env_vars
+
+    def get_extent_debug(self) -> Dict:
+        response = requests.get(f"{self.base_url}/server_info", timeout=30)
+        self.assertEqual(response.status_code, 200, response.text)
+        internal_states = response.json().get("internal_states", [])
+        self.assertGreater(len(internal_states), 0)
+        extent_debug = internal_states[0].get("hicache_extent_debug")
+        self.assertIsNotNone(extent_debug)
+        return extent_debug
+
+    def assert_extent_transfer_records_include_fragmentation(self, records):
+        for record in records:
+            for key in ["pages", "page_runs", "max_run_pages", "avg_run_pages"]:
+                self.assertIn(key, record)
+            self.assertGreater(record["pages"], 0)
+            self.assertGreater(record["page_runs"], 0)
+            self.assertLessEqual(record["page_runs"], record["pages"])
+            self.assertGreater(record["max_run_pages"], 0)
+            self.assertGreater(record["avg_run_pages"], 0.0)
+            self.assertLessEqual(record["avg_run_pages"], record["max_run_pages"])
+            for group in record["groups"]:
+                for key in ["page_runs", "max_run_pages", "avg_run_pages"]:
+                    self.assertIn(key, group)
+                self.assertGreater(group["pages"], 0)
+                self.assertGreater(group["page_runs"], 0)
+                self.assertLessEqual(group["page_runs"], group["pages"])
+                self.assertGreater(group["max_run_pages"], 0)
+                self.assertGreater(group["avg_run_pages"], 0.0)
+                self.assertLessEqual(group["avg_run_pages"], group["max_run_pages"])
+
+    def assert_new_extent_is_active_for_test(self) -> Dict:
+        extent_debug = self.get_extent_debug()
+        self.assertEqual(extent_debug["extent_count"], 2)
+        self.assertEqual(extent_debug["extents"][0]["state"], "draining")
+        self.assertTrue(extent_debug["test_old_extent_marked_draining"])
+        self.assertGreater(extent_debug["extents"][1]["free_slots"], 0)
+        self.assertEqual(
+            extent_debug["available_size"], extent_debug["extents"][1]["free_slots"]
+        )
+        self.assertTrue(extent_debug["extents"][0]["pinned"])
+        self.assertTrue(extent_debug["extents"][1]["pinned"])
+        return extent_debug
+
+    def test_basic_backup_and_prefetch(self):
+        before = self.assert_new_extent_is_active_for_test()
+
+        super().test_basic_backup_and_prefetch()
+
+        after = self.assert_new_extent_is_active_for_test()
+        self.assertLess(
+            after["extents"][1]["free_slots"],
+            before["extents"][1]["free_slots"],
+            "Serving workload should allocate from the appended extent.",
+        )
+
+
+@unittest.skipIf(is_in_ci(), "To reduce the CI execution time.")
+class TestHiCacheStoragePageFirstDirectRuntimeExtentGrow(
+    TestHiCacheStoragePageFirstRuntimeExtentGrow
+):
+    """Real serving test for appended extents with the direct CUDA memcpy backend."""
+
+    @classmethod
+    def _get_additional_server_args_and_env(cls):
+        server_args = {
+            "--hicache-mem-layout": "page_first_direct",
+            "--hicache-io-backend": "direct",
+        }
+        env_vars = {
+            "SGLANG_TEST_HICACHE_GROW_EXTENT_TOKENS": "8192",
+            "SGLANG_TEST_HICACHE_RESERVE_OLD_EXTENT": "1",
+            "SGLANG_TEST_HICACHE_TRACE_EXTENT_TRANSFERS": "1",
+        }
+        return server_args, env_vars
+
+    def test_basic_backup_and_prefetch(self):
+        super().test_basic_backup_and_prefetch()
+
+        extent_debug = self.get_extent_debug()
+        records = extent_debug.get("test_extent_transfer_records", [])
+        self.assertGreater(len(records), 0)
+        directions = {record["direction"] for record in records}
+        self.assertIn("D2H", directions)
+        self.assertIn("H2D", directions)
+        self.assert_extent_transfer_records_include_fragmentation(records)
+        for record in records:
+            self.assertEqual(record["io_backend"], "direct")
+            self.assertEqual(record["layout"], "page_first_direct")
+            self.assertLessEqual(record["group_count"], extent_debug["extent_count"])
+            self.assertGreater(record["total_tokens"], 0)
+            for group in record["groups"]:
+                self.assertGreater(group["pages"], 0)
+                self.assertEqual(group["extent_id"], 1)
+
+
+@unittest.skipIf(is_in_ci(), "To reduce the CI execution time.")
+class TestHiCacheStoragePageFirstDirectRuntimeExtentNaturalPressure(
+    TestHiCacheStoragePageFirstRuntimeExtentGrow
+):
+    """Real serving test that naturally crosses from the old extent to the appended extent."""
+
+    @classmethod
+    def _get_additional_server_args_and_env(cls):
+        server_args = {
+            "--hicache-mem-layout": "page_first_direct",
+            "--hicache-io-backend": "direct",
+        }
+        env_vars = {
+            "SGLANG_TEST_HICACHE_GROW_EXTENT_TOKENS": "8192",
+            "SGLANG_TEST_HICACHE_RESERVE_OLD_EXTENT_LEAVE_TOKENS": "1024",
+            "SGLANG_TEST_HICACHE_TRACE_EXTENT_TRANSFERS": "1",
+        }
+        return server_args, env_vars
+
+    def wait_for_hicache_async_idle(self, timeout: float = 60.0) -> Dict:
+        deadline = time.time() + timeout
+        last_debug = None
+        while time.time() < deadline:
+            last_debug = self.get_extent_debug()
+            ongoing = [
+                last_debug.get("ongoing_write_through", 0),
+                last_debug.get("ongoing_load_back", 0),
+                last_debug.get("ongoing_prefetch", 0),
+                last_debug.get("ongoing_backup", 0),
+            ]
+            if all(value == 0 for value in ongoing):
+                return last_debug
+            time.sleep(1)
+        self.fail(f"HiCache async operations did not drain: {last_debug}")
+
+    def test_natural_serving_pressure_crosses_old_and_new_extents(self):
+        before = self.get_extent_debug()
+        self.assertEqual(before["extent_count"], 2)
+        self.assertEqual(before["extents"][0]["state"], "active")
+        self.assertEqual(before["extents"][1]["state"], "active")
+        self.assertEqual(before["extents"][0]["free_slots"], 1024)
+        self.assertGreaterEqual(before["extents"][1]["free_slots"], 768)
+
+        prompts = [self.gen_prompt(768) for _ in range(3)]
+        for prompt in prompts:
+            response = self.send_request(prompt, max_tokens=1)
+            self.assertIsNotNone(response)
+
+        after_population = self.get_extent_debug()
+        self.assertLess(
+            after_population["extents"][0]["free_slots"],
+            before["extents"][0]["free_slots"],
+            "Old extent should be used before natural pressure reaches the appended extent.",
+        )
+        self.assertLess(
+            after_population["extents"][1]["free_slots"],
+            before["extents"][1]["free_slots"],
+            "Natural serving pressure should allocate from the appended extent.",
+        )
+
+        self.wait_for_hicache_async_idle()
+        self.assertTrue(self.flush_cache(), "Cache flush should succeed")
+
+        first_replay = self.send_request(prompts[0], max_tokens=1)
+        last_replay = self.send_request(prompts[-1], max_tokens=1)
+        self.assertGreater(self.get_cached_tokens(first_replay), 700)
+        self.assertGreater(self.get_cached_tokens(last_replay), 700)
+
+        extent_debug = self.get_extent_debug()
+        records = extent_debug.get("test_extent_transfer_records", [])
+        self.assertGreater(len(records), 0)
+        directions = {record["direction"] for record in records}
+        self.assertIn("D2H", directions)
+        self.assertIn("H2D", directions)
+        self.assert_extent_transfer_records_include_fragmentation(records)
+        seen_extent_ids = {
+            group["extent_id"]
+            for record in records
+            for group in record["groups"]
+        }
+        self.assertIn(0, seen_extent_ids)
+        self.assertIn(1, seen_extent_ids)
+
+
+@unittest.skipIf(is_in_ci(), "To reduce the CI execution time.")
+class TestHiCacheStoragePageFirstDirectRuntimeExtentConcurrentPressure(
+    TestHiCacheStoragePageFirstDirectRuntimeExtentNaturalPressure
+):
+    """Concurrent serving pressure across active old extent and appended extent."""
+
+    def test_concurrent_serving_pressure_crosses_old_and_new_extents(self):
+        before = self.get_extent_debug()
+        self.assertEqual(before["extent_count"], 2)
+        self.assertEqual(before["extents"][0]["state"], "active")
+        self.assertEqual(before["extents"][1]["state"], "active")
+        self.assertEqual(before["extents"][0]["free_slots"], 1024)
+        self.assertGreaterEqual(before["extents"][1]["free_slots"], 4096)
+
+        prompts = [self.gen_prompt(768) for _ in range(6)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [
+                executor.submit(self.send_request, prompt, 1)
+                for prompt in prompts
+            ]
+            responses = [future.result(timeout=90) for future in futures]
+        self.assertEqual(len(responses), len(prompts))
+
+        after_population = self.get_extent_debug()
+        self.assertLess(
+            after_population["extents"][0]["free_slots"],
+            before["extents"][0]["free_slots"],
+            "Concurrent workload should consume the remaining old extent pages.",
+        )
+        self.assertLess(
+            after_population["extents"][1]["free_slots"],
+            before["extents"][1]["free_slots"],
+            "Concurrent workload should allocate from the appended extent.",
+        )
+
+        self.wait_for_hicache_async_idle(timeout=120.0)
+        self.assertTrue(self.flush_cache(), "Cache flush should succeed")
+
+        replay_indices = [0, 1, len(prompts) - 2, len(prompts) - 1]
+        for index in replay_indices:
+            replay = self.send_request(prompts[index], max_tokens=1)
+            self.assertGreater(self.get_cached_tokens(replay), 700)
+
+        extent_debug = self.get_extent_debug()
+        records = extent_debug.get("test_extent_transfer_records", [])
+        self.assertGreater(len(records), 0)
+        directions = {record["direction"] for record in records}
+        self.assertIn("D2H", directions)
+        self.assertIn("H2D", directions)
+        self.assert_extent_transfer_records_include_fragmentation(records)
+        seen_extent_ids = {
+            group["extent_id"]
+            for record in records
+            for group in record["groups"]
+        }
+        self.assertIn(0, seen_extent_ids)
+        self.assertIn(1, seen_extent_ids)
+
+@unittest.skipIf(is_in_ci(), "To reduce the CI execution time.")
 class TestHiCacheStorageMLA(HiCacheStorageBaseMixin, CustomTestCase):
     """MLA Model tests for HiCache Storage functionality"""
 
@@ -279,7 +532,6 @@ class TestHiCacheStorageAccuracy(HiCacheStorageBaseMixin, CustomTestCase):
 
         return server_args, {}
 
-    @unittest.skipIf(is_in_ci(), "To skip flaky test")
     def test_eval_accuracy(self):
         """Test eval accuracy with cache persistence across cache flushes"""
         run_eval_accuracy_test(self)
@@ -296,33 +548,35 @@ def run_eval_accuracy_test(test_instance, accuracy_threshold: float = 0.03):
     # First evaluation - populate cache
     print("Phase 1: Running initial GSM8K evaluation to populate cache...")
     args_initial = SimpleNamespace(
-        base_url=f"http://{test_instance.base_host}:{test_instance.base_port}",
-        eval_name="gsm8k",
-        api="completion",
-        max_tokens=512,
-        num_examples=200,
-        num_threads=64,
+        num_shots=5,
+        data_path=None,
+        num_questions=50,
+        max_new_tokens=512,
+        parallel=10,
+        host=f"http://{test_instance.base_host}",
+        port=int(test_instance.base_port),
     )
-    metrics_initial = run_eval(args_initial)
+    metrics_initial = run_eval_few_shot_gsm8k(args_initial)
 
     # Flush cache to force remote storage access
     print("Phase 2: Flushing device cache...")
-    test_instance.flush_cache()
+    test_instance.assertTrue(test_instance.flush_cache(), "Cache flush should succeed")
+    time.sleep(2)
 
     # Second evaluation - should use remote cache
     print("Phase 3: Running second GSM8K evaluation using remote cache...")
-    metrics_cached = run_eval(args_initial)
+    metrics_cached = run_eval_few_shot_gsm8k(args_initial)
 
     # Verify accuracy consistency
-    accuracy_diff = abs(metrics_initial["score"] - metrics_cached["score"])
+    accuracy_diff = abs(metrics_initial["accuracy"] - metrics_cached["accuracy"])
     print(f"Accuracy difference: {accuracy_diff:.4f}")
 
     # Assertions
     test_instance.assertGreater(
-        metrics_initial["score"], 0.6, "Initial accuracy should be reasonable"
+        metrics_initial["accuracy"], 0.6, "Initial accuracy should be reasonable"
     )
     test_instance.assertGreater(
-        metrics_cached["score"], 0.6, "Cached accuracy should be reasonable"
+        metrics_cached["accuracy"], 0.6, "Cached accuracy should be reasonable"
     )
     test_instance.assertLess(
         accuracy_diff,

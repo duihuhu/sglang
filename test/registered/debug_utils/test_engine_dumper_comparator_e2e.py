@@ -15,7 +15,6 @@ so the YAML only needs ``dumper.dump(...)`` calls.
 
 import os
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -28,20 +27,14 @@ pytestmark = pytest.mark.filterwarnings(
 )
 
 from sglang.srt.utils import kill_process_tree
-from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
+from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     popen_launch_server,
 )
 
-register_cuda_ci(est_time=290, stage="nightly", runner_config="4-gpu-h100")
-register_amd_ci(
-    est_time=300,
-    suite="nightly-amd-4-gpu",
-    nightly=True,
-    disabled="TP=2 vs TP=4 numerical mismatch on AMD (comparator fails tolerance check)",
-)
+register_cuda_ci(est_time=300, suite="nightly-4-gpu", nightly=True)
 
 MODEL = "Qwen/Qwen3-30B-A3B"
 BASELINE_TP = 2
@@ -84,20 +77,23 @@ patches:
               hidden_states=hidden_states,
               forward_batch=forward_batch,
           )
-        append: "dumper.dump('attn_output', hidden_states, dims='t h[attn_tp:partial] # tp:replicated')"
+        append: "dumper.dump('attn_output', hidden_states, dims='t h[tp:partial]')"
       - match: |
           hidden_states, residual = self.layer_communicator.prepare_mlp(
               hidden_states, residual, forward_batch
           )
         append: "dumper.dump('pre_mlp_residual', hidden_states, dims='t h # tp:replicated')"
-      - match: "hidden_states = self.mlp(hidden_states, forward_batch)"
-        append: "dumper.dump('mlp_output', hidden_states, dims='t h[moe_tp:partial] # tp:replicated')"
+      - match: |
+          hidden_states = self.mlp(
+              hidden_states, forward_batch, should_allreduce_fusion, use_reduce_scatter
+          )
+        append: "dumper.dump('mlp_output', hidden_states, dims='t h[tp:partial]')"
 
   # --- attention internals ---
   - target: sglang.srt.models.qwen3_moe.Qwen3MoeAttention.forward_core
     edits:
       - match: "output, _ = self.o_proj(attn_output)"
-        prepend: "dumper.dump('attn_pre_o_proj', attn_output, dims='t attn_h[attn_tp] # tp:replicated')"
+        prepend: "dumper.dump('attn_pre_o_proj', attn_output, dims='t attn_h[tp]')"
 
   # --- moe internals ---
   - target: sglang.srt.models.qwen3_moe.Qwen3MoeSparseMoeBlock.forward_normal
@@ -105,21 +101,14 @@ patches:
       - match: "router_logits, _ = self.gate(hidden_states)"
         append: "dumper.dump('moe_router_logits', router_logits, dims='t num_experts # tp:replicated')"
       - match: "final_hidden_states = self.experts(hidden_states, topk_output)"
-        append: "dumper.dump('moe_expert_output', final_hidden_states, dims='t h[moe_tp:partial] # tp:replicated')"
+        append: "dumper.dump('moe_expert_output', final_hidden_states, dims='t h[tp:partial]')"
 """
 
 PATCH_CONFIG_DP_ATTENTION_YAML: str = """\
 patches:
   # --- decoder layer level (aligned with miles test) ---
-  # dp-attention TP=2 DP=2 uses only 2 GPUs:
-  #   GPU 0: tp=0, attn_tp=0 (attn_tp_size=1), attn_dp=0
-  #   GPU 1: tp=1, attn_tp=0 (attn_tp_size=1), attn_dp=1
-  # All sub-axes (attn_tp, moe_tp, attn_dp) are uniquely determined by tp_rank,
-  # so only tp:replicated is needed — sub-axes are auto-resolved as implicitly replicated.
-  #
-  # Attn tensors are NOT TP-sharded (attn_tp_size=1).
-  # mlp_output is still moe_tp:partial — the reduce-scatter happens in
-  # postprocess_layer(), after the dump point.
+  # In dp-attention mode: attn tensors are NOT TP-sharded (attn_tp_size=1),
+  # and mlp_output is already all-reduced inside forward_normal().
   # layer_input is dumped after prepare_attn which DP-distributes tokens,
   # so it needs dp:=attn_dp to filter to the non-empty DP rank.
   - target: sglang.srt.models.qwen3_moe.Qwen3MoeDecoderLayer.forward
@@ -147,14 +136,17 @@ patches:
               hidden_states, residual, forward_batch
           )
         append: "dumper.dump('pre_mlp_residual', hidden_states, dims='t h # tp:replicated')"
-      - match: "hidden_states = self.mlp(hidden_states, forward_batch)"
-        append: "dumper.dump('mlp_output', hidden_states, dims='t h[moe_tp:partial] # tp:replicated')"
+      - match: |
+          hidden_states = self.mlp(
+              hidden_states, forward_batch, should_allreduce_fusion, use_reduce_scatter
+          )
+        append: "dumper.dump('mlp_output', hidden_states, dims='t h # tp:replicated')"
 
   # --- attention internals ---
   - target: sglang.srt.models.qwen3_moe.Qwen3MoeAttention.forward_core
     edits:
       - match: "output, _ = self.o_proj(attn_output)"
-        prepend: "dumper.dump('attn_pre_o_proj', attn_output, dims='t attn_h # tp:replicated dp:=attn_dp')"
+        prepend: "dumper.dump('attn_pre_o_proj', attn_output, dims='t attn_h # tp:replicated')"
 
   # --- moe internals ---
   - target: sglang.srt.models.qwen3_moe.Qwen3MoeSparseMoeBlock.forward_normal
@@ -162,7 +154,7 @@ patches:
       - match: "router_logits, _ = self.gate(hidden_states)"
         append: "dumper.dump('moe_router_logits', router_logits, dims='t num_experts # tp:replicated')"
       - match: "final_hidden_states = self.experts(hidden_states, topk_output)"
-        append: "dumper.dump('moe_expert_output', final_hidden_states, dims='t h[moe_tp:partial] # tp:replicated')"
+        append: "dumper.dump('moe_expert_output', final_hidden_states, dims='t h[tp:partial]')"
 """
 
 
@@ -180,43 +172,14 @@ class TestSourcePatcherE2ESGLang:
         """TP=2 baseline vs TP=2+DP=2+dp-attention target.
 
         In dp-attention mode (attn_tp_size=1, attn_dp_size=2), attention
-        tensors are NOT TP-sharded and mlp_output is still moe_tp:partial
-        (the reduce-scatter happens in postprocess_layer, after the dump
-        point).  A separate patch config with corrected dims is used for
-        the target.
-
-        Comparison is limited to step 0 (prefill) because the decode
-        step has tokens on both DP ranks, which breaks the dp:=attn_dp
-        single-rank assumption and causes comparator errors.
-
-        The ``concat_steps`` token aligner is required because dp-attention
-        gathers tokens across DP ranks before the dump point, so the
-        non-empty rank's buffer holds the real tokens plus padding tokens
-        contributed by the empty DP rank (with a single request one DP
-        rank is always empty).  The aligner reconstructs the real per-step
-        token sequence from the dumped seq-lens, trimming that padding so
-        the target lines up with the un-padded TP baseline.
-
-        mlp_output is allowed to fail because the FusedMoE dispatcher
-        combine path may include an implicit all-reduce that makes the
-        dumped value differ from the raw partial expert output.  All
-        other tensors (layer_input, attn_output, attn_pre_o_proj,
-        pre_mlp_residual, moe_router_logits, moe_expert_output) must
-        pass at step 0.
+        tensors are NOT TP-sharded and mlp_output is already all-reduced.
+        A separate patch config with corrected dims is used for the target.
         """
         _run_e2e_scenario(
             tmp_path=tmp_path,
             target_tp=BASELINE_TP,
             extra_target_server_args=["--dp", "2", "--enable-dp-attention"],
             target_patch_config_yaml=PATCH_CONFIG_DP_ATTENTION_YAML,
-            extra_comparator_args=[
-                "--token-aligner",
-                "concat_steps",
-                "--end-step",
-                "0",
-                "--allow-failed-pattern",
-                "mlp_output",
-            ],
         )
 
 
@@ -229,7 +192,6 @@ def _run_e2e_scenario(
     target_tp: int,
     extra_target_server_args: Optional[list[str]] = None,
     target_patch_config_yaml: Optional[str] = None,
-    extra_comparator_args: Optional[list[str]] = None,
 ) -> None:
     """Full e2e: write patch config -> baseline run -> target run -> compare."""
     base_url: str = DEFAULT_URL_FOR_TEST
@@ -275,8 +237,6 @@ def _run_e2e_scenario(
         "--allow-skipped-pattern",
         "input_ids|positions",
     ]
-    if extra_comparator_args:
-        cmd.extend(extra_comparator_args)
 
     result: subprocess.CompletedProcess[str] = subprocess.run(
         cmd,
@@ -319,7 +279,6 @@ def _run_server_and_generate(
         "--mem-fraction-static",
         "0.5",
         "--disable-cuda-graph",
-        "--cuda-graph-backend-prefill=disabled",
         "--disable-radix-cache",
     ]
     if extra_server_args:
@@ -376,4 +335,4 @@ def _save_comparator_output(*, stdout: str, stderr: str) -> Path:
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    pytest.main([__file__, "-v"])

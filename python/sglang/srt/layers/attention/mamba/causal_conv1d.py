@@ -1,7 +1,6 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 # SPDX-License-Identifier: Apache-2.0
 
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2024, Tri Dao.
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 
@@ -9,35 +8,21 @@ from typing import Optional
 
 import torch
 
-from sglang.kernels.ops.mamba.causal_conv1d_triton import (
-    PAD_SLOT_ID,
-)
-from sglang.kernels.ops.mamba.causal_conv1d_triton import (
-    causal_conv1d_fn as _causal_conv1d_fn_triton,
-)
-from sglang.kernels.ops.mamba.causal_conv1d_triton import (
-    causal_conv1d_update as _causal_conv1d_update_triton,
-)
-from sglang.srt.utils import is_cuda
+from .causal_conv1d_triton import PAD_SLOT_ID
 
-# The compiled causal conv1d is CUDA-only -- the sgl_kernel wheel never built it
-# for ROCm / MUSA either, so the old import probe always fell through to Triton
-# there. Select that fallback directly instead of via a failed import.
-_HAS_CONV1D_KERNEL = is_cuda()
+try:
+    from sgl_kernel import causal_conv1d_fwd
+    from sgl_kernel import causal_conv1d_update as causal_conv1d_update_kernel
 
-if _HAS_CONV1D_KERNEL:
-    from sglang.kernels.ops.mamba import (
-        causal_conv1d_fwd,
-    )
-    from sglang.kernels.ops.mamba import (
-        causal_conv1d_update as causal_conv1d_update_kernel,
+    torch.ops.sgl_kernel.causal_conv1d_update
+    _USE_TRITON = False
+except (ImportError, AttributeError):
+    from .causal_conv1d_triton import causal_conv1d_fn as _causal_conv1d_fn_triton
+    from .causal_conv1d_triton import (
+        causal_conv1d_update as _causal_conv1d_update_triton,
     )
 
-
-def _get_seq_lens_cpu(query_start_loc, x):
-    if query_start_loc is not None:
-        return (query_start_loc[1:] - query_start_loc[:-1]).cpu().tolist()
-    return [x.shape[-1]]
+    _USE_TRITON = True
 
 
 def causal_conv1d_fn(
@@ -81,22 +66,19 @@ def causal_conv1d_fn(
 
     out: (batch, dim, seqlen)
     """
-    # Use Triton when: (1) there is no compiled conv1d kernel for this device,
-    # or (2) input is non-contiguous and seq_lens_cpu is pre-computed by caller.
-    # The Triton kernel accepts arbitrary strides, avoiding a .contiguous()
-    # copy that can cost >0.6 ms/layer on large prefill batches.
-    use_triton = not _HAS_CONV1D_KERNEL or (
-        x.stride(-1) != 1 and "seq_lens_cpu" in kwargs
-    )
-    if use_triton:
-        if "seq_lens_cpu" not in kwargs:
-            kwargs["seq_lens_cpu"] = _get_seq_lens_cpu(query_start_loc, x)
+    if _USE_TRITON:
+        seq_lens_cpu = (
+            (query_start_loc[1:] - query_start_loc[:-1]).cpu().tolist()
+            if query_start_loc is not None
+            else [x.shape[-1]]
+        )
         return _causal_conv1d_fn_triton(
             x,
             weight,
             bias,
             conv_states=conv_states,
             query_start_loc=query_start_loc,
+            seq_lens_cpu=seq_lens_cpu,
             cache_indices=cache_indices,
             has_initial_state=has_initial_state,
             activation=activation,
@@ -109,8 +91,6 @@ def causal_conv1d_fn(
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    if cache_indices is not None and cache_indices.dtype != torch.int32:
-        cache_indices = cache_indices.to(torch.int32)
     causal_conv1d_fwd(
         x,
         weight,
@@ -157,8 +137,7 @@ def causal_conv1d_update(
             indices 0 and 3
     out: (batch, dim) or (batch, dim, seqlen)
     """
-    use_triton = not _HAS_CONV1D_KERNEL
-    if use_triton:
+    if _USE_TRITON:
         return _causal_conv1d_update_triton(
             x,
             conv_state,
@@ -177,8 +156,6 @@ def causal_conv1d_update(
     unsqueeze = x.dim() == 2
     if unsqueeze:
         x = x.unsqueeze(-1)
-    if conv_state_indices is not None and conv_state_indices.dtype != torch.int32:
-        conv_state_indices = conv_state_indices.to(torch.int32)
     causal_conv1d_update_kernel(
         x,
         conv_state,

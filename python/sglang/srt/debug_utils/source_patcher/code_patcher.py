@@ -1,5 +1,3 @@
-import __future__
-
 import importlib
 import inspect
 import textwrap
@@ -87,12 +85,7 @@ def patch_function(
     if preamble.strip():
         modified_source = _insert_preamble(source=modified_source, preamble=preamble)
 
-    code: types.CodeType = compile(
-        modified_source,
-        inspect.getfile(target),
-        "exec",
-        flags=__future__.annotations.compiler_flag,
-    )
+    code: types.CodeType = compile(modified_source, inspect.getfile(target), "exec")
     temp_namespace: dict[str, Any] = {}
     exec(code, target.__globals__, temp_namespace)
 

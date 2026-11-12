@@ -6,9 +6,8 @@ from sglang.test.performance_test_runner import PerformanceTestParams
 from sglang.test.run_combined_tests import run_combined_tests
 from sglang.test.test_utils import ModelLaunchSettings
 
-# Runs on both H200 and B200: registered once per runner_config below
-register_cuda_ci(est_time=1320, stage="nightly", runner_config="8-gpu-h200")
-register_cuda_ci(est_time=1320, stage="nightly", runner_config="8-gpu-b200")
+# Runs on both H200 and B200 via nightly-8-gpu-common suite
+register_cuda_ci(est_time=1800, suite="nightly-8-gpu-common", nightly=True)
 
 GLM_4_6_MODEL_PATH = "zai-org/GLM-4.6"
 
@@ -44,7 +43,7 @@ class TestGLM46(unittest.TestCase):
             test_name="GLM-4.6",
             accuracy_params=AccuracyTestParams(dataset="gsm8k", baseline_accuracy=0.80),
             performance_params=PerformanceTestParams(
-                result_dir="performance_results_glm_4_6",
+                profile_dir="performance_profiles_glm_4_6",
             ),
         )
 

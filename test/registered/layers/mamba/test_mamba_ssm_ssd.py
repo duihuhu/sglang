@@ -1,9 +1,7 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
 
-register_cuda_ci(est_time=10, stage="base-b", runner_config="1-gpu-small")
-register_amd_ci(est_time=34, suite="stage-b-test-1-gpu-small-amd")
+register_cuda_ci(est_time=15, suite="stage-b-test-small-1-gpu")
+register_amd_ci(est_time=34, suite="stage-b-test-small-1-gpu-amd")
 
 # Adapted from https://github.com/vllm-project/vllm/blob/633f943e30a4444d890d26b81850f7217736f840/tests/kernels/mamba/test_mamba_ssm_ssd.py
 
@@ -14,9 +12,8 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 
-from sglang.kernels.ops.mamba.triton_ops import mamba_chunk_scan_combined
 from sglang.srt.layers.attention.mamba.mamba2_metadata import Mamba2Metadata
-from sglang.srt.utils import get_device
+from sglang.srt.layers.attention.mamba.ops import mamba_chunk_scan_combined
 from sglang.srt.utils.common import is_hip
 from sglang.utils import is_in_ci
 
@@ -102,12 +99,10 @@ def ssd_minimal_discrete(
     return Y, final_state
 
 
-def generate_random_inputs(batch_size, seqlen, n_heads, d_head, itype, device=None):
+def generate_random_inputs(batch_size, seqlen, n_heads, d_head, itype, device="cuda"):
 
-    if device is None:
-        device = get_device()
-    if device not in ["cuda", "xpu"]:
-        pytest.skip("Test only supports CUDA and XPU devices")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device not available")
 
     torch.manual_seed(0)
     A = -torch.exp(torch.rand(n_heads, dtype=itype, device=device))
@@ -130,7 +125,7 @@ def generate_continuous_batched_examples(
     n_heads,
     d_head,
     itype,
-    device=None,
+    device="cuda",
     return_naive_ref=True,
 ):
 
@@ -143,10 +138,8 @@ def generate_continuous_batched_examples(
 
     # generate the full-length example
     A, dt, X, B, C = generate_random_inputs(
-        num_examples, full_length, n_heads, d_head, itype, device
+        num_examples, full_length, n_heads, d_head, itype
     )
-    # Capture the resolved device from the tensors
-    device = X.device
 
     if return_naive_ref:
         Y_min, final_state_min = ssd_minimal_discrete(
@@ -234,9 +227,8 @@ if is_in_ci():
 @pytest.mark.parametrize("d_head", SINGLE_DHEAD)
 @pytest.mark.parametrize("seq_len_chunk_size", SINGLE_SEQ_LEN_CHUNK_SIZE)
 def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, itype):
-    device = get_device()
-    if device not in ["cuda", "xpu"]:
-        pytest.skip("Test only supports CUDA and XPU devices")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device not available")
 
     # this tests the kernels on a single example (no batching)
 
@@ -327,9 +319,8 @@ if is_in_ci():
     ],
 )
 def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases, itype):
-    device = get_device()
-    if device not in ["cuda", "xpu"]:
-        pytest.skip("Test only supports CUDA and XPU devices")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device not available")
 
     # this test with multiple examples in a continuous batch
     # (i.e. chunked prefill)
@@ -407,9 +398,8 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases, 
     ],
 )
 def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
-    device = get_device()
-    if device not in ["cuda", "xpu"]:
-        pytest.skip("Test only supports CUDA and XPU devices")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device not available")
 
     # This test verifies the correctness of the chunked prefill implementation
     # in the mamba2 ssd kernels, by comparing concatenation (in the sequence
@@ -642,9 +632,8 @@ def test_mamba_chunk_scan_intermediate_states(
     seq_len_chunk_size,
     itype,
 ):
-    device = get_device()
-    if device not in ["cuda", "xpu"]:
-        pytest.skip("Test only supports CUDA and XPU devices")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device not available")
 
     if itype == torch.bfloat16:
         atol, rtol = 5e-2, 5e-2

@@ -21,6 +21,8 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from sglang.srt.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from sglang.srt.eplb.expert_distribution import ExpertDistributionRecorder
@@ -50,9 +52,7 @@ from sglang.srt.model_loader.weight_utils import (
     kv_cache_scales_loader,
     maybe_remap_kv_scale_name,
 )
-from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import is_hip
-from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 expert_distribution_recorder = ExpertDistributionRecorder()
 
@@ -124,7 +124,7 @@ class HunYuanSparseMoeBlock(nn.Module):
         layer_id: int = -1,
     ):
         super().__init__()
-        self.tp_size = get_parallel().tp_size
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         if self.tp_size > config.num_experts:
             raise ValueError(
@@ -262,7 +262,7 @@ class HunYuanAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        tp_size = get_parallel().tp_size
+        tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -402,7 +402,8 @@ class HunYuanDecoderLayer(nn.Module):
             if isinstance(config.intermediate_size, int)
             else config.intermediate_size[layer_id]
         )
-        rope_theta, rope_scaling = get_rope_config(config)
+        rope_theta = config.rope_parameters["rope_theta"]
+        rope_scaling = config.rope_parameters
         if rope_scaling is not None and getattr(
             config, "original_max_position_embeddings", None
         ):
@@ -531,14 +532,21 @@ class HunYuanModel(nn.Module):
             hidden_states = self.get_input_embeddings(input_ids)
         residual = None
 
-        for layer in self.layers:
-            hidden_states, residual, _ = layer(
+        prev_kv_states = None
+        for i in range(len(self.layers)):
+            layer = self.layers[i]
+            hidden_states, residual, kv_states = layer(
                 positions,
                 hidden_states,
                 forward_batch,
                 residual,
-                None,
+                prev_kv_states,
             )
+
+            if False:  # (i - self.start_layer) % cla_factor == 0:
+                prev_kv_states = kv_states
+            else:
+                prev_kv_states = None
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
@@ -775,8 +783,8 @@ class HunYuanMoEV1ForCausalLM(nn.Module):
     # factors (or else raise an exception). Thus, handled exceptions should
     # make sure to leave KV cache scale factors in a known good (dummy) state
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        tp_size = get_parallel().tp_size
-        tp_rank = get_parallel().tp_rank
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         for layer_idx, scaling_factor in kv_cache_scales_loader(
             quantization_param_path,
             tp_rank,

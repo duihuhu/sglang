@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import IO, Literal, Optional
@@ -73,11 +72,7 @@ class ReportSink:
 
     def _get_console(self) -> Console:
         if self._console is None:
-            try:
-                width = os.get_terminal_size().columns
-            except OSError:
-                width = 200
-            self._console = Console(force_terminal=True, width=width)
+            self._console = Console()
         return self._console
 
     def _print_to_stdout(self, record: _OutputRecord) -> None:
@@ -86,6 +81,7 @@ class ReportSink:
         else:
             console: Console = self._get_console()
             console.print(record.to_rich(verbosity=self._verbosity))
+            console.print()  # blank line between records
 
 
 report_sink = ReportSink()

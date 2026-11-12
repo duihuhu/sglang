@@ -1,7 +1,7 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/2c58742dff8613a3bd7496f2008ce927e18d38d1/tests/kernels/mamba/test_mamba_mixer2.py
 
+
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -13,11 +13,9 @@ from sglang.srt.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from sglang.srt.runtime_context import get_parallel
-from sglang.srt.utils import get_device, get_device_count
 from sglang.test.ci.ci_register import register_cuda_ci
 
-register_cuda_ci(est_time=32, stage="base-b", runner_config="2-gpu-large")
+register_cuda_ci(est_time=50, suite="stage-b-test-large-2-gpu")
 
 NUM_GPUS = 2
 
@@ -37,14 +35,14 @@ def test_mixer2_gated_norm_multi_gpu(
     seq_len: int,
     hidden_size_n_groups: tuple[int, int],
     dtype: torch.dtype,
-    device: str = get_device(),
+    device: str = "cuda",
 ):
-    if device not in ["cuda", "xpu"]:
-        pytest.skip("Test only supports CUDA and XPU devices")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device not available")
 
     assert (
-        get_device_count() >= NUM_GPUS
-    ), f"This test requires at least {NUM_GPUS} GPUs, but only {get_device_count()} available"
+        torch.cuda.device_count() >= NUM_GPUS
+    ), f"This test requires at least {NUM_GPUS} GPUs, but only {torch.cuda.device_count()} available"
 
     hidden_size, n_groups = hidden_size_n_groups
     num_processes = NUM_GPUS
@@ -81,8 +79,8 @@ def mixer2_gated_norm_tensor_parallel(
 ):
     torch.manual_seed(0)
 
-    device = torch.device(get_device(local_rank))
-    torch.get_device_module(device).set_device(device)
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -108,10 +106,10 @@ def mixer2_gated_norm_tensor_parallel(
     gate_states = torch.randn(batch_size, seq_len, hidden_size)
 
     import sglang.srt.layers.attention.mamba.mixer2_rms_norm_gated as m2
+    import sglang.srt.model_loader.weight_utils as wu
 
-    # Force attn-TP rank through the context (the weight loader reads it via
-    # get_parallel().attn_tp_rank); avoids calling initialize_dp_attention.
-    with get_parallel().override(attn_tp_rank=local_rank):
+    # Convenience: Avoid calling initialize_dp_attention
+    with patch.object(wu, "get_attention_tp_rank", return_value=local_rank):
         # create gated-norm with TP
         mixer = m2.Mixer2RMSNormGated(
             full_hidden_size=hidden_size,
@@ -119,8 +117,10 @@ def mixer2_gated_norm_tensor_parallel(
         )
         mixer.weight.weight_loader(mixer.weight, weight)
 
-    # m2 reads tp via get_parallel().tp_size/rank — force it through the context.
-    with get_parallel().override(tp_size=1, tp_rank=0):
+    with (
+        patch.object(m2, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(m2, "get_tensor_model_parallel_rank", return_value=0),
+    ):
         # create gated-norm without TP to compute reference
         mixer_single_gpu = m2.Mixer2RMSNormGated(
             full_hidden_size=hidden_size,

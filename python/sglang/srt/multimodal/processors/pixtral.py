@@ -6,7 +6,7 @@ from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
 
-from sglang.srt.managers.schedule_batch import Modality, MultimodalProcessorOutput
+from sglang.srt.managers.schedule_batch import Modality
 from sglang.srt.models.pixtral import (
     PixtralForConditionalGeneration,
     PixtralVisionModel,
@@ -19,7 +19,6 @@ from sglang.srt.multimodal.processors.base_processor import (
 
 class PixtralProcessor(BaseMultimodalProcessor):
     models = [PixtralVisionModel, PixtralForConditionalGeneration]
-    gpu_image_decode = False  # Pixtral processes loaded image as PIL image explicitly
 
     PAD_TOKEN = "<pad>"
     DEFAULT_IMAGE_TOKEN = "[IMG]"
@@ -71,7 +70,7 @@ class PixtralProcessor(BaseMultimodalProcessor):
         *args,
         **kwargs,
     ):
-        mm_data = await self.load_mm_data(
+        mm_data = self.load_mm_data(
             prompt=input_text,
             multimodal_tokens=self.mm_tokens,
             image_data=image_data,
@@ -127,8 +126,9 @@ class PixtralProcessor(BaseMultimodalProcessor):
                 mm_data, self.mm_tokens
             )
 
-        return MultimodalProcessorOutput(
-            mm_items=mm_items,
-            input_ids=input_ids.tolist(),
-            im_token_id=self.IM_TOKEN_ID,
-        )
+        return {
+            "mm_items": mm_items,
+            "input_ids": input_ids.tolist(),
+            "im_token_id": self.IM_TOKEN_ID,
+            "im_token": self.image_token,
+        }

@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/utils/marlin_utils.py
 
 from __future__ import annotations
@@ -33,9 +32,7 @@ if TYPE_CHECKING:
     from sglang.srt.layers.linear import LinearBase
     from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 
-from sglang.srt.model_executor.runner_backend_utils.tc_piecewise_cuda_graph import (
-    get_tc_piecewise_forward_context,
-)
+from sglang.srt.compilation.piecewise_context_manager import get_forward_context
 
 try:
     from vllm import _custom_ops as ops
@@ -46,7 +43,7 @@ except ImportError:
 _is_cuda = is_cuda()
 
 if _is_cuda:
-    from sglang.kernels.ops.quantization.gptq_marlin import gptq_marlin_gemm
+    from sglang.jit_kernel.gptq_marlin import gptq_marlin_gemm
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +55,6 @@ GPTQ_MARLIN_MIN_THREAD_K = 128
 GPTQ_MARLIN_MAX_PARALLEL = 16
 
 MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
-# NVFP SUPPORT 16, while MXFP4 supports 32 and 16.
-FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16, 32]
 
 # In case there is a performance issue with Marlin, the variable below can be
 # changed to False, which allows Marlin to perform global reductions in fp16
@@ -141,15 +136,11 @@ def _check_marlin_supported(
             f"are supported (for group_size = {group_size}, "
             f"device_capability = {device_capability}, zp = {has_zp}).",
         )
-    if quant_type == scalar_types.float4_e2m1f:
-        allowed_group_sizes = FP4_MARLIN_SUPPORTED_GROUP_SIZES
-    else:
-        allowed_group_sizes = MARLIN_SUPPORTED_GROUP_SIZES
-    if group_size is None or group_size not in allowed_group_sizes:
+    if group_size is None or group_size not in MARLIN_SUPPORTED_GROUP_SIZES:
         return (
             False,
-            f"Marlin does not support group_size = {group_size} for "
-            f"quant_type = {quant_type}. Only group_sizes = {allowed_group_sizes} "
+            f"Marlin does not support group_size = {group_size}. "
+            f"Only group_sizes = {MARLIN_SUPPORTED_GROUP_SIZES} "
             "are supported.",
         )
 
@@ -242,36 +233,21 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     )[0]
 
 
-def check_moe_marlin_supports_layer(
-    layer: FusedMoE, group_size: int, allow_tile_padding: bool = False
-) -> bool:
+def check_moe_marlin_supports_layer(layer: FusedMoE, group_size: int) -> bool:
     hidden_size = layer.hidden_size
     intermediate_size_per_partition = layer.intermediate_size_per_partition
     # apply_router_weight_on_input is not supported for moe marlin
     supports_router_weight = not layer.moe_runner_config.apply_router_weight_on_input
-    if layer.moe_runner_config.is_gated:
-        supports_activation = layer.moe_runner_config.activation in {"silu", "situ"}
-    else:
-        supports_activation = layer.moe_runner_config.activation in {
-            "silu",
-            "relu2",
-        }
+    # moe marlin requires the activation to be silu
+    supports_activation = layer.moe_runner_config.activation == "silu"
 
-    if allow_tile_padding:
-        # Thread-tile misalignment can be fixed by zero-padding the expert
-        # intermediate dimension before Marlin repack. The original K still
-        # needs to fit a Marlin tile family, and quant groups must stay whole.
-        supports_shape = (
-            hidden_size % 64 == 0 and intermediate_size_per_partition % group_size == 0
-        )
-    else:
-        # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
-        # down: (n, k) = (hidden_size, intermediate_size_per_partition)
-        # moe marlin requires n % 128 == 0 and k % 64 == 0
-        supports_shape = (
-            hidden_size % 128 == 0
-            and intermediate_size_per_partition % max(64, group_size) == 0
-        )
+    # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
+    # down: (n, k) = (hidden_size, intermediate_size_per_partition)
+    # moe marlin requires n % 128 == 0 and k % 64 == 0
+    supports_shape = (
+        hidden_size % 128 == 0
+        and intermediate_size_per_partition % max(64, group_size) == 0
+    )
     supports_group_size = group_size in [-1, 32, 64, 128]
     return (
         supports_shape
@@ -285,7 +261,7 @@ def marlin_make_workspace(
     device: torch.device, max_blocks_per_sm: int = 1
 ) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
-    # size. The num of threadblocks is sms_count * max_blocks_per_sm.
+    # size. The num of threadblocks is is sms_count * max_blocks_per_sm.
     sms = torch.cuda.get_device_properties(device).multi_processor_count
     return torch.zeros(
         sms * max_blocks_per_sm, dtype=torch.int, device=device, requires_grad=False
@@ -511,7 +487,7 @@ def apply_gptq_marlin_linear(
         dtype=input.dtype,
     )
 
-    forward_context = get_tc_piecewise_forward_context()
+    forward_context = get_forward_context()
     if forward_context is None:
         output = gptq_marlin_gemm(
             reshaped_x,
@@ -581,7 +557,7 @@ def apply_awq_marlin_linear(
         dtype=input.dtype,
     )
 
-    forward_context = get_tc_piecewise_forward_context()
+    forward_context = get_forward_context()
     if forward_context is None:
         output = gptq_marlin_gemm(
             reshaped_x,
@@ -689,7 +665,7 @@ class MarlinConfig(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> MarlinConfig:
+    def from_config(cls, config: dict[str, Any]) -> "MarlinConfig":
         group_size = cls.get_from_keys(config, ["group_size"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         return cls(group_size, lm_head_quantized)
@@ -918,7 +894,7 @@ def unified_apply_gptq_marlin_gemm(
     use_fp32_reduce: bool,
     is_zp_float: bool,
 ) -> torch.Tensor:
-    quant_config = get_tc_piecewise_forward_context().quant_config
+    quant_config = get_forward_context().quant_config
     quant_type = quant_config.quant_type
     return gptq_marlin_gemm(
         input,

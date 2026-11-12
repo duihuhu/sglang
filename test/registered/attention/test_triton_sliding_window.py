@@ -10,13 +10,14 @@ from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
+    is_in_amd_ci,
     is_in_ci,
     popen_launch_server,
 )
 
 # Sliding window attention with Triton backend (Gemma-3 model)
-register_cuda_ci(est_time=93, stage="extra-a", runner_config="1-gpu-large")
-register_amd_ci(est_time=200, suite="stage-b-test-1-gpu-small-amd")
+register_cuda_ci(est_time=100, suite="stage-b-test-large-1-gpu")
+register_amd_ci(est_time=200, suite="stage-b-test-small-1-gpu-amd")
 
 
 class TestSlidingWindowAttentionTriton(CustomTestCase):
@@ -52,16 +53,17 @@ class TestSlidingWindowAttentionTriton(CustomTestCase):
             base_url=self.base_url,
             model=self.model,
             eval_name="mmlu",
-            num_examples=256,
+            num_examples=200,
             num_threads=32,
         )
 
         metrics = run_eval(args)
         print(f"MMLU metrics with sliding window: {metrics}")
 
-        # gemma-3-4b-it scores 0.59 over 256 questions under sgl-eval's grader,
-        # minus the 0.05 margin the other eval thresholds use.
-        self.assertGreaterEqual(metrics["score"], 0.54)
+        if is_in_amd_ci():
+            self.assertGreaterEqual(metrics["score"], 0.55)
+        else:
+            self.assertGreaterEqual(metrics["score"], 0.60)
 
     def _test_short_context_generation(self):
         response = requests.post(

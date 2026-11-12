@@ -32,17 +32,8 @@ class MpsPlatform(Platform):
         return False
 
     @classmethod
-    @lru_cache(maxsize=1)
-    def is_float64_supported(cls) -> bool:
-        return False
-
-    @classmethod
     def get_local_torch_device(cls) -> torch.device:
         return torch.device("mps")
-
-    @classmethod
-    def set_device(cls, device: torch.device) -> None:
-        pass
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
@@ -82,7 +73,7 @@ class MpsPlatform(Platform):
     @classmethod
     def get_available_gpu_memory(
         cls,
-        device_id: int | None = None,
+        device_id: int = 0,
         distributed: bool = False,
         empty_cache: bool = True,
         cpu_group: Any = None,

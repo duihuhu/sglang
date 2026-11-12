@@ -15,7 +15,6 @@
 import json
 import multiprocessing as mp
 import os
-import queue as queue_mod
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple, Union
 
@@ -235,12 +234,12 @@ class HFRunner:
         **kwargs,
     ) -> torch.Tensor:
         if inputs_embeds is None:
-            inputs_embeds = self.model.model.get_input_embeddings()(input_ids)
+            inputs_embeds = self.model.model.embed_tokens(input_ids)
             if pixel_values is not None:
-                pixel_values = pixel_values.type(self.model.model.visual.get_dtype())
-                image_embeds = self.model.model.visual(
+                pixel_values = pixel_values.type(self.model.visual.get_dtype())
+                image_embeds = self.model.visual(
                     pixel_values, grid_thw=image_grid_thw
-                ).pooler_output.to(inputs_embeds.device)
+                ).to(inputs_embeds.device)
                 image_mask = input_ids == self.model.config.image_token_id
                 inputs_embeds[image_mask] = image_embeds
             if attention_mask is not None:
@@ -255,7 +254,6 @@ class HFRunner:
             return_dict=True,
             inputs_embeds=inputs_embeds,
             image_grid_thw=image_grid_thw,
-            **kwargs,
         )
 
         embeddings = outputs.hidden_states[-1][:, -1]
@@ -413,16 +411,7 @@ class HFRunner:
         self.in_queue.put(
             (prompts, image_data, max_new_tokens, lora_paths, token_ids_logprob)
         )
-        while True:
-            try:
-                return self.out_queue.get(timeout=5)
-            except queue_mod.Empty:
-                if not self.model_proc.is_alive() and self.out_queue.empty():
-                    exitcode = self.model_proc.exitcode
-                    raise RuntimeError(
-                        f"HFRunner subprocess died with exit code {exitcode} "
-                        f"before producing output"
-                    )
+        return self.out_queue.get()
 
     def terminate(self):
         self.model_proc.terminate()
@@ -575,9 +564,12 @@ class SRTRunner:
         speculative_num_steps: Optional[int] = None,
         speculative_eagle_topk: Optional[int] = None,
         speculative_num_draft_tokens: Optional[int] = None,
+        speculative_ngram_min_match_window_size: Optional[int] = None,
+        speculative_ngram_max_match_window_size: Optional[int] = None,
         disable_overlap_schedule: bool = False,
         disable_custom_all_reduce: bool = False,
-        cuda_graph_max_bs_decode: int = 4,
+        torchao_config: Optional[str] = None,
+        cuda_graph_max_bs: int = 4,
         sleep_on_idle=False,
         max_lora_rank: Optional[int] = None,
         lora_target_modules: Optional[List[str]] = None,
@@ -587,7 +579,6 @@ class SRTRunner:
         json_model_override_args: Optional[dict[str, Any]] = None,
         lora_eviction_policy: str = "lru",
         enable_deterministic_inference: bool = False,
-        lora_drain_wait_threshold: float = 0.0,
     ):
         self.model_type = model_type
         self.is_generation = model_type == "generation"
@@ -605,7 +596,12 @@ class SRTRunner:
             spec_kwargs["speculative_num_draft_tokens"] = speculative_num_draft_tokens
         elif speculative_algorithm == "NGRAM":
             spec_kwargs["speculative_algorithm"] = speculative_algorithm
-            spec_kwargs["speculative_num_draft_tokens"] = speculative_num_draft_tokens
+            spec_kwargs["speculative_ngram_min_match_window_size"] = (
+                speculative_ngram_min_match_window_size
+            )
+            spec_kwargs["speculative_ngram_max_match_window_size"] = (
+                speculative_ngram_max_match_window_size
+            )
 
         self.engine = Engine(
             model_path=model_path,
@@ -614,6 +610,7 @@ class SRTRunner:
             dtype=get_dtype_str(torch_dtype),
             port=port,
             model_impl=model_impl,
+            torchao_config=torchao_config,
             mem_fraction_static=mem_fraction_static,
             trust_remote_code=trust_remote_code,
             is_embedding=not self.is_generation,
@@ -633,7 +630,7 @@ class SRTRunner:
             dp_size=dp_size,
             tokenizer_path=tokenizer_path,
             disable_overlap_schedule=disable_overlap_schedule,
-            cuda_graph_max_bs_decode=cuda_graph_max_bs_decode,
+            cuda_graph_max_bs=cuda_graph_max_bs,
             disable_custom_all_reduce=disable_custom_all_reduce,
             sleep_on_idle=sleep_on_idle,
             max_lora_rank=max_lora_rank,
@@ -648,7 +645,6 @@ class SRTRunner:
             ),
             lora_eviction_policy=lora_eviction_policy,
             enable_deterministic_inference=enable_deterministic_inference,
-            lora_drain_wait_threshold=lora_drain_wait_threshold,
             **spec_kwargs,
         )
 

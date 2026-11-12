@@ -24,6 +24,7 @@ from transformers.models.ernie4_5_moe.configuration_ernie4_5_moe import (
 )
 
 from sglang.srt.distributed import (
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from sglang.srt.layers.communicator import enable_moe_dense_fully_dp
@@ -41,11 +42,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.models.deepseek_v2 import DeepseekV2MLP as Ernie4MLP
 from sglang.srt.models.llama import LlamaAttention as Ernie4Attention
-from sglang.srt.runtime_context import get_parallel
-from sglang.srt.utils import add_prefix, is_npu, make_layers
-from sglang.srt.utils.hf_transformers_utils import get_rope_config
-
-_is_npu = is_npu()
+from sglang.srt.utils import add_prefix, make_layers
 
 
 class MoEGate(nn.Module):
@@ -77,7 +74,7 @@ class Ernie4Moe(nn.Module):
     ):
         super().__init__()
         self.layer_id = layer_id
-        self.tp_size = get_parallel().tp_size
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", 0)
 
         if config.hidden_act != "silu":
@@ -88,16 +85,12 @@ class Ernie4Moe(nn.Module):
 
         self.gate = MoEGate(config=config, prefix=add_prefix("gate", prefix))
 
-        correction_bias = self.gate.e_score_correction_bias
-        # npu only supports 1D, but current correction_bias is 2D
-        if _is_npu:
-            correction_bias = correction_bias.squeeze(0)
         self.topk = TopK(
             top_k=config.moe_k,
             layer_id=layer_id,
             renormalize=True,
             use_grouped_topk=False,
-            correction_bias=correction_bias,
+            correction_bias=self.gate.e_score_correction_bias,
         )
 
         self.experts = get_moe_impl_class(quant_config)(
@@ -162,7 +155,8 @@ class Ernie4DecoderLayer(nn.Module):
         is_mtp: bool = False,
     ):
         super().__init__()
-        rope_theta, rope_scaling = get_rope_config(config)
+        rope_theta = config.rope_parameters["rope_theta"]
+        rope_scaling = config.rope_parameters
         rope_is_neox_style = getattr(config, "rope_is_neox_style", False)
         # Self attention.
         self.self_attn = Ernie4Attention(

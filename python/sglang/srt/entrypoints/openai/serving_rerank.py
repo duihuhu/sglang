@@ -1,6 +1,4 @@
-import heapq
 import logging
-import math
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import Request
@@ -121,14 +119,13 @@ def _qwen3_rerank_score(p_yes: float, p_no: float) -> float:
 def _get_jinja_env():
     try:
         import jinja2  # Lazy import: server env should provide this dependency.
-        from jinja2.sandbox import ImmutableSandboxedEnvironment
     except ModuleNotFoundError as e:
         raise ValueError(
             "Rendering Qwen3 reranker prompts requires `jinja2`. "
             "Please install it in your runtime environment (e.g., `pip install jinja2`)."
         ) from e
-    # Using a sandboxed environment to stop malicious execution during model loading.
-    return ImmutableSandboxedEnvironment(
+
+    return jinja2.Environment(
         loader=jinja2.BaseLoader(),
         autoescape=False,
         undefined=jinja2.Undefined,
@@ -534,6 +531,8 @@ class OpenAIServingRerank(OpenAIServingBase):
 
     def _extract_score_from_logprobs(self, ret: Dict[str, Any]) -> float:
         """Extract reranking score from generation response with logprobs."""
+        import math
+
         # Get logprobs from the response
         meta_info = ret.get("meta_info", {})
         output_top_logprobs = meta_info.get("output_top_logprobs", [])
@@ -545,19 +544,13 @@ class OpenAIServingRerank(OpenAIServingBase):
         # Format: list of tuples (logprob, token_id, token_text)
         p_yes = 0.0
         p_no = 0.0
-        found_yes = False
-        found_no = False
 
         for item in top_logprobs:
             logprob, token_id = item[0], item[1]
             if token_id == self._yes_token_id:
                 p_yes = math.exp(logprob)
-                found_yes = True
             elif token_id == self._no_token_id:
                 p_no = math.exp(logprob)
-                found_no = True
-            if found_yes and found_no:
-                break
 
         return _qwen3_rerank_score(p_yes, p_no)
 
@@ -599,11 +592,11 @@ class OpenAIServingRerank(OpenAIServingBase):
                     )
                 )
 
-        # When top_n is set, nlargest avoids fully sorting the candidate list
-        # (O(N log top_n) vs O(N log N)) — meaningful for large rerank batches.
-        # Validator (V1RerankReqInput.validate_top_n) guarantees top_n >= 1.
-        if request.top_n is not None:
-            return heapq.nlargest(request.top_n, responses, key=lambda x: x.score)
-
+        # Sort by score in descending order (highest relevance first)
         responses.sort(key=lambda x: x.score, reverse=True)
+
+        # Apply top_n limit if specified
+        if request.top_n is not None and request.top_n > 0:
+            responses = responses[: request.top_n]
+
         return responses

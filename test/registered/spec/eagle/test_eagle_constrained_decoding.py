@@ -1,7 +1,8 @@
 import unittest
 
+from sglang.srt.environ import envs
 from sglang.srt.utils import kill_process_tree
-from sglang.test.ci.ci_register import register_amd_ci, register_cuda_ci
+from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.kits.json_constrained_kit import JSONConstrainedMixin
 from sglang.test.kits.regex_constrained_kit import RegexConstrainedMixin
 from sglang.test.test_utils import (
@@ -13,8 +14,7 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-register_cuda_ci(est_time=116, stage="base-b", runner_config="1-gpu-large")
-register_amd_ci(est_time=165, stage="stage-b", runner_config="1-gpu-large-amd")
+register_cuda_ci(est_time=100, suite="stage-b-test-large-1-gpu")
 
 
 class TestEagleConstrainedDecoding(
@@ -30,8 +30,7 @@ class TestEagleConstrainedDecoding(
     model = DEFAULT_TARGET_MODEL_EAGLE
     draft_model = DEFAULT_DRAFT_MODEL_EAGLE
     grammar_backend = "xgrammar"
-    # Run the synchronous (non-overlap) scheduling path.
-    disable_overlap = True
+    spec_v2 = False
 
     @classmethod
     def setUpClass(cls):
@@ -59,15 +58,20 @@ class TestEagleConstrainedDecoding(
             "--grammar-backend",
             cls.grammar_backend,
         ]
-        if cls.disable_overlap:
-            launch_args.append("--disable-overlap-schedule")
         launch_args.extend(cls.other_launch_args)
-        cls.process = popen_launch_server(
-            cls.model,
-            cls.base_url,
-            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=launch_args,
-        )
+        with envs.SGLANG_ENABLE_SPEC_V2.override(
+            cls.spec_v2
+        ), envs.SGLANG_SPEC_NAN_DETECTION.override(
+            True
+        ), envs.SGLANG_SPEC_OOB_DETECTION.override(
+            True
+        ):
+            cls.process = popen_launch_server(
+                cls.model,
+                cls.base_url,
+                timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+                other_args=launch_args,
+            )
 
     @classmethod
     def tearDownClass(cls):
@@ -75,7 +79,7 @@ class TestEagleConstrainedDecoding(
 
 
 class TestEagleConstrainedDecodingV2(TestEagleConstrainedDecoding):
-    disable_overlap = False
+    spec_v2 = True
 
 
 if __name__ == "__main__":

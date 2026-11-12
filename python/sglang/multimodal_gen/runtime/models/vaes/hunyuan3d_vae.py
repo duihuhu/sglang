@@ -12,9 +12,6 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from tqdm import tqdm
 
-from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
-    LayerwiseOffloadableModuleMixin,
-)
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -556,6 +553,8 @@ def generate_dense_grid_points(
 
 def extract_near_surface_volume_fn(input_tensor: torch.Tensor, alpha: float):
     """Extract near-surface voxels for hierarchical decoding."""
+    device = input_tensor.device
+
     val = input_tensor + alpha
     valid_mask = val > -9000
 
@@ -831,6 +830,7 @@ class FlashVDMVolumeDecoding:
         dtype = latents.dtype
 
         resolutions = []
+        orig_resolution = octree_resolution
         if octree_resolution < min_resolution:
             resolutions.append(octree_resolution)
         while octree_resolution >= min_resolution:
@@ -1099,11 +1099,8 @@ SurfaceExtractors = {
 }
 
 
-class VectsetVAE(nn.Module, LayerwiseOffloadableModuleMixin):
+class VectsetVAE(nn.Module):
     """Base VAE class for vector set encoding."""
-
-    layerwise_offload_dit_group_enabled = False
-    layer_names = ["transformer.resblocks"]
 
     def __init__(self, volume_decoder=None, surface_extractor=None):
         super().__init__()

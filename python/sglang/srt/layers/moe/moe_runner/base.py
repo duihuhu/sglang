@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Optional, Tuple, TypeGuard
+from typing import TYPE_CHECKING, Callable, Optional, Tuple, TypeGuard
 
 import torch
 
@@ -26,13 +26,6 @@ if TYPE_CHECKING:
     )
 
 
-def moe_output_buffer_ctx(buf: torch.Tensor):
-    """Provide the MoE output buffer for the current forward scope."""
-    from sglang.srt.runtime_context import get_forward
-
-    return get_forward().scoped(moe_output_buffer=buf)
-
-
 @dataclass
 class MoeRunnerConfig:
     # MoE parameters
@@ -54,15 +47,7 @@ class MoeRunnerConfig:
     no_combine: bool = False
     routed_scaling_factor: Optional[float] = None
     gemm1_alpha: Optional[float] = None
-    gemm1_beta: Optional[float] = None
     gemm1_clamp_limit: Optional[float] = None
-    swiglu_limit: Optional[float] = None
-    # Whether gate/up weights are stored interleaved (vs split). Only the
-    # silu+is_gated swiglu path consumes it (interleaved -> swiglu_gpt_oss_*,
-    # otherwise chunk gate/up then apply alpha/limit).
-    gate_up_interleaved: bool = True
-    layer: Optional[torch.nn.Module] = None
-    use_tp_all_gather_activation: bool = False
 
 
 @dataclass
@@ -97,11 +82,7 @@ class MoeRunnerCore(ABC):
 
     @abstractmethod
     def run(
-        self,
-        runner_input: RunnerInput,
-        quant_info: MoeQuantInfo,
-        running_state: dict,
-        hooks: Optional[Any] = None,
+        self, runner_input: RunnerInput, quant_info: MoeQuantInfo, running_state: dict
     ) -> RunnerOutput:
         pass
 

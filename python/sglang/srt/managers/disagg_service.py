@@ -19,6 +19,14 @@ def start_disagg_service(
     transfer_backend = TransferBackend(server_args.disaggregation_transfer_backend)
 
     if disagg_mode == DisaggregationMode.PREFILL:
+        # In AFD mode, only the Attn side starts the bootstrap server
+        # to avoid port conflicts between Attn and FFN processes.
+        afd_perspective = getattr(server_args, "afd_perspective", None)
+        if afd_perspective is not None:
+            from sglang.srt.layers.afd_type import AFDPerspective
+            if afd_perspective == AFDPerspective.AFD_PERSPECTIVE_FFN:
+                return None
+
         # only start bootstrap server on prefill tm
         kv_bootstrap_server_class = get_kv_class(
             transfer_backend, KVClassType.BOOTSTRAP_SERVER
@@ -27,30 +35,29 @@ def start_disagg_service(
             host=server_args.host,
             port=server_args.disaggregation_bootstrap_port,
         )
-        maybe_create_ascend_config_store(
-            server_args=server_args, transfer_backend=transfer_backend
+
+        # Update server_args with the actual port the bootstrap server bound to
+        # (may differ from requested port if it was already in use)
+        if hasattr(bootstrap_server, "actual_port") and bootstrap_server.actual_port is not None:
+            if bootstrap_server.actual_port != server_args.disaggregation_bootstrap_port:
+                import logging as _logging
+                _logging.getLogger(__name__).info(
+                    f"Bootstrap server actual port updated: "
+                    f"{server_args.disaggregation_bootstrap_port} -> {bootstrap_server.actual_port}"
+                )
+            server_args.disaggregation_bootstrap_port = bootstrap_server.actual_port
+        is_create_store = (
+            server_args.node_rank == 0 and transfer_backend == TransferBackend.ASCEND
         )
+        if is_create_store:
+            try:
+                from memfabric_hybrid import create_config_store
+
+                ascend_url = os.getenv("ASCEND_MF_STORE_URL")
+                create_config_store(ascend_url)
+            except Exception as e:
+                error_message = f"Failed create mf store, invalid ascend_url."
+                error_message += f" With exception {e}"
+                raise error_message
 
         return bootstrap_server
-
-
-def maybe_create_ascend_config_store(
-    server_args: ServerArgs, transfer_backend: TransferBackend
-) -> None:
-    """Also called directly by the rust-server scheduler: there the KV
-    bootstrap registry is served by the embedded rust server's api listener
-    (one rust implementation covers every transfer backend — their
-    bootstrap-server subclasses are all plain ``CommonKVBootstrapServer``,
-    which the rust registry ports verbatim), leaving this store as the only
-    ``start_disagg_service`` duty left to perform."""
-    if not (server_args.node_rank == 0 and transfer_backend == TransferBackend.ASCEND):
-        return
-    try:
-        from memfabric_hybrid import create_config_store
-
-        ascend_url = os.getenv("ASCEND_MF_STORE_URL")
-        create_config_store(ascend_url)
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed create mf store, invalid ascend_url. With exception {e}"
-        )

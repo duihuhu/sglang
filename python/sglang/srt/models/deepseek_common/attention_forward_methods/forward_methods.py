@@ -30,12 +30,3 @@ class AttnForwardMethod(IntEnum):
 
     # Use Deepseek V3.2 sparse multi-latent attention for NPU
     DSA_NPU = auto()
-
-    # Use multi-head attention for ROCm
-    MHA_ROCM = auto()
-
-    # Use one-shot multi-head attention for ROCm
-    MHA_ONE_SHOT_ROCM = auto()
-
-    # Use absorbed multi-latent attention for ROCm
-    MLA_ROCM = auto()

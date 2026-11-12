@@ -6,18 +6,23 @@ from sglang.test.performance_test_runner import PerformanceTestParams
 from sglang.test.run_combined_tests import run_combined_tests
 from sglang.test.test_utils import ModelLaunchSettings
 
-# Runs on both H200 and B200: registered once per runner_config below
-register_cuda_ci(est_time=2820, stage="nightly", runner_config="8-gpu-h200")
-register_cuda_ci(est_time=2820, stage="nightly", runner_config="8-gpu-b200")
+# Runs on both H200 and B200 via nightly-8-gpu-common suite
+register_cuda_ci(est_time=3600, suite="nightly-8-gpu-common", nightly=True)
 
 KIMI_K25_MODEL_PATH = "moonshotai/Kimi-K2.5"
+EAGLE3_DRAFT_MODEL_PATH = "AQ-MedAI/Kimi-K25-eagle3"
 
 
 class TestKimiK25(unittest.TestCase):
     """Unified test class for Kimi-K2.5 performance and accuracy.
 
-    Runs TP=8 with tool/reasoning parsers.
-    Runs BOTH performance test and accuracy test (gsm8k).
+    Two variants:
+    - basic: TP=8 + tool/reasoning parsers
+    - eagle3: TP=8 + EAGLE3 speculative decoding with draft model
+
+    Each variant runs BOTH:
+    - Performance test (using NightlyBenchmarkRunner)
+    - Accuracy test (using run_eval with gsm8k)
     """
 
     def test_kimi_k25(self):
@@ -26,13 +31,16 @@ class TestKimiK25(unittest.TestCase):
             "--trust-remote-code",
             "--tool-call-parser=kimi_k2",
             "--reasoning-parser=kimi_k2",
+        ]
+        eagle3_args = [
+            "--speculative-algorithm=EAGLE3",
+            f"--speculative-draft-model-path={EAGLE3_DRAFT_MODEL_PATH}",
+            "--speculative-num-steps=3",
+            "--speculative-eagle-topk=1",
+            "--speculative-num-draft-tokens=4",
+            "--mem-frac=0.85",
             "--model-loader-extra-config",
             '{"enable_multithread_load": true, "num_threads": 64}',
-        ]
-
-        dp_attn_args = [
-            "--dp=8",
-            "--enable-dp-attention",
         ]
 
         variants = [
@@ -45,8 +53,8 @@ class TestKimiK25(unittest.TestCase):
             ModelLaunchSettings(
                 KIMI_K25_MODEL_PATH,
                 tp_size=8,
-                extra_args=base_args + dp_attn_args,
-                variant="TP8+DP8",
+                extra_args=base_args + eagle3_args,
+                variant="TP8+MTP",
             ),
         ]
 
@@ -55,7 +63,7 @@ class TestKimiK25(unittest.TestCase):
             test_name="Kimi-K2.5",
             accuracy_params=AccuracyTestParams(dataset="gsm8k", baseline_accuracy=0.92),
             performance_params=PerformanceTestParams(
-                result_dir="performance_results_kimi_k25",
+                profile_dir="performance_profiles_kimi_k25",
             ),
         )
 

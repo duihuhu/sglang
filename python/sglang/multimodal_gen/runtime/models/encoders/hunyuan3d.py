@@ -11,10 +11,6 @@ from transformers import (
     Dinov2Model,
 )
 
-from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
-    LayerwiseOffloadableModuleMixin,
-)
-
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
@@ -32,12 +28,7 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     return np.concatenate([emb_sin, emb_cos], axis=1)
 
 
-class ImageEncoder(nn.Module, LayerwiseOffloadableModuleMixin):
-    layerwise_offload_dit_group_enabled = False
-    layer_names = [
-        "model.encoder.layer",
-        "model.vision_model.encoder.layers",
-    ]
+class ImageEncoder(nn.Module):
     MODEL_CLASS = None
     MODEL_CONFIG_CLASS = None
     mean = []
@@ -212,15 +203,7 @@ def build_image_encoder(config):
         raise ValueError(f'Unknown image encoder type: {config["type"]}')
 
 
-class DualImageEncoder(nn.Module, LayerwiseOffloadableModuleMixin):
-    layerwise_offload_dit_group_enabled = False
-    layer_names = [
-        "main_image_encoder.model.encoder.layer",
-        "main_image_encoder.model.vision_model.encoder.layers",
-        "additional_image_encoder.model.encoder.layer",
-        "additional_image_encoder.model.vision_model.encoder.layers",
-    ]
-
+class DualImageEncoder(nn.Module):
     def __init__(
         self,
         main_image_encoder,
@@ -249,13 +232,7 @@ class DualImageEncoder(nn.Module, LayerwiseOffloadableModuleMixin):
         return outputs
 
 
-class SingleImageEncoder(nn.Module, LayerwiseOffloadableModuleMixin):
-    layerwise_offload_dit_group_enabled = False
-    layer_names = [
-        "main_image_encoder.model.encoder.layer",
-        "main_image_encoder.model.vision_model.encoder.layers",
-    ]
-
+class SingleImageEncoder(nn.Module):
     def __init__(
         self,
         main_image_encoder,

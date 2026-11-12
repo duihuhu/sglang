@@ -15,6 +15,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.distributed.parallel_state import get_pp_group
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.linear import (
@@ -33,9 +34,7 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.runtime_context import get_parallel
 from sglang.srt.utils import add_prefix, make_layers
-from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 
 class OrionMLP(nn.Module):
@@ -91,7 +90,7 @@ class OrionAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        tp_size = get_parallel().tp_size
+        tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -166,7 +165,8 @@ class OrionDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta, rope_scaling = get_rope_config(config)
+        rope_theta = config.rope_parameters["rope_theta"]
+        rope_scaling = config.rope_parameters
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.self_attn = OrionAttention(
             hidden_size=self.hidden_size,

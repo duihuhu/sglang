@@ -329,12 +329,12 @@ impl AppContextBuilder {
         let has_tls_config = config.client_identity.is_some() || !config.ca_certificates.is_empty();
 
         let mut client_builder = Client::builder()
-            .pool_idle_timeout(Some(Duration::from_secs(config.pool_idle_timeout_secs)))
-            .pool_max_idle_per_host(config.pool_max_idle_per_host)
+            .pool_idle_timeout(Some(Duration::from_secs(50)))
+            .pool_max_idle_per_host(500)
             .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
+            .connect_timeout(Duration::from_secs(10))
             .tcp_nodelay(true)
-            .tcp_keepalive(Some(Duration::from_secs(config.tcp_keepalive_secs)));
+            .tcp_keepalive(Some(Duration::from_secs(30)));
 
         // Force rustls backend when TLS is configured
         if has_tls_config {

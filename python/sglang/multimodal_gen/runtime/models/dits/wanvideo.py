@@ -9,16 +9,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from sglang.kernels.ops.diffusion.bitexact_gate import (
-    BitExactFusionGate,
-    tensors_equal,
-)
-from sglang.kernels.ops.diffusion.triton.wan_temb_table_slices import (
-    can_use_fused_temb_table_slices,
-    fused_temb_table_slices,
-)
 from sglang.multimodal_gen.configs.models.dits import WanVideoConfig
-from sglang.multimodal_gen.configs.models.fsdp import is_block
+from sglang.multimodal_gen.configs.sample.wan import WanTeaCacheParams
 from sglang.multimodal_gen.runtime.distributed import (
     divide,
     get_sp_group,
@@ -58,27 +50,22 @@ from sglang.multimodal_gen.runtime.layers.visual_embedding import (
     TimestepEmbedder,
 )
 from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
-from sglang.multimodal_gen.runtime.managers.memory_managers.layerwise_offload import (
-    LayerwiseOffloadableModuleMixin,
-)
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import (
     AttentionBackendEnum,
     current_platform,
 )
-from sglang.multimodal_gen.runtime.platforms.aiter import USE_AITER
 from sglang.multimodal_gen.runtime.server_args import get_global_server_args
+from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.srt.utils import add_prefix
 
 logger = init_logger(__name__)
 _is_cuda = current_platform.is_cuda()
 
-if USE_AITER:
-    from aiter.ops.rope import rope_cached_2c_fwd_inplace
-
 
 class WanImageEmbedding(torch.nn.Module):
+
     def __init__(self, in_features: int, out_features: int):
         super().__init__()
 
@@ -95,6 +82,7 @@ class WanImageEmbedding(torch.nn.Module):
 
 
 class WanTimeTextImageEmbedding(nn.Module):
+
     def __init__(
         self,
         dim: int,
@@ -137,6 +125,7 @@ class WanTimeTextImageEmbedding(nn.Module):
 
 
 class WanSelfAttention(nn.Module):
+
     def __init__(
         self,
         dim: int,
@@ -188,7 +177,7 @@ class WanSelfAttention(nn.Module):
             dim,
             input_is_parallel=True,
             quant_config=quant_config,
-            prefix=add_prefix("to_out", prefix),
+            prefix=add_prefix("to_out.0", prefix),
         )
         self.norm_q = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
@@ -204,7 +193,6 @@ class WanSelfAttention(nn.Module):
             causal=False,
             supported_attention_backends=supported_attention_backends,
             skip_sequence_parallel=is_cross_attention,
-            is_cross_attention=is_cross_attention,
             quant_config=quant_config,
         )
 
@@ -254,6 +242,7 @@ class WanT2VCrossAttention(WanSelfAttention):
 
 
 class WanI2VCrossAttention(WanSelfAttention):
+
     def __init__(
         self,
         dim: int,
@@ -340,55 +329,8 @@ class WanI2VCrossAttention(WanSelfAttention):
         return x
 
 
-_WAN_TEMB_SLICES = BitExactFusionGate("Wan fused temb-table slices")
-
-
-def _eager_temb_table_slices(
-    table: torch.Tensor, temb: torch.Tensor
-) -> tuple[torch.Tensor, ...]:
-    parts = (table.unsqueeze(0) + temb.float()).chunk(6, dim=2)
-    return tuple(part.squeeze(2) for part in parts)
-
-
-def _wan_temb_table_slices(
-    table: torch.Tensor, temb: torch.Tensor
-) -> tuple[torch.Tensor, ...]:
-    """Per-token adaLN slices ``(table + temb.float()).chunk(6)`` in one pass.
-
-    The fused kernel writes each ``(B, S, D)`` slice contiguously, so the
-    downstream fused-norm wrappers' ``.contiguous()`` calls stop copying the
-    full activation.  A float32 add of widened values involves no rounding,
-    so the result is bit-identical to the eager chain; the first call still
-    verifies ``torch.equal`` and falls back permanently on mismatch.
-    """
-    verified = _WAN_TEMB_SLICES.verified
-    if (
-        not _WAN_TEMB_SLICES.disabled
-        and can_use_fused_temb_table_slices(table, temb)
-        and (verified or _WAN_TEMB_SLICES.can_attempt_once())
-    ):
-        try:
-            buf = fused_temb_table_slices(table, temb)
-        except Exception as exc:
-            _WAN_TEMB_SLICES.on_exception(exc, logger=logger)
-        else:
-            out = tuple(buf[j] for j in range(6))
-            if verified:
-                return out
-            return _WAN_TEMB_SLICES.accept_or_fallback(
-                out,
-                _eager_temb_table_slices(table, temb),
-                equal=tensors_equal,
-                logger=logger,
-                mismatch_msg=(
-                    "Wan fused temb-table slices are not bit-exact on this "
-                    "platform; falling back to eager"
-                ),
-            )
-    return _eager_temb_table_slices(table, temb)
-
-
 class WanTransformerBlock(nn.Module):
+
     def __init__(
         self,
         dim: int,
@@ -419,7 +361,7 @@ class WanTransformerBlock(nn.Module):
             bias=True,
             gather_output=False,
             quant_config=quant_config,
-            prefix=add_prefix("to_q", prefix),
+            prefix=add_prefix("attn1.to_q", prefix),
         )
         self.to_k = ColumnParallelLinear(
             dim,
@@ -427,7 +369,7 @@ class WanTransformerBlock(nn.Module):
             bias=True,
             gather_output=False,
             quant_config=quant_config,
-            prefix=add_prefix("to_k", prefix),
+            prefix=add_prefix("attn1.to_k", prefix),
         )
         self.to_v = ColumnParallelLinear(
             dim,
@@ -435,7 +377,7 @@ class WanTransformerBlock(nn.Module):
             bias=True,
             gather_output=False,
             quant_config=quant_config,
-            prefix=add_prefix("to_v", prefix),
+            prefix=add_prefix("attn1.to_v", prefix),
         )
 
         self.to_out = RowParallelLinear(
@@ -444,7 +386,7 @@ class WanTransformerBlock(nn.Module):
             bias=True,
             reduce_results=True,
             quant_config=quant_config,
-            prefix=add_prefix("to_out", prefix),
+            prefix=add_prefix("attn1.to_out.0", prefix),
         )
         tp_size = get_tp_world_size()
         self.local_num_heads = divide(num_heads, tp_size)
@@ -534,7 +476,7 @@ class WanTransformerBlock(nn.Module):
             dim,
             ffn_dim,
             act_type="gelu_pytorch_tanh",
-            prefix=add_prefix("ffn", prefix),
+            prefix=add_prefix("ffn.net", prefix),
             quant_config=quant_config,
         )
         self.mlp_residual = MulAdd()
@@ -547,7 +489,6 @@ class WanTransformerBlock(nn.Module):
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
         freqs_cis: tuple[torch.Tensor, torch.Tensor],
-        rope_cos_sin_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
@@ -555,25 +496,22 @@ class WanTransformerBlock(nn.Module):
         orig_dtype = hidden_states.dtype
         if temb.dim() == 4:
             # temb: batch_size, seq_len, 6, inner_dim (wan2.2 ti2v)
-            (
-                shift_msa,
-                scale_msa,
-                gate_msa,
-                c_shift_msa,
-                c_scale_msa,
-                c_gate_msa,
-            ) = _wan_temb_table_slices(self.scale_shift_table, temb)
+            shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+                self.scale_shift_table.unsqueeze(0) + temb.float()
+            ).chunk(6, dim=2)
+            # batch_size, seq_len, 1, inner_dim
+            shift_msa = shift_msa.squeeze(2)
+            scale_msa = scale_msa.squeeze(2)
+            gate_msa = gate_msa.squeeze(2)
+            c_shift_msa = c_shift_msa.squeeze(2)
+            c_scale_msa = c_scale_msa.squeeze(2)
+            c_gate_msa = c_gate_msa.squeeze(2)
         else:
             # temb: batch_size, 6, inner_dim (wan2.1/wan2.2 14B)
             e = self.scale_shift_table + temb.float()
-            (
-                shift_msa,
-                scale_msa,
-                gate_msa,
-                c_shift_msa,
-                c_scale_msa,
-                c_gate_msa,
-            ) = e.chunk(6, dim=1)
+            shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+                e.chunk(6, dim=1)
+            )
 
         assert shift_msa.dtype == torch.float32
 
@@ -600,39 +538,16 @@ class WanTransformerBlock(nn.Module):
         # Apply rotary embeddings
         cos, sin = freqs_cis
         if _is_cuda and query.shape == key.shape:
-            # The concatenated cache only depends on freqs_cis, which is fixed
-            # for the whole forward; the transformer builds it once per call.
-            cos_sin_cache = rope_cos_sin_cache
-            if cos_sin_cache is None:
-                cos_sin_cache = torch.cat(
-                    [
-                        cos.to(dtype=torch.float32).contiguous(),
-                        sin.to(dtype=torch.float32).contiguous(),
-                    ],
-                    dim=-1,
-                )
+            cos_sin_cache = torch.cat(
+                [
+                    cos.to(dtype=torch.float32).contiguous(),
+                    sin.to(dtype=torch.float32).contiguous(),
+                ],
+                dim=-1,
+            )
             query, key = apply_flashinfer_rope_qk_inplace(
                 query, key, cos_sin_cache, is_neox=False
             )
-        elif USE_AITER:
-            query_shape = query.shape
-            key_shape = key.shape
-            num_tokens = query.shape[:-2].numel()
-            q_sbhd = query.view(num_tokens, 1, query_shape[-2], query_shape[-1])
-            k_sbhd = key.view(num_tokens, 1, key_shape[-2], key_shape[-1])
-            cos_sbhd = cos.contiguous().view(num_tokens, 1, 1, -1)
-            sin_sbhd = sin.contiguous().view(num_tokens, 1, 1, -1)
-            rope_cached_2c_fwd_inplace(
-                q_sbhd,
-                k_sbhd,
-                cos_sbhd,
-                sin_sbhd,
-                1,  # GPTJ rotate style
-                True,  # reuse_freqs_front_part
-                False,  # nope_first
-            )
-            query = q_sbhd.view(query_shape)
-            key = k_sbhd.view(key_shape)
         else:
             query, key = _apply_rotary_emb(
                 query, cos, sin, is_neox_style=False
@@ -672,6 +587,7 @@ class WanTransformerBlock(nn.Module):
 
 
 class WanTransformerBlock_VSA(nn.Module):
+
     def __init__(
         self,
         dim: int,
@@ -683,8 +599,6 @@ class WanTransformerBlock_VSA(nn.Module):
         added_kv_proj_dim: int | None = None,
         supported_attention_backends: set[AttentionBackendEnum] | None = None,
         prefix: str = "",
-        attention_type: str = "original",
-        sla_topk: float = 0.0,
         quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
@@ -702,7 +616,7 @@ class WanTransformerBlock_VSA(nn.Module):
             bias=True,
             gather_output=True,
             quant_config=quant_config,
-            prefix=add_prefix("to_q", prefix),
+            prefix=add_prefix("attn1.to_q", prefix),
         )
         self.to_k = ColumnParallelLinear(
             dim,
@@ -710,7 +624,7 @@ class WanTransformerBlock_VSA(nn.Module):
             bias=True,
             gather_output=True,
             quant_config=quant_config,
-            prefix=add_prefix("to_k", prefix),
+            prefix=add_prefix("attn1.to_k", prefix),
         )
         self.to_v = ColumnParallelLinear(
             dim,
@@ -718,7 +632,7 @@ class WanTransformerBlock_VSA(nn.Module):
             bias=True,
             gather_output=True,
             quant_config=quant_config,
-            prefix=add_prefix("to_v", prefix),
+            prefix=add_prefix("attn1.to_v", prefix),
         )
         self.to_gate_compress = ColumnParallelLinear(
             dim,
@@ -735,7 +649,7 @@ class WanTransformerBlock_VSA(nn.Module):
             bias=True,
             gather_output=True,
             quant_config=quant_config,
-            prefix=add_prefix("to_out", prefix),
+            prefix=add_prefix("attn1.to_out.0", prefix),
         )
         self.attn1 = UlyssesAttention_VSA(
             num_heads=num_heads,
@@ -804,7 +718,7 @@ class WanTransformerBlock_VSA(nn.Module):
             dim,
             ffn_dim,
             act_type="gelu_pytorch_tanh",
-            prefix=add_prefix("ffn", prefix),
+            prefix=add_prefix("ffn.net", prefix),
             quant_config=quant_config,
         )
         self.mlp_residual = MulAdd()
@@ -817,7 +731,6 @@ class WanTransformerBlock_VSA(nn.Module):
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
         freqs_cis: tuple[torch.Tensor, torch.Tensor],
-        rope_cos_sin_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
@@ -852,39 +765,16 @@ class WanTransformerBlock_VSA(nn.Module):
         # Apply rotary embeddings
         cos, sin = freqs_cis
         if _is_cuda and query.shape == key.shape:
-            # The concatenated cache only depends on freqs_cis, which is fixed
-            # for the whole forward; the transformer builds it once per call.
-            cos_sin_cache = rope_cos_sin_cache
-            if cos_sin_cache is None:
-                cos_sin_cache = torch.cat(
-                    [
-                        cos.to(dtype=torch.float32).contiguous(),
-                        sin.to(dtype=torch.float32).contiguous(),
-                    ],
-                    dim=-1,
-                )
+            cos_sin_cache = torch.cat(
+                [
+                    cos.to(dtype=torch.float32).contiguous(),
+                    sin.to(dtype=torch.float32).contiguous(),
+                ],
+                dim=-1,
+            )
             query, key = apply_flashinfer_rope_qk_inplace(
                 query, key, cos_sin_cache, is_neox=False
             )
-        elif USE_AITER:
-            query_shape = query.shape
-            key_shape = key.shape
-            num_tokens = query.shape[:-2].numel()
-            q_sbhd = query.view(num_tokens, 1, query_shape[-2], query_shape[-1])
-            k_sbhd = key.view(num_tokens, 1, key_shape[-2], key_shape[-1])
-            cos_sbhd = cos.contiguous().view(num_tokens, 1, 1, -1)
-            sin_sbhd = sin.contiguous().view(num_tokens, 1, 1, -1)
-            rope_cached_2c_fwd_inplace(
-                q_sbhd,
-                k_sbhd,
-                cos_sbhd,
-                sin_sbhd,
-                1,  # GPTJ rotate style
-                True,  # reuse_freqs_front_part
-                False,  # nope_first
-            )
-            query = q_sbhd.view(query_shape)
-            key = k_sbhd.view(key_shape)
         else:
             query, key = _apply_rotary_emb(
                 query, cos, sin, is_neox_style=False
@@ -922,9 +812,10 @@ class WanTransformerBlock_VSA(nn.Module):
         return hidden_states
 
 
-class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
-    _fsdp_shard_conditions = [is_block]
-    _compile_conditions = [is_block]
+class WanTransformer3DModel(CachableDiT, OffloadableDiTMixin):
+    _fsdp_shard_conditions = WanVideoConfig()._fsdp_shard_conditions
+    _compile_conditions = WanVideoConfig()._compile_conditions
+    _supported_attention_backends = WanVideoConfig()._supported_attention_backends
     param_names_mapping = WanVideoConfig().param_names_mapping
     reverse_param_names_mapping = WanVideoConfig().reverse_param_names_mapping
     lora_param_names_mapping = WanVideoConfig().lora_param_names_mapping
@@ -1002,7 +893,7 @@ class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
             config.out_channels * math.prod(config.patch_size),
             bias=True,
             gather_output=True,
-            prefix="proj_out",
+            prefix=f"proj_out",
             quant_config=quant_config,
         )
         self.scale_shift_table = nn.Parameter(
@@ -1025,9 +916,9 @@ class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
             rope_dim_list=self.rope_dim_list,
             rope_theta=10000,
             dtype=(
-                torch.float64
-                if current_platform.is_float64_supported()
-                else torch.float32
+                torch.float32
+                if current_platform.is_mps() or current_platform.is_musa()
+                else torch.float64
             ),
         )
 
@@ -1075,7 +966,6 @@ class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
         self.enable_teacache = (
             forward_batch is not None and forward_batch.enable_teacache
         )
-        enable_spectrum = forward_batch is not None and forward_batch.enable_spectrum
 
         orig_dtype = hidden_states.dtype
         if not isinstance(encoder_hidden_states, torch.Tensor):
@@ -1116,7 +1006,7 @@ class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
             )
 
         hidden_states = self.patch_embedding(hidden_states)
-        hidden_states = hidden_states.flatten(2).transpose(1, 2).contiguous()
+        hidden_states = hidden_states.flatten(2).transpose(1, 2)
 
         # shape is [B, T' * H' * W', C]
         seq_len_orig = hidden_states.shape[1]
@@ -1155,16 +1045,13 @@ class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
         else:
             ts_seq_len = None
 
-        (
-            temb,
-            timestep_proj,
-            encoder_hidden_states,
-            encoder_hidden_states_image,
-        ) = self.condition_embedder(
-            timestep,
-            encoder_hidden_states,
-            encoder_hidden_states_image,
-            timestep_seq_len=ts_seq_len,
+        temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = (
+            self.condition_embedder(
+                timestep,
+                encoder_hidden_states,
+                encoder_hidden_states_image,
+                timestep_seq_len=ts_seq_len,
+            )
         )
         if ts_seq_len is not None:
             # batch_size, seq_len, 6, inner_dim
@@ -1204,48 +1091,30 @@ class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
             encoder_hidden_states.to(orig_dtype)
             if not current_platform.is_amp_supported()
             else encoder_hidden_states
-        )  # cast to orig_dtype if amp is not supported
+        )  # cast to orig_dtype for MPS
 
         assert encoder_hidden_states.dtype == orig_dtype
 
         # 4. Transformer blocks
-        run_transformer_blocks = self.begin_spectrum_step()
+        # if caching is enabled, we might be able to skip the forward pass
         should_skip_forward = self.should_skip_forward_for_cached_states(
             timestep_proj=timestep_proj, temb=temb
         )
 
-        if enable_spectrum and not run_transformer_blocks:
-            hidden_states = self.spectrum_predict_features(hidden_states)
-        elif should_skip_forward:
+        if should_skip_forward:
             hidden_states = self.retrieve_cached_states(hidden_states)
         else:
             # if teacache is enabled, we need to cache the original hidden states
             if self.enable_teacache:
                 original_hidden_states = hidden_states.clone()
 
-            rope_cos_sin_cache = None
-            if _is_cuda and freqs_cis is not None:
-                cos, sin = freqs_cis
-                rope_cos_sin_cache = torch.cat(
-                    [
-                        cos.to(dtype=torch.float32).contiguous(),
-                        sin.to(dtype=torch.float32).contiguous(),
-                    ],
-                    dim=-1,
-                )
             for block in self.blocks:
                 hidden_states = block(
-                    hidden_states,
-                    encoder_hidden_states,
-                    timestep_proj,
-                    freqs_cis,
-                    rope_cos_sin_cache=rope_cos_sin_cache,
+                    hidden_states, encoder_hidden_states, timestep_proj, freqs_cis
                 )
             # if teacache is enabled, we need to cache the original hidden states
             if self.enable_teacache:
                 self.maybe_cache_states(hidden_states, original_hidden_states)
-            if enable_spectrum:
-                self.spectrum_record_features(hidden_states)
         self.cnt += 1
 
         if sequence_shard_enabled:
@@ -1301,21 +1170,31 @@ class WanTransformer3DModel(CachableDiT, LayerwiseOffloadableModuleMixin):
         if ctx is None:
             return False
 
-        # Initialize Wan-specific parameters
+        # Wan uses WanTeaCacheParams with additional fields
         teacache_params = ctx.teacache_params
-        use_ret_steps = teacache_params.use_ret_steps
-        start_skipping, end_skipping = teacache_params.get_skip_boundaries(
-            ctx.num_inference_steps, ctx.do_cfg
-        )
+        assert isinstance(
+            teacache_params, WanTeaCacheParams
+        ), "teacache_params is not a WanTeaCacheParams"
 
-        # Determine boundary step
-        is_boundary_step = self.cnt < start_skipping or self.cnt >= end_skipping
+        # Initialize Wan-specific parameters
+        use_ret_steps = teacache_params.use_ret_steps
+        cutoff_steps = teacache_params.get_cutoff_steps(ctx.num_inference_steps)
+        ret_steps = teacache_params.ret_steps
+
+        # Adjust ret_steps and cutoff_steps for non-CFG mode
+        # (WanTeaCacheParams uses *2 factor assuming CFG)
+        if not ctx.do_cfg:
+            ret_steps = ret_steps // 2
+            cutoff_steps = cutoff_steps // 2
 
         timestep_proj = kwargs["timestep_proj"]
         temb = kwargs["temb"]
         modulated_inp = timestep_proj if use_ret_steps else temb
 
         self.is_cfg_negative = ctx.is_cfg_negative
+
+        # Wan uses ret_steps/cutoff_steps for boundary detection
+        is_boundary_step = self.cnt < ret_steps or self.cnt >= cutoff_steps
 
         # Use shared helper to compute cache decision
         should_calc = self._compute_teacache_decision(

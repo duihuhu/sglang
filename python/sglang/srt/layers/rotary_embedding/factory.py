@@ -21,7 +21,6 @@ from sglang.srt.layers.rotary_embedding.rope_variant import (
     DynamicNTKAlphaRotaryEmbedding,
     DynamicNTKScalingRotaryEmbedding,
     FourierRotaryEmbedding,
-    Gemma4RotaryEmbedding,
     Llama3RotaryEmbedding,
     Phi3LongRoPEScaledRotaryEmbedding,
 )
@@ -58,38 +57,6 @@ if _use_aiter:
     from aiter.rotary_embedding import get_rope as aiter_get_rope
 
 _ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}
-
-
-def _get_live_rope_cache_entry(key: Tuple) -> Optional[RotaryEmbedding]:
-    """Return the cached module for ``key``, dropping it if its buffers are dead.
-
-    A cached module is shared process-wide and attached as a submodule of every
-    model that requests it, so a model teardown that frees CUDA storages and
-    re-points its own module tree at the meta device kills this entry for all
-    later models too. Nothing downstream can catch that: the in-place RoPE ops
-    take the cos/sin cache as an argument, so a meta tensor routes them to the
-    Meta backend, where they silently no-op and leave queries un-rotated.
-
-    A dead entry is indistinguishable from one a meta-device construction pass
-    built on purpose -- both are meta with no storage -- so the current device
-    is what separates them.
-    """
-    cached = _ROPE_DICT.get(key)
-    if cached is None:
-        return None
-    if torch.get_default_device().type == "meta":
-        return cached
-    for buf in cached.buffers():
-        if buf.device.type == "meta" or buf.untyped_storage().nbytes() == 0:
-            logger.warning(
-                "Discarding dead RoPE cache entry (key=%s): buffer on %s. "
-                "A shared RotaryEmbedding was freed by its owner.",
-                key,
-                buf.device,
-            )
-            del _ROPE_DICT[key]
-            return None
-    return cached
 
 
 def get_rope(
@@ -135,9 +102,8 @@ def get_rope(
         dual_chunk_attention_args,
         dtype,
     )
-    cached = _get_live_rope_cache_entry(key)
-    if cached is not None:
-        return cached
+    if key in _ROPE_DICT:
+        return _ROPE_DICT[key]
 
     if dual_chunk_attention_config is not None:
         extra_kwargs = {
@@ -205,9 +171,6 @@ def get_rope(
                     dtype,
                     mrope_section=rope_scaling["mrope_section"],
                     mrope_interleaved=rope_scaling.get("mrope_interleaved", False),
-                    mrope_interleaved_glm=rope_scaling.get(
-                        "mrope_interleaved_glm", False
-                    ),
                 )
             elif rope_scaling.get("use_fope", False):
                 rotary_emb = FourierRotaryEmbedding(
@@ -276,14 +239,7 @@ def get_rope(
                 k: v
                 for k, v in rope_scaling.items()
                 if k
-                in (
-                    "extrapolation_factor",
-                    "attn_factor",
-                    "beta_fast",
-                    "beta_slow",
-                    "mscale",
-                    "mscale_all_dim",
-                )
+                in ("extrapolation_factor", "attn_factor", "beta_fast", "beta_slow")
             }
             extra_kwargs["truncate"] = rope_scaling.get("truncate", True)
             if "mrope_section" in rope_scaling:
@@ -367,15 +323,6 @@ def get_rope(
                 long_factor,
                 **extra_kwargs,
             )
-        elif scaling_type == "proportional":
-            rotary_emb = Gemma4RotaryEmbedding(
-                head_size,
-                rotary_dim,
-                max_position,
-                base,
-                is_neox_style,
-                dtype,
-            )
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb
@@ -413,9 +360,8 @@ def get_rope_cpu(
         rope_scaling_args,
         dtype,
     )
-    cached = _get_live_rope_cache_entry(key)
-    if cached is not None:
-        return cached
+    if key in _ROPE_DICT:
+        return _ROPE_DICT[key]
 
     assert rope_scaling is not None
     scaling_type = rope_scaling["rope_type"]

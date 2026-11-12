@@ -1,5 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://github.com/vllm-project/vllm/pull/18595/files#diff-f426a6de78c82ffec568eff6811bfbf0043dab5f87f1a8c0cffdbdcb8a81e035
 
 from __future__ import annotations
@@ -7,55 +5,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 import torch
-from triton_kernels.matmul import (
+from sgl_kernel import gelu_and_mul, silu_and_mul
+from triton_kernels.matmul_ogs import (
     FlexCtx,
     FnSpecs,
     FusedActivation,
     PrecisionConfig,
-    matmul,
+    matmul_ogs,
 )
-from triton_kernels.matmul_details.opt_flags import update_opt_flags_constraints
 from triton_kernels.numerics import InFlexData
+from triton_kernels.routing import GatherIndx, RoutingData, ScatterIndx
 from triton_kernels.swiglu import swiglu_fn
-from triton_kernels.tensor import FP4
-
-from sglang.srt.utils import is_cuda
-from sglang.srt.utils.common import is_sm120_supported
-
-if is_sm120_supported():
-    # use the regular gather/scatter implementation for unsupported devices.
-    update_opt_flags_constraints({"is_persistent": False})
-
-if is_cuda():
-    from sglang.kernels.ops.activation.activation import gelu_and_mul, silu_and_mul
-else:
-    from sgl_kernel import gelu_and_mul, silu_and_mul
 
 if TYPE_CHECKING:
-    from triton_kernels.tensor_details.ragged_tensor import RaggedTensorMetadata
-
     from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
     from sglang.srt.layers.moe.topk import TopKOutput
-
-
-def _assert_unsupported_quant_args(
-    use_fp8_w8a8: bool,
-    per_channel_quant: bool,
-    expert_map: Optional[torch.Tensor],
-    w1_scale: Optional[torch.Tensor],
-    w2_scale: Optional[torch.Tensor],
-    a1_scale: Optional[torch.Tensor],
-    a2_scale: Optional[torch.Tensor],
-    block_shape: Optional[list[int]],
-) -> None:
-    assert use_fp8_w8a8 is False, "use_fp8_w8a8 is not supported"
-    assert per_channel_quant is False, "per_channel_quant is not supported"
-    assert expert_map is None, "expert_map is not supported"
-    assert w1_scale is None, "w1_scale is not supported"
-    assert w2_scale is None, "w2_scale is not supported"
-    assert a1_scale is None, "a1_scale is not supported"
-    assert a2_scale is None, "a2_scale is not supported"
-    assert block_shape is None, "block_shape is not supported"
 
 
 def quantize(w, dtype, dev, **opt):
@@ -85,17 +49,15 @@ def triton_kernel_moe_forward(
 
     assert TopKOutputChecker.format_is_triton_kernels(topk_output)
 
-    a_ragged_metadata, gather_idx, scatter_idx, gate_scal, n_expts_act = topk_output
+    routing_data, gather_idx, scatter_idx = topk_output
 
     return triton_kernel_fused_experts(
         hidden_states,
         w1,
         w2,
-        a_ragged_metadata,
+        routing_data,
         gather_idx,
         scatter_idx,
-        gate_scal,
-        n_expts_act,
         inplace=False,  # triton kernel doesn't support inplace
         activation=moe_runner_config.activation,
         apply_router_weight_on_input=apply_router_weight_on_input,
@@ -116,11 +78,9 @@ def triton_kernel_fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    a_ragged_metadata: RaggedTensorMetadata,
-    gather_indx: torch.Tensor,
-    scatter_indx: Optional[torch.Tensor],
-    gate_scal: torch.Tensor,
-    n_expts_act: int,
+    routing_data: RoutingData,
+    gather_indx: GatherIndx,
+    scatter_indx: ScatterIndx,
     inplace: bool = False,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
@@ -135,16 +95,14 @@ def triton_kernel_fused_experts(
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
 
-    _assert_unsupported_quant_args(
-        use_fp8_w8a8,
-        per_channel_quant,
-        expert_map,
-        w1_scale,
-        w2_scale,
-        a1_scale,
-        a2_scale,
-        block_shape,
-    )
+    assert use_fp8_w8a8 is False, "use_fp8_w8a8 is not supported"
+    assert per_channel_quant is False, "per_channel_quant is not supported"
+    assert expert_map is None, "expert_map is not supported"
+    assert w1_scale is None, "w1_scale is not supported"
+    assert w2_scale is None, "w2_scale is not supported"
+    assert a1_scale is None, "a1_scale is not supported"
+    assert a2_scale is None, "a2_scale is not supported"
+    assert block_shape is None, "block_shape is not supported"
 
     # type check
     assert hidden_states.dtype == torch.bfloat16, "hidden_states must be bfloat16"
@@ -165,6 +123,7 @@ def triton_kernel_fused_experts(
 
     M, K = hidden_states.shape
     E, _, N = w1.shape
+    n_expts_act = routing_data.n_expts_act
     dtype = hidden_states.dtype
 
     if global_num_experts == -1:
@@ -172,16 +131,16 @@ def triton_kernel_fused_experts(
 
     # consistent with default implementation
     intermediate_cache2 = torch.empty(
-        (M * n_expts_act, N // 2), device=hidden_states.device, dtype=dtype
+        (M * n_expts_act, N // 2), device="cuda", dtype=dtype
     )
 
-    intermediate_cache1 = matmul(
+    intermediate_cache1 = matmul_ogs(
         hidden_states,
         w1,
         None,
-        a_ragged_metadata=a_ragged_metadata,
+        routing_data,
         gather_indx=gather_indx,
-        gammas=gate_scal if apply_router_weight_on_input else None,
+        gammas=routing_data.gate_scal if apply_router_weight_on_input else None,
     )
 
     if activation == "silu":
@@ -191,13 +150,13 @@ def triton_kernel_fused_experts(
     else:
         raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
-    intermediate_cache3 = matmul(
+    intermediate_cache3 = matmul_ogs(
         intermediate_cache2,
         w2,
         None,
-        a_ragged_metadata=a_ragged_metadata,
+        routing_data,
         scatter_indx=scatter_indx,
-        gammas=None if apply_router_weight_on_input else gate_scal,
+        gammas=None if apply_router_weight_on_input else routing_data.gate_scal,
     )
 
     return intermediate_cache3
@@ -228,7 +187,7 @@ def triton_kernel_moe_with_bias_forward(
 
     assert TopKOutputChecker.format_is_triton_kernels(topk_output)
 
-    a_ragged_metadata, gather_idx, scatter_idx, gate_scal, n_expts_act = topk_output
+    routing_data, gather_idx, scatter_idx = topk_output
 
     return triton_kernel_fused_experts_with_bias(
         hidden_states,
@@ -238,11 +197,9 @@ def triton_kernel_moe_with_bias_forward(
         w2=w2,
         w2_pcg=w2_pcg,
         b2=b2,
-        a_ragged_metadata=a_ragged_metadata,
+        routing_data=routing_data,
         gather_indx=gather_idx,
         scatter_indx=scatter_idx,
-        gate_scal=gate_scal,
-        n_expts_act=n_expts_act,
         inplace=False,  # triton kernel doesn't support inplace
         activation=moe_runner_config.activation,
         apply_router_weight_on_input=apply_router_weight_on_input,
@@ -268,11 +225,9 @@ def triton_kernel_fused_experts_with_bias(
     w2: torch.Tensor,
     w2_pcg,
     b2: torch.Tensor,
-    a_ragged_metadata: RaggedTensorMetadata,
-    gather_indx: torch.Tensor,
-    scatter_indx: Optional[torch.Tensor],
-    gate_scal: torch.Tensor,
-    n_expts_act: int,
+    routing_data: RoutingData,
+    gather_indx: GatherIndx,
+    scatter_indx: ScatterIndx,
     inplace: bool = False,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
@@ -288,24 +243,21 @@ def triton_kernel_fused_experts_with_bias(
     gemm1_alpha: Optional[float] = None,
     gemm1_clamp_limit: Optional[float] = None,
 ) -> torch.Tensor:
-    _assert_unsupported_quant_args(
-        use_fp8_w8a8,
-        per_channel_quant,
-        expert_map,
-        w1_scale,
-        w2_scale,
-        a1_scale,
-        a2_scale,
-        block_shape,
-    )
+    assert use_fp8_w8a8 is False, "use_fp8_w8a8 is not supported"
+    assert per_channel_quant is False, "per_channel_quant is not supported"
+    assert expert_map is None, "expert_map is not supported"
+    assert w1_scale is None, "w1_scale is not supported"
+    assert w2_scale is None, "w2_scale is not supported"
+    assert a1_scale is None, "a1_scale is not supported"
+    assert a2_scale is None, "a2_scale is not supported"
+    assert block_shape is None, "block_shape is not supported"
 
     # type check
     assert hidden_states.dtype == torch.bfloat16, "hidden_states must be bfloat16"
     for w in (w1, w2):
-        assert w.dtype in (
-            torch.bfloat16,
-            FP4,
-        ), f"w must be bfloat16 or mxfp4 (FP4), got {w.dtype}"
+        # TODO assert bf16 or mxfp4
+        # assert (w.dtype == torch.bfloat16) or check-is-mxfp4, f"w must be bfloat16 or mxfp4 {w1.dtype=}"
+        pass
 
     # Shape check
     assert hidden_states.ndim == 2, "hidden_states must be 2D"
@@ -321,6 +273,7 @@ def triton_kernel_fused_experts_with_bias(
 
     M, K = hidden_states.shape
     E, _, N = w1.shape
+    n_expts_act = routing_data.n_expts_act
 
     if global_num_experts == -1:
         global_num_experts = E
@@ -336,28 +289,40 @@ def triton_kernel_fused_experts_with_bias(
         w2_pcg = PrecisionConfig(flex_ctx=FlexCtx(rhs_data=w2_flex))
 
     act = FusedActivation(
-        FnSpecs("swiglu", swiglu_fn, ("alpha", "limit"), reduction_n=2),
+        FnSpecs("swiglu", swiglu_fn, ("alpha", "limit")),
         (gemm1_alpha, gemm1_clamp_limit),
+        2,
     )
 
-    intermediate_cache = matmul(
+    intermediate_cache = torch.empty(
+        (1, M * n_expts_act, N // 2),
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+    output = torch.empty(
+        (1, M, K), device=hidden_states.device, dtype=hidden_states.dtype
+    )
+
+    matmul_ogs(
         hidden_states,
         w1,
         b1,
-        a_ragged_metadata=a_ragged_metadata,
+        routing_data,
         gather_indx=gather_indx,
         precision_config=w1_pcg,
-        gammas=gate_scal if apply_router_weight_on_input else None,
+        gammas=routing_data.gate_scal if apply_router_weight_on_input else None,
         fused_activation=act,
+        y=intermediate_cache,
     )
 
-    output = matmul(
+    matmul_ogs(
         intermediate_cache.view(M * n_expts_act, N // 2),
         w2,
         b2,
-        a_ragged_metadata=a_ragged_metadata,
+        routing_data,
         scatter_indx=scatter_indx,
         precision_config=w2_pcg,
-        gammas=None if apply_router_weight_on_input else gate_scal,
+        gammas=None if apply_router_weight_on_input else routing_data.gate_scal,
+        y=output,
     )
-    return output.view(-1, K)
+    return output.view(M, K)

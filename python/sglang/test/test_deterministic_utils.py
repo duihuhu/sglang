@@ -1,18 +1,18 @@
 import unittest
 
+from sglang.srt.utils import kill_process_tree
 from sglang.test.test_deterministic import BenchArgs, test_deterministic
 from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
     popen_launch_server,
-    terminate_and_kill_process_tree,
 )
 
 DEFAULT_MODEL = "Qwen/Qwen3-8B"
 COMMON_SERVER_ARGS = [
     "--trust-remote-code",
-    "--cuda-graph-max-bs-decode",
+    "--cuda-graph-max-bs",
     "32",
     "--enable-deterministic-inference",
 ]
@@ -31,9 +31,7 @@ class TestDeterministicBase(CustomTestCase):
     def setUpClass(cls):
         cls.model = cls.get_model()
         cls.base_url = DEFAULT_URL_FOR_TEST
-        # Identity, not a probe for --attention-backend: a subclass that
-        # deliberately leaves the backend unspecified is a real test case.
-        if cls is TestDeterministicBase:
+        if "--attention-backend" not in cls.get_server_args():
             raise unittest.SkipTest("Skip the base test class")
 
         cls.process = popen_launch_server(
@@ -45,7 +43,7 @@ class TestDeterministicBase(CustomTestCase):
 
     @classmethod
     def tearDownClass(cls):
-        terminate_and_kill_process_tree(cls.process, wait_timeout=60)
+        kill_process_tree(cls.process.pid)
 
     def _extract_host_and_port(self, url):
         return url.split("://")[-1].split(":")[0], int(url.split(":")[-1])

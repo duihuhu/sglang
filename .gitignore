@@ -230,7 +230,6 @@ work_dirs/
 
 # Rust lib
 Cargo.lock
-!rust/Cargo.lock
 
 # Generated vision test fixtures (regenerate with: python scripts/generate_vision_golden.py)
 sgl-model-gateway/tests/fixtures/golden/
@@ -281,3 +280,20 @@ artifacts/
 
 # Internal, non-published docs
 internal-docs/
+
+# MoE energy benchmark generated artifacts
+/benchmark/moe-energy/**/data/
+/benchmark/moe-energy/**/logs/
+/benchmark/moe-energy/**/fig/
+
+# =============================================================================
+# Local-only benchmark trees (large experiment data; excluded from GitHub)
+# =============================================================================
+benchmark/AFlex_bench/
+benchmark/other-gpu-2/
+benchmark/hicache/
+benchmark/dadf_experiments/
+benchmark/test_motivation/
+benchmark/megascale-pdaf-two-node-addon
+
+.ruff_cache/

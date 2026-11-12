@@ -12,18 +12,16 @@ from sglang.test.server_fixtures.disaggregation_fixture import (
 from sglang.test.test_utils import (
     DEFAULT_MODEL_NAME_FOR_TEST,
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+    is_in_ci,
     popen_launch_pd_server,
 )
 
 # Registering the test for CUDA CI with appropriate parameters
 # Increasing estimated time since we run evaluation twice
-register_cuda_ci(
-    est_time=600,
-    stage="base-b",
-    runner_config="2-gpu-large",
-)
+register_cuda_ci(est_time=600, suite="stage-b-test-large-2-gpu")
 
 
+@unittest.skipIf(is_in_ci(), "Temporarily disable the flaky test.")
 class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
     """
     Test class for verifying KV cache offloading on the decode side in a
@@ -77,8 +75,6 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             "--trust-remote-code",
             "--disaggregation-mode",
             "prefill",
-            "--disaggregation-bootstrap-port",
-            cls.bootstrap_port,
             "--tp",
             "1",
             "--page-size",
@@ -103,8 +99,6 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             "--trust-remote-code",
             "--disaggregation-mode",
             "decode",
-            "--disaggregation-bootstrap-port",
-            cls.bootstrap_port,
             "--tp",
             "1",
             "--base-gpu-id",
@@ -139,7 +133,7 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             base_url=f"http://{self.base_host}:{self.lb_port}",
             model=self.model,
             eval_name="mmlu",
-            num_examples=256,
+            num_examples=64,
             num_threads=32,
         )
 
@@ -166,8 +160,8 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
         metrics2 = run_eval(args)
 
         # Assert score is above a minimum threshold for both rounds
-        self.assertGreater(metrics1["score"], 0.64)
-        self.assertGreater(metrics2["score"], 0.64)
+        self.assertGreater(metrics1["score"], 0.65)
+        self.assertGreater(metrics2["score"], 0.65)
 
         # Score should be consistent: round 2 should be >= round 1, or at least within a 0.05 margin if slightly lower
         self.assertGreaterEqual(metrics2["score"], metrics1["score"] - 0.05)

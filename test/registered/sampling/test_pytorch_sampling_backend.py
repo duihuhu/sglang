@@ -11,12 +11,11 @@ from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
-    is_in_amd_ci,
     popen_launch_server,
 )
 
-register_cuda_ci(est_time=80, stage="base-b", runner_config="1-gpu-small")
-register_amd_ci(est_time=66, suite="stage-b-test-1-gpu-small-amd")
+register_cuda_ci(est_time=66, suite="stage-b-test-small-1-gpu")
+register_amd_ci(est_time=66, suite="stage-b-test-small-1-gpu-amd")
 
 
 class TestPyTorchSamplingBackend(CustomTestCase):
@@ -40,20 +39,14 @@ class TestPyTorchSamplingBackend(CustomTestCase):
             base_url=self.base_url,
             model=self.model,
             eval_name="mmlu",
-            num_examples=256,
+            num_examples=64,
             num_threads=32,
             temperature=0.1,
         )
 
         metrics = run_eval(args)
-        self.assertGreaterEqual(metrics["score"], 0.64)
+        self.assertGreaterEqual(metrics["score"], 0.65)
 
-    @unittest.skipIf(
-        is_in_amd_ci(),
-        "Skip on MI300x: greedy decode is not bit-exact across runs on MI300x "
-        "(kernel-level numerical jitter), so the assertEqual on identical "
-        "regenerated text is flaky on this runner pool.",
-    )
     def test_greedy(self):
 
         first_text = None

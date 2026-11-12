@@ -11,5 +11,4 @@ pub mod power_of_two_test;
 pub mod service_discovery_test;
 pub mod test_openai_routing;
 pub mod test_pd_routing;
-pub mod worker_discovery_test;
 pub mod worker_management_test;

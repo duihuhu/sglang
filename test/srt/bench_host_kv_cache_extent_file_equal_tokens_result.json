@@ -1,0 +1,305 @@
+{
+  "compute_interference": [
+    {
+      "compute_after_over_baseline_ratio": 0.9998100143704411,
+      "compute_after_transfer_ms": 1.2307980796322227,
+      "compute_only_ms": 1.231031958013773,
+      "concurrent_over_max_ratio": 1.0089009107601432,
+      "concurrent_wall_ms": 150.860704947263,
+      "extent_count": 1,
+      "max_of_isolated_ms": 149.52975395135581,
+      "tokens": 2048,
+      "transfer_only_ms": 149.52975395135581
+    },
+    {
+      "compute_after_over_baseline_ratio": 1.00005853713524,
+      "compute_after_transfer_ms": 1.2311040190979838,
+      "compute_only_ms": 1.231031958013773,
+      "concurrent_over_max_ratio": 1.0069487496279355,
+      "concurrent_wall_ms": 151.39668493065983,
+      "extent_count": 2,
+      "max_of_isolated_ms": 150.35192703362554,
+      "tokens": 2048,
+      "transfer_only_ms": 150.35192703362554
+    },
+    {
+      "compute_after_over_baseline_ratio": 0.9998814126533266,
+      "compute_after_transfer_ms": 1.230885973200202,
+      "compute_only_ms": 1.231031958013773,
+      "concurrent_over_max_ratio": 1.0033381861182535,
+      "concurrent_wall_ms": 151.65431902278215,
+      "extent_count": 4,
+      "max_of_isolated_ms": 151.1497530154884,
+      "tokens": 2048,
+      "transfer_only_ms": 151.1497530154884
+    },
+    {
+      "compute_after_over_baseline_ratio": 1.000127571236573,
+      "compute_after_transfer_ms": 1.2311890022829175,
+      "compute_only_ms": 1.231031958013773,
+      "concurrent_over_max_ratio": 1.0052546841745622,
+      "concurrent_wall_ms": 153.11572200153023,
+      "extent_count": 8,
+      "max_of_isolated_ms": 152.31535292696208,
+      "tokens": 2048,
+      "transfer_only_ms": 152.31535292696208
+    }
+  ],
+  "config": {
+    "cuda_iters": 10,
+    "device": 0,
+    "extents": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "gemm_size": 2048,
+    "head_dim": 16,
+    "head_num": 4,
+    "layer_num": 4,
+    "metadata_iters": 30,
+    "output_json": "/workspace/sglang/test/srt/bench_host_kv_cache_extent_file_equal_tokens_result.json",
+    "page_size": 16,
+    "pages_per_extent": 128,
+    "sample_pages": 128,
+    "seed": 0,
+    "storage_pages": 64,
+    "wall_iters": 5,
+    "warmup": 3
+  },
+  "hicache_file_backend": [
+    {
+      "batch_get_restore_ms": 6.01867598015815,
+      "batch_get_restore_us_per_page": 94.0418121899711,
+      "batch_set_ms": 6.9197999546304345,
+      "batch_set_us_per_page": 108.12187429110054,
+      "correct": true,
+      "extent_count": 1,
+      "file_bytes": 2097152,
+      "keys": 64,
+      "pages": 64
+    },
+    {
+      "batch_get_restore_ms": 4.827762022614479,
+      "batch_get_restore_us_per_page": 75.43378160335124,
+      "batch_set_ms": 6.855816929601133,
+      "batch_set_us_per_page": 107.1221395250177,
+      "correct": true,
+      "extent_count": 2,
+      "file_bytes": 2097152,
+      "keys": 64,
+      "pages": 64
+    },
+    {
+      "batch_get_restore_ms": 4.77133400272578,
+      "batch_get_restore_us_per_page": 74.55209379259031,
+      "batch_set_ms": 6.787966005504131,
+      "batch_set_us_per_page": 106.06196883600205,
+      "correct": true,
+      "extent_count": 4,
+      "file_bytes": 2097152,
+      "keys": 64,
+      "pages": 64
+    },
+    {
+      "batch_get_restore_ms": 4.887940012849867,
+      "batch_get_restore_us_per_page": 76.37406270077918,
+      "batch_set_ms": 7.030196022242308,
+      "batch_set_us_per_page": 109.84681284753606,
+      "correct": true,
+      "extent_count": 8,
+      "file_bytes": 2097152,
+      "keys": 64,
+      "pages": 64
+    }
+  ],
+  "metadata": [
+    {
+      "descriptor_ms": 3.1118205011201403,
+      "descriptor_us_per_page": 24.311097665001096,
+      "descriptors": 128,
+      "extent_count": 1,
+      "group_ms": 8.108864130917937,
+      "group_us_per_token": 3.9594063139247737,
+      "groups": 1,
+      "pages": 128,
+      "tokens": 2048
+    },
+    {
+      "descriptor_ms": 3.1190282005506256,
+      "descriptor_us_per_page": 24.367407816801762,
+      "descriptors": 128,
+      "extent_count": 2,
+      "group_ms": 8.164680865593255,
+      "group_us_per_token": 3.9866605789029563,
+      "groups": 2,
+      "pages": 128,
+      "tokens": 2048
+    },
+    {
+      "descriptor_ms": 3.113597099824498,
+      "descriptor_us_per_page": 24.32497734237889,
+      "descriptors": 128,
+      "extent_count": 4,
+      "group_ms": 8.177298497563848,
+      "group_us_per_token": 3.992821532013598,
+      "groups": 4,
+      "pages": 128,
+      "tokens": 2048
+    },
+    {
+      "descriptor_ms": 3.1013381007748344,
+      "descriptor_us_per_page": 24.229203912303394,
+      "descriptors": 128,
+      "extent_count": 8,
+      "group_ms": 8.254718303214759,
+      "group_us_per_token": 4.030624171491581,
+      "groups": 8,
+      "pages": 128,
+      "tokens": 2048
+    }
+  ],
+  "storage_marshalling": [
+    {
+      "correct": true,
+      "extent_count": 1,
+      "file_read_restore_ms": 5.618495983071625,
+      "file_write_ms": 3.3222539350390434,
+      "pack_ms": 3.2079638680443168,
+      "pack_us_per_page": 50.12443543819245,
+      "page_bytes": 32768,
+      "pages": 64
+    },
+    {
+      "correct": true,
+      "extent_count": 2,
+      "file_read_restore_ms": 5.450539058074355,
+      "file_write_ms": 2.2312900982797146,
+      "pack_ms": 3.2224726669179895,
+      "pack_us_per_page": 50.351135420593586,
+      "page_bytes": 32768,
+      "pages": 64
+    },
+    {
+      "correct": true,
+      "extent_count": 4,
+      "file_read_restore_ms": 5.448322976008058,
+      "file_write_ms": 2.0567639730870724,
+      "pack_ms": 3.215192068212976,
+      "pack_us_per_page": 50.23737606582775,
+      "page_bytes": 32768,
+      "pages": 64
+    },
+    {
+      "correct": true,
+      "extent_count": 8,
+      "file_read_restore_ms": 5.529298912733793,
+      "file_write_ms": 2.1320689702406526,
+      "pack_ms": 3.2115905662067235,
+      "pack_us_per_page": 50.181102596980054,
+      "page_bytes": 32768,
+      "pages": 64
+    }
+  ],
+  "transfer_page_first": [
+    {
+      "backup_event_ms": 30.26903076171875,
+      "correct": true,
+      "event_ms_per_token": 0.07318000197410583,
+      "extent_count": 1,
+      "groups": 1,
+      "layout": "page_first",
+      "pages": 128,
+      "restore_event_ms": 119.60361328125,
+      "roundtrip_wall_ms": 149.57695198245347,
+      "tokens": 2048
+    },
+    {
+      "backup_event_ms": 30.155572509765626,
+      "correct": true,
+      "event_ms_per_token": 0.07337010204792023,
+      "extent_count": 2,
+      "groups": 2,
+      "layout": "page_first",
+      "pages": 128,
+      "restore_event_ms": 120.106396484375,
+      "roundtrip_wall_ms": 150.12289199512452,
+      "tokens": 2048
+    },
+    {
+      "backup_event_ms": 30.19560852050781,
+      "correct": true,
+      "event_ms_per_token": 0.07366184741258622,
+      "extent_count": 4,
+      "groups": 4,
+      "layout": "page_first",
+      "pages": 128,
+      "restore_event_ms": 120.66385498046876,
+      "roundtrip_wall_ms": 150.91624192427844,
+      "tokens": 2048
+    },
+    {
+      "backup_event_ms": 30.477618408203124,
+      "correct": true,
+      "event_ms_per_token": 0.07406025230884551,
+      "extent_count": 8,
+      "groups": 8,
+      "layout": "page_first",
+      "pages": 128,
+      "restore_event_ms": 121.1977783203125,
+      "roundtrip_wall_ms": 151.7130018910393,
+      "tokens": 2048
+    }
+  ],
+  "transfer_page_head": [
+    {
+      "backup_event_ms": 30.387405395507812,
+      "correct": true,
+      "event_ms_per_token": 0.07393810302019119,
+      "extent_count": 1,
+      "groups": 1,
+      "layout": "page_head",
+      "pages": 128,
+      "restore_event_ms": 121.03782958984375,
+      "roundtrip_wall_ms": 151.55234490521252,
+      "tokens": 2048
+    },
+    {
+      "backup_event_ms": 30.542950439453126,
+      "correct": true,
+      "event_ms_per_token": 0.07416824996471405,
+      "extent_count": 2,
+      "groups": 2,
+      "layout": "page_head",
+      "pages": 128,
+      "restore_event_ms": 121.35362548828125,
+      "roundtrip_wall_ms": 152.01608301140368,
+      "tokens": 2048
+    },
+    {
+      "backup_event_ms": 30.669720458984376,
+      "correct": true,
+      "event_ms_per_token": 0.07444294989109039,
+      "extent_count": 4,
+      "groups": 4,
+      "layout": "page_head",
+      "pages": 128,
+      "restore_event_ms": 121.78944091796875,
+      "roundtrip_wall_ms": 152.7053479803726,
+      "tokens": 2048
+    },
+    {
+      "backup_event_ms": 30.936883544921876,
+      "correct": true,
+      "event_ms_per_token": 0.07509194910526276,
+      "extent_count": 8,
+      "groups": 8,
+      "layout": "page_head",
+      "pages": 128,
+      "restore_event_ms": 122.85142822265625,
+      "roundtrip_wall_ms": 153.34697195794433,
+      "tokens": 2048
+    }
+  ]
+}

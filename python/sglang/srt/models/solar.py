@@ -1,37 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
-from typing import Any, List, Optional, Tuple, Union
-
-import torch
-from torch import nn
-from transformers import PretrainedConfig
-
-from sglang.srt.distributed import get_pp_group
-from sglang.srt.layers.activation import SiluAndMul
-from sglang.srt.layers.layernorm import RMSNorm
-from sglang.srt.layers.linear import (
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
-from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
-from sglang.srt.layers.quantization import QuantizationConfig
-from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import get_rope
-from sglang.srt.layers.utils import PPMissingLayer
-from sglang.srt.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
-from sglang.srt.model_loader.weight_utils import (
-    default_weight_loader,
-    kv_cache_scales_loader,
-)
-
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -54,9 +23,38 @@ from sglang.srt.model_loader.weight_utils import (
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/solar.py
-from sglang.srt.runtime_context import get_parallel
+from collections.abc import Iterable
+from typing import Any, List, Optional, Tuple, Union
+
+import torch
+from torch import nn
+from transformers import PretrainedConfig
+
+from sglang.srt.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from sglang.srt.distributed.parallel_state import get_tensor_model_parallel_rank
+from sglang.srt.layers.activation import SiluAndMul
+from sglang.srt.layers.layernorm import RMSNorm
+from sglang.srt.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
+from sglang.srt.layers.quantization import QuantizationConfig
+from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.layers.rotary_embedding import get_rope
+from sglang.srt.layers.utils import PPMissingLayer
+from sglang.srt.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE,
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_loader.weight_utils import (
+    default_weight_loader,
+    kv_cache_scales_loader,
+)
 from sglang.srt.utils import add_prefix, make_layers
-from sglang.srt.utils.hf_transformers_utils import get_rope_config
 
 
 class SolarMLP(nn.Module):
@@ -117,7 +115,7 @@ class SolarAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        tp_size = get_parallel().tp_size
+        tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -196,7 +194,8 @@ class SolarDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta, rope_scaling = get_rope_config(config)
+        rope_theta = config.rope_parameters["rope_theta"]
+        rope_scaling = config.rope_parameters
 
         if rope_scaling is not None and getattr(
             config, "original_max_position_embeddings", None
@@ -363,8 +362,8 @@ class SolarModel(nn.Module):
         return hidden_states
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        tp_size = get_parallel().tp_size
-        tp_rank = get_parallel().tp_rank
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         for layer_idx, scaling_factor in kv_cache_scales_loader(
             quantization_param_path,
             tp_rank,

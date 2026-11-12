@@ -10,6 +10,7 @@ from utils import compare_versions, get_repo_root, normalize_version, validate_v
 FILES_TO_UPDATE = [
     Path("python/pyproject.toml"),
     Path("docker/Dockerfile"),
+    Path("scripts/ci/cuda/ci_install_dependency.sh"),
     Path("python/sglang/srt/entrypoints/engine.py"),
     Path("python/sglang/srt/utils/common.py"),
 ]
@@ -20,8 +21,7 @@ def read_current_flashinfer_version(repo_root: Path) -> str:
     pyproject = repo_root / "python" / "pyproject.toml"
     content = pyproject.read_text()
     match = re.search(
-        r"flashinfer_python(?:\[[^\]]+\])?==" r"(\d+\.\d+\.\d+(?:rc\d+|\.post\d+)?)",
-        content,
+        r"flashinfer_python==(\d+\.\d+\.\d+(?:rc\d+|\.post\d+)?)", content
     )
     if not match:
         raise ValueError(f"Could not find flashinfer_python version in {pyproject}")
@@ -40,10 +40,8 @@ def replace_flashinfer_version(
 
     name = file_path.name
     if name == "pyproject.toml":
-        new_content = re.sub(
-            rf"(flashinfer_python(?:\[[^\]]+\])?==){re.escape(old_version)}",
-            rf"\g<1>{new_version}",
-            new_content,
+        new_content = new_content.replace(
+            f"flashinfer_python=={old_version}", f"flashinfer_python=={new_version}"
         )
         new_content = new_content.replace(
             f"flashinfer_cubin=={old_version}", f"flashinfer_cubin=={new_version}"
@@ -51,6 +49,12 @@ def replace_flashinfer_version(
     elif name == "Dockerfile":
         new_content = re.sub(
             rf"(ARG FLASHINFER_VERSION=){re.escape(old_version)}",
+            rf"\g<1>{new_version}",
+            new_content,
+        )
+    elif name == "ci_install_dependency.sh":
+        new_content = re.sub(
+            rf"(FLASHINFER_VERSION=){re.escape(old_version)}",
             rf"\g<1>{new_version}",
             new_content,
         )

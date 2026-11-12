@@ -89,7 +89,7 @@ def main(args):
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                **args.chat_template_kwargs,
+                enable_thinking=True,
             )
         questions.append(raw_question)
         labels.append(get_answer_value(lines[i]["answer"]))
@@ -183,14 +183,6 @@ if __name__ == "__main__":
         "--enable-thinking",
         action="store_true",
         help="Enable thinking mode by wrapping prompts with chat template",
-    )
-    parser.add_argument(
-        "--chat-template-kwargs",
-        type=json.loads,
-        default='{"enable_thinking": true}',
-        help="JSON dict passed through to tokenizer.apply_chat_template. "
-        "The thinking-toggle kwarg name is model-specific, e.g. "
-        "'{\"enable_thinking\": true}' (Qwen) or '{\"thinking\": true}' (Kimi).",
     )
     parser.add_argument(
         "--tokenizer-path",
