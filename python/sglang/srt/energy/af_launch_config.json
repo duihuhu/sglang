@@ -1,8 +1,8 @@
 {
-  "_comment": "AFlex multi-module launch configuration for PD+AF. Start order: DF → DA → PF → PA → router.",
+  "_comment": "AFlex PD+AF template. Set model.path and external artifact paths before use; assets are not bundled. Start order: DF → DA → PF → PA → router.",
   "enable_metrics": true,
   "model": {
-    "path": "/models/Qwen/Qwen3-32B/",
+    "path": null,
     "tp": 1,
     "mem_fraction_static": 0.93,
     "num_layers": 64,
@@ -20,10 +20,10 @@
   "afd": {
     "comm_backend": "ucx",
     "dvfs_enabled": false,
-    "energy_model_dir": "/workspace/sglang/benchmark/test_motivation/energy_models"
+    "energy_model_dir": null
   },
   "tier1": {
-    "_comment": "Tier 1 — disabled for PD+AF architecture comparison (enabled by run_4arch.py when needed)",
+    "_comment": "Tier 1 is disabled by default. Set external profile paths and afd.energy_model_dir before enabling it.",
     "enable_tier1_pa": false,
     "start_with_workload": false,
     "gpu_count": 4,
@@ -35,8 +35,8 @@
     "ol_rep_d": 116,
     "bs_avg_d": 58,
     "monitor_window_s": 30.0,
-    "prefill_data_path": "benchmark/test_motivation/hucc/paper/prefill_data_v1.txt",
-    "decode_data_path": "benchmark/test_motivation/hucc/paper/decode_data_v1.txt",
+    "prefill_data_path": null,
+    "decode_data_path": null,
     "ttft_slo_ms": 5000.0,
     "tpot_slo_us": 300000.0
   },

@@ -1,5 +1,23 @@
 # 启动命令
 
+## 外部资源配置（首次启动前必读）
+
+公开的 `benchmark/test_aflex` 工具不附带模型权重、profile 数据或训练后的预测模型。
+两个 launcher JSON 都是模板：复制到本地配置文件，并将 `model.path` 从 `null`
+设置为自己的模型目录或模型 ID；GPU、网卡和模型几何参数必须匹配实际部署。
+相对路径按启动进程的当前工作目录解析，建议外部资源使用绝对路径。
+
+启用 DVFS 或 Tier 1 时，设置 `afd.energy_model_dir` 为外部预测模型目录；
+启用 Tier 1（含 `--start-with-workload`）时还必须设置：
+- `tier1.prefill_data_path`: `/path/to/aflex-assets/prefill_data_v1.txt`
+- `tier1.decode_data_path`: `/path/to/aflex-assets/decode_data_v1.txt`
+- `afd.energy_model_dir`: `/path/to/aflex-assets/energy_models`
+
+这些资源没有仓库内隐式回退路径。缺少必要配置或文件时，launcher 会在启动子进程前报错。
+最小模式只需要外部模型，不需要 profile 或预测模型。预测模型包含 pickle 文件，只加载可信资源。
+以下 launcher 命令的配置路径应替换为填好的本地副本；完整模式还需在副本中启用相应开关。
+手动命令中的 `/path/to/...` 同样必须替换为实际外部路径。
+
 ## 1. 使用 af_launcher.py（推荐）
 
 支持完整配置 + Tier 1 预求解 + 自动 GPU 分配 + 频率锁定。
@@ -30,12 +48,12 @@ python python/sglang/srt/energy/af_launcher.py \
     --config python/sglang/srt/energy/af_launch_config_minimal.json
 ```
 
-### 无预求解（PA 启动时运行 solver）
+### 无预求解（启用 Tier 1 动态监控）
 
 ```bash
 python python/sglang/srt/energy/af_launcher.py \
     --config python/sglang/srt/energy/af_launch_config.json
-# 不传 --start-with-workload, PA 会在 __init__ 中调用 solver
+# Enable tier1.enable_tier1_pa in the local config; the solver initializes lazily on re-plan.
 ```
 
 ## 2. 手动启动（调试用）
@@ -67,7 +85,7 @@ export SGLANG_DISABLE_REQUEST_LOGGING=true
 
 ```bash
 python -m sglang.launch_server \
-    --model-path /models/llama3.1-8 \
+    --model-path /path/to/model \
     --tp 1 \
     --port 50020 \
     --afd-perspective attn \
@@ -77,7 +95,7 @@ python -m sglang.launch_server \
     --disaggregation-ib-device mlx5_4 \
     --mem-fraction-static 0.7 \
     --afd-dvfs-enabled \
-    --afd-energy-model-dir /workspace/sglang/benchmark/test_motivation/energy_models \
+    --afd-energy-model-dir /path/to/aflex-assets/energy_models \
     --tier1-stats-path af_launch_logs/decode_stats.json
 ```
 
@@ -94,7 +112,7 @@ AFD_NVML_DEVICE_INDEX=1
 
 ```bash
 python -m sglang.launch_server \
-    --model-path /models/llama3.1-8 \
+    --model-path /path/to/model \
     --tp 1 \
     --port 50021 \
     --afd-perspective ffn \
@@ -118,7 +136,7 @@ AFD_NVML_DEVICE_INDEX=0
 
 ```bash
 python -m sglang.launch_server \
-    --model-path /models/llama3.1-8 \
+    --model-path /path/to/model \
     --tp 1 \
     --port 50010 \
     --afd-perspective attn \
@@ -128,7 +146,7 @@ python -m sglang.launch_server \
     --disaggregation-ib-device mlx5_4 \
     --mem-fraction-static 0.7 \
     --afd-dvfs-enabled \
-    --afd-energy-model-dir /workspace/sglang/benchmark/test_motivation/energy_models \
+    --afd-energy-model-dir /path/to/aflex-assets/energy_models \
     --enable-tier1-pa \
     --tier1-gpu-count 4 \
     --tier1-lambda-prefill 10.0 \
@@ -139,8 +157,8 @@ python -m sglang.launch_server \
     --tier1-ol-rep-d 256 \
     --tier1-bs-avg-d 16 \
     --tier1-monitor-window-s 30.0 \
-    --tier1-prefill-data-path benchmark/test_motivation/hucc/paper/prefill_data_v1.txt \
-    --tier1-decode-data-path benchmark/test_motivation/hucc/paper/decode_data_v1.txt \
+    --tier1-prefill-data-path /path/to/aflex-assets/prefill_data_v1.txt \
+    --tier1-decode-data-path /path/to/aflex-assets/decode_data_v1.txt \
     --tier1-stats-path af_launch_logs/decode_stats.json
 ```
 
@@ -159,7 +177,7 @@ AFD_FFN_GPU_INDICES="0,2"       # DF + PF
 
 ```bash
 python -m sglang.launch_server \
-    --model-path /models/llama3.1-8 \
+    --model-path /path/to/model \
     --tp 1 \
     --port 50011 \
     --afd-perspective ffn \

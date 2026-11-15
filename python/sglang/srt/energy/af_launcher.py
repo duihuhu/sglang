@@ -39,6 +39,29 @@ _PORT_POLL_INTERVAL_S = 1.0
 _SOLUTION_FILENAME = "tier1_initial_solution.json"
 
 
+def _validate_external_assets(cfg: dict, start_with_workload: bool) -> None:
+    """Reject missing external assets before starting any server processes."""
+    if not cfg.get("model", {}).get("path"):
+        raise ValueError("Set model.path to an external model directory or model ID.")
+    tier1 = cfg.get("tier1", {})
+    needs_profiles = start_with_workload or tier1.get("enable_tier1_pa", False)
+    afd = cfg.get("afd", {})
+    if afd.get("dvfs_enabled", False) or needs_profiles:
+        model_dir = afd.get("energy_model_dir")
+        if not model_dir or not Path(model_dir).is_dir():
+            raise ValueError(
+                "Set afd.energy_model_dir to an existing external directory "
+                "containing trained prediction models."
+            )
+    if needs_profiles:
+        for key in ("prefill_data_path", "decode_data_path"):
+            path = tier1.get(key)
+            if not path or not Path(path).is_file():
+                raise ValueError(
+                    f"Set tier1.{key} to an existing external profile file."
+                )
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -111,7 +134,7 @@ def _build_server_cmd(
 
     if cfg["afd"]["dvfs_enabled"]:
         cmd += ["--afd-dvfs-enabled"]
-    if cfg["afd"]["dvfs_enabled"] or tier1_extra is not None:
+    if cfg["afd"].get("energy_model_dir"):
         cmd += ["--afd-energy-model-dir", cfg["afd"]["energy_model_dir"]]
 
     if tier1_extra:
@@ -196,14 +219,9 @@ def _run_preflight_solve(cfg: dict, log_dir: Path) -> Optional[str]:
             WorkloadProfile,
         )
 
-        prefill_path = tier1.get("prefill_data_path",
-            "benchmark/test_motivation/hucc/paper/prefill_data_v1.txt")
-        decode_path = tier1.get("decode_data_path",
-            "benchmark/test_motivation/hucc/paper/decode_data_v1.txt")
-
         pt = ProfileTable(
-            prefill_path=prefill_path,
-            decode_path=decode_path,
+            prefill_path=tier1["prefill_data_path"],
+            decode_path=tier1["decode_data_path"],
             energy_model_dir=energy_dir,
         )
 
@@ -271,6 +289,11 @@ def _run_preflight_solve(cfg: dict, log_dir: Path) -> Optional[str]:
 
 def launch_all(cfg: dict, start_with_workload: bool = False) -> int:
     """Start all modules in order.  Returns 0 on success, 1 on failure."""
+    try:
+        _validate_external_assets(cfg, start_with_workload)
+    except ValueError as exc:
+        logger.error("Invalid external asset configuration: %s", exc)
+        return 1
     log_dir = Path(cfg["logs"]["dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -304,10 +327,8 @@ def launch_all(cfg: dict, start_with_workload: bool = False) -> int:
             "--tier1-ol-rep-d", str(tier1_cfg.get("ol_rep_d", 256)),
             "--tier1-bs-avg-d", str(tier1_cfg.get("bs_avg_d", 16)),
             "--tier1-monitor-window-s", str(tier1_cfg.get("monitor_window_s", 30.0)),
-            "--tier1-prefill-data-path", str(tier1_cfg.get("prefill_data_path",
-                "benchmark/test_motivation/hucc/paper/prefill_data_v1.txt")),
-            "--tier1-decode-data-path", str(tier1_cfg.get("decode_data_path",
-                "benchmark/test_motivation/hucc/paper/decode_data_v1.txt")),
+            "--tier1-prefill-data-path", tier1_cfg["prefill_data_path"],
+            "--tier1-decode-data-path", tier1_cfg["decode_data_path"],
         ]
 
     # Shared stats path for DA→PA decode timing (all modules)

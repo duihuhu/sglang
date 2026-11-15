@@ -705,8 +705,8 @@ class ServerArgs:
     tier1_ol_rep_d: int = 256
     tier1_bs_avg_d: int = 16
     tier1_monitor_window_s: float = 30.0
-    tier1_prefill_data_path: str = "benchmark/test_motivation/hucc/paper/prefill_data_v1.txt"
-    tier1_decode_data_path: str = "benchmark/test_motivation/hucc/paper/decode_data_v1.txt"
+    tier1_prefill_data_path: Optional[str] = None
+    tier1_decode_data_path: Optional[str] = None
     tier1_stats_path: Optional[str] = None
     """Path to a shared JSON file for DA→PA decode timing stats (cross-process Tier1 TPOT monitoring)."""
     tier1_disable_reload: bool = False
@@ -3426,6 +3426,16 @@ class ServerArgs:
                     "--enable-tier1-pa requires --afd-energy-model-dir "
                     "(for re-planning Tier1Solver)."
                 )
+            if self.enable_tier1_pa:
+                for option, path in (
+                    ("--tier1-prefill-data-path", self.tier1_prefill_data_path),
+                    ("--tier1-decode-data-path", self.tier1_decode_data_path),
+                ):
+                    if not path or not os.path.isfile(path):
+                        raise ValueError(
+                            f"--enable-tier1-pa requires {option} pointing to "
+                            "an existing external profile file."
+                        )
             if self.tier1_initial_solution and not os.path.exists(self.tier1_initial_solution):
                 logger.warning(
                     "--tier1-initial-solution file not found: %s, ignoring.",
@@ -6103,15 +6113,15 @@ class ServerArgs:
             "--tier1-prefill-data-path",
             type=str,
             default=ServerArgs.tier1_prefill_data_path,
-            help="Path to prefill profile data for Tier 1 ILP solver. Default: "
-            "benchmark/test_motivation/hucc/paper/prefill_data_v1.txt.",
+            help="Path to external prefill profile data for Tier 1 ILP solver. "
+            "Required with --enable-tier1-pa; no bundled default.",
         )
         parser.add_argument(
             "--tier1-decode-data-path",
             type=str,
             default=ServerArgs.tier1_decode_data_path,
-            help="Path to decode profile data for Tier 1 ILP solver. Default: "
-            "benchmark/test_motivation/hucc/paper/decode_data_v1.txt.",
+            help="Path to external decode profile data for Tier 1 ILP solver. "
+            "Required with --enable-tier1-pa; no bundled default.",
         )
         parser.add_argument(
             "--tier1-stats-path",

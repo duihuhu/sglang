@@ -103,6 +103,7 @@ torch = [
 ]
 
 [project.optional-dependencies]
+aflex = ["numpy", "scipy", "nvidia-ml-py", "pandas", "scikit-learn", "lightgbm"]
 checkpoint-engine = ["checkpoint-engine==0.1.2"]
 diffusion = [
   "PyYAML==6.0.1",
@@ -176,6 +177,17 @@ sglang = "sglang.cli.main:main"
   "srt/**/*",
   "jit_kernel/**/*"
 ]
+
+# Ship rebuildable native sources, never local binaries or trained model assets.
+"sglang.srt.energy.native.dvfs" = ["dvfs_ctrl.cpp", "Makefile"]
+
+[tool.setuptools.exclude-package-data]
+"sglang" = ["srt/energy/**/*.so", "srt/energy/**/*.pkl", "srt/energy/**/assets/*", "srt/energy/**/assets/**/*"]
+"sglang.srt.energy" = ["*.so", "**/*.so", "*.pkl", "**/*.pkl", "assets/*", "assets/**/*", "**/assets/*", "**/assets/**/*"]
+"sglang.srt.energy.native" = ["*.so", "**/*.so", "*.pkl", "**/*.pkl", "assets/*", "assets/**/*", "**/assets/*", "**/assets/**/*"]
+"sglang.srt.energy.native.dvfs" = ["*.so", "**/*.so", "*.pkl", "**/*.pkl", "assets/*", "assets/**/*", "**/assets/*", "**/assets/**/*"]
+"sglang.srt.energy.prediction" = ["*.so", "**/*.so", "*.pkl", "**/*.pkl", "assets/*", "assets/**/*", "**/assets/*", "**/assets/**/*"]
+"sglang.srt.energy.profiling" = ["*.so", "**/*.so", "*.pkl", "**/*.pkl", "assets/*", "assets/**/*", "**/assets/*", "**/assets/**/*"]
 
 [tool.setuptools.packages.find]
 exclude = [

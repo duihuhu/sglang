@@ -12,7 +12,8 @@ Architecture:
 This avoids Python-level pynvml overhead for minimal switching latency.
 
 Build the .so first:
-    cd benchmark/test_motivation/dvfs && make
+    python -m sglang.srt.energy.native.dvfs.build
+    # Or specify --output and export DVFS_CTRL_LIB=/path/to/libdvfs_ctrl.so
 
 Usage:
     from sglang.srt.layers.dvfs import DVFSController
@@ -38,6 +39,7 @@ from __future__ import annotations
 
 import atexit
 import ctypes
+import ctypes.util
 import logging
 import os
 from contextlib import contextmanager
@@ -54,41 +56,36 @@ _lib_initialized = False
 
 
 def _find_so() -> str:
-    """Locate libdvfs_ctrl.so by searching known paths."""
-    candidates = []
+    """Find the optional library without depending on a benchmark checkout.
 
-    # 1. env var override
+    An explicit DVFS_CTRL_LIB is authoritative: a typo must not silently load
+    an unrelated library. Otherwise search packaged, user-cache and system
+    locations, in that order. No NVML calls are made during discovery.
+    """
+    from sglang.srt.energy.native.dvfs import LIBRARY_NAME, default_library_path
+
     env_path = os.environ.get("DVFS_CTRL_LIB")
     if env_path:
-        candidates.append(env_path)
+        resolved = Path(env_path).expanduser().resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(
+                f"DVFS_CTRL_LIB does not point to a file: {resolved}. "
+                "Build it with python -m sglang.srt.energy.native.dvfs.build "
+                "--output /path/to/libdvfs_ctrl.so"
+            )
+        return str(resolved)
 
-    # 2. relative to this file: ../../../../benchmark/test_motivation/dvfs/
-    this_dir = Path(__file__).resolve().parent
-    candidates.append(
-        str(this_dir / ".." / ".." / ".." / ".." / "benchmark"
-            / "test_motivation" / "dvfs" / "libdvfs_ctrl.so")
+    package_path = (
+        Path(__file__).resolve().parents[1]
+        / "energy"
+        / "native"
+        / "dvfs"
+        / LIBRARY_NAME
     )
-
-    # 3. relative to this file: ../../../../benchmark/test_motivation/hucc/dvfs/
-    candidates.append(
-        str(this_dir / ".." / ".." / ".." / ".." / "benchmark"
-            / "test_motivation" / "hucc" / "dvfs" / "libdvfs_ctrl.so")
-    )
-
-    # 4. relative to cwd
-    candidates.append("benchmark/test_motivation/dvfs/libdvfs_ctrl.so")
-    candidates.append("benchmark/test_motivation/hucc/dvfs/libdvfs_ctrl.so")
-
-    # 5. system library path
-    candidates.append("libdvfs_ctrl.so")
-
-    for p in candidates:
-        resolved = Path(p).resolve()
-        if resolved.exists():
-            return str(resolved)
-
-    # last resort: let ctypes search LD_LIBRARY_PATH / system paths
-    return "libdvfs_ctrl.so"
+    for candidate in (package_path, default_library_path()):
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return ctypes.util.find_library("dvfs_ctrl") or LIBRARY_NAME
 
 
 def _load_lib() -> ctypes.CDLL:
@@ -99,7 +96,15 @@ def _load_lib() -> ctypes.CDLL:
 
     so_path = _find_so()
     logger.info(f"Loading DVFS control library from {so_path}")
-    _lib = ctypes.CDLL(so_path)
+    try:
+        _lib = ctypes.CDLL(so_path)
+    except OSError as exc:
+        raise OSError(
+            f"Cannot load DVFS library {so_path!r}: {exc}. "
+            "Build it with python -m sglang.srt.energy.native.dvfs.build "
+            "and set DVFS_CTRL_LIB to the output path. "
+            "The NVIDIA driver NVML runtime must also be available."
+        ) from exc
 
     # declare function signatures
     _lib.dvfs_init.restype = ctypes.c_int
@@ -112,9 +117,7 @@ def _load_lib() -> ctypes.CDLL:
     _lib.dvfs_get_device_count.argtypes = []
 
     _lib.dvfs_get_device_name.restype = ctypes.c_int
-    _lib.dvfs_get_device_name.argtypes = [
-        ctypes.c_int, ctypes.c_char_p, ctypes.c_int
-    ]
+    _lib.dvfs_get_device_name.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
 
     _lib.dvfs_get_sm_clock.restype = ctypes.c_int
     _lib.dvfs_get_sm_clock.argtypes = [ctypes.c_int]
@@ -139,19 +142,21 @@ def _load_lib() -> ctypes.CDLL:
 
     _lib.dvfs_get_supported_mem_clocks.restype = ctypes.c_int
     _lib.dvfs_get_supported_mem_clocks.argtypes = [
-        ctypes.c_int, ctypes.POINTER(ctypes.c_uint), ctypes.c_int
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.c_int,
     ]
 
     _lib.dvfs_get_supported_sm_clocks.restype = ctypes.c_int
     _lib.dvfs_get_supported_sm_clocks.argtypes = [
-        ctypes.c_int, ctypes.c_uint,
-        ctypes.POINTER(ctypes.c_uint), ctypes.c_int
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.c_int,
     ]
 
     _lib.dvfs_set_app_clocks.restype = ctypes.c_int
-    _lib.dvfs_set_app_clocks.argtypes = [
-        ctypes.c_int, ctypes.c_uint, ctypes.c_uint
-    ]
+    _lib.dvfs_set_app_clocks.argtypes = [ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
 
     _lib.dvfs_set_sm_clock.restype = ctypes.c_int
     _lib.dvfs_set_sm_clock.argtypes = [ctypes.c_int, ctypes.c_uint]
@@ -165,7 +170,9 @@ def _load_lib() -> ctypes.CDLL:
 
     _lib.dvfs_lock_sm_clock_range.restype = ctypes.c_int
     _lib.dvfs_lock_sm_clock_range.argtypes = [
-        ctypes.c_int, ctypes.c_uint, ctypes.c_uint
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.c_uint,
     ]
 
     _lib.dvfs_unlock_sm_clock.restype = ctypes.c_int
@@ -173,20 +180,26 @@ def _load_lib() -> ctypes.CDLL:
 
     _lib.dvfs_lock_sm_clock_timed.restype = ctypes.c_int
     _lib.dvfs_lock_sm_clock_timed.argtypes = [
-        ctypes.c_int, ctypes.c_uint, ctypes.POINTER(ctypes.c_longlong)
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_longlong),
     ]
 
     # ── Timed ApplicationsClocks ──
 
     _lib.dvfs_set_sm_clock_timed.restype = ctypes.c_int
     _lib.dvfs_set_sm_clock_timed.argtypes = [
-        ctypes.c_int, ctypes.c_uint, ctypes.POINTER(ctypes.c_longlong)
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_longlong),
     ]
 
     _lib.dvfs_set_app_clocks_timed.restype = ctypes.c_int
     _lib.dvfs_set_app_clocks_timed.argtypes = [
-        ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
-        ctypes.POINTER(ctypes.c_longlong)
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.c_uint,
+        ctypes.POINTER(ctypes.c_longlong),
     ]
 
     # ── Energy consumption ──
@@ -261,9 +274,7 @@ class DVFSController:
         """Sorted list of supported memory clock frequencies (MHz)."""
         if self._supported_mem is None:
             buf = (ctypes.c_uint * 64)()
-            count = self._lib.dvfs_get_supported_mem_clocks(
-                self.device_index, buf, 64
-            )
+            count = self._lib.dvfs_get_supported_mem_clocks(self.device_index, buf, 64)
             if count < 0:
                 self._supported_mem = []
             else:
@@ -355,9 +366,7 @@ class DVFSController:
 
         Returns 0 on success, NVML error code on failure.
         """
-        return self._lib.dvfs_lock_sm_clock_range(
-            self.device_index, min_mhz, max_mhz
-        )
+        return self._lib.dvfs_lock_sm_clock_range(self.device_index, min_mhz, max_mhz)
 
     def unlock_sm_clock(self) -> int:
         """Remove locked clock constraint, restore auto-boost.
@@ -378,9 +387,7 @@ class DVFSController:
             self.device_index, sm_mhz, ctypes.byref(elapsed_ns)
         )
         if ret != 0:
-            raise RuntimeError(
-                f"dvfs_lock_sm_clock_timed failed with error code {ret}"
-            )
+            raise RuntimeError(f"dvfs_lock_sm_clock_timed failed with error code {ret}")
         return elapsed_ns.value
 
     # ── Timed control (for overhead measurement) ────────────────────────
@@ -396,9 +403,7 @@ class DVFSController:
             self.device_index, sm_mhz, ctypes.byref(elapsed_ns)
         )
         if ret != 0:
-            raise RuntimeError(
-                f"dvfs_set_sm_clock_timed failed with error code {ret}"
-            )
+            raise RuntimeError(f"dvfs_set_sm_clock_timed failed with error code {ret}")
         return elapsed_ns.value
 
     def set_app_clocks_timed(self, mem_mhz: int, sm_mhz: int) -> int:
@@ -530,7 +535,9 @@ def lock_gpus(device_indices: List[int], sm_mhz: int) -> int:
                 )
         except Exception as exc:
             failures += 1
-            logger.warning("lock_sm_clock(%d MHz) failed on GPU %d: %s", sm_mhz, idx, exc)
+            logger.warning(
+                "lock_sm_clock(%d MHz) failed on GPU %d: %s", sm_mhz, idx, exc
+            )
     if failures == 0:
         logger.info("Locked GPUs %s to %d MHz", device_indices, sm_mhz)
     return failures

@@ -5,16 +5,19 @@ query API.  Prefers exact LUT matches over model predictions — exact matches
 carry zero approximation error.
 
 Data sources
-  - prefill_data_v1.txt  (906 rows)
-  - decode_data_v1.txt   (7530 rows)
+  - externally supplied prefill_data_v1.txt
+  - externally supplied decode_data_v1.txt
   - energy_models/*.pkl  (LUT + LinearReg, trained by energy_model.py)
   - af_comm_*.txt        (optional; embedded defaults from NVLink P2P measurements)
 
+Profile data and prediction models are external artifacts, not bundled with
+benchmark/test_aflex. Pass paths explicitly and load only trusted pickle models.
+
 Usage
     pt = ProfileTable(
-        prefill_path="benchmark/test_motivation/hucc/paper/prefill_data_v1.txt",
-        decode_path="benchmark/test_motivation/hucc/paper/decode_data_v1.txt",
-        energy_model_dir="benchmark/test_motivation/energy_models",
+        prefill_path="/path/to/aflex-assets/prefill_data_v1.txt",
+        decode_path="/path/to/aflex-assets/decode_data_v1.txt",
+        energy_model_dir="/path/to/aflex-assets/energy_models",
     )
     t_a, t_f = pt.query_latency("prefill", tp=4, freq=930, bs=4, il=1024)
     e_a, e_f = pt.query_energy("decode", tp=2, freq=690, bs=16, il=512, ol=128)

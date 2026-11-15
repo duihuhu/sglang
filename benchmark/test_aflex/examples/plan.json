@@ -1,0 +1,14 @@
+{
+  "name": "synthetic_smoke",
+  "k_p": 1,
+  "k_d": 1,
+  "tp_pa": 1,
+  "tp_pf": 1,
+  "tp_da": 1,
+  "tp_df": 1,
+  "f_pa": 930,
+  "f_pf": 930,
+  "f_da": 930,
+  "f_df": 930,
+  "tier": true
+}

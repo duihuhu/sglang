@@ -1,0 +1,135 @@
+{
+  "nodes": [
+    {
+      "host": "192.0.2.1",
+      "ssh_user": "benchmark",
+      "container": "sglang",
+      "gpus": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "gpu_nic": {
+        "0": "mlx5_0",
+        "1": "mlx5_0",
+        "2": "mlx5_0",
+        "3": "mlx5_0",
+        "4": "mlx5_0",
+        "5": "mlx5_0",
+        "6": "mlx5_0",
+        "7": "mlx5_0"
+      },
+      "mooncake_ip_base": "198.51.100.20"
+    },
+    {
+      "host": "192.0.2.2",
+      "ssh_user": "benchmark",
+      "container": "sglang",
+      "gpus": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "gpu_nic": {
+        "0": "mlx5_0",
+        "1": "mlx5_0",
+        "2": "mlx5_0",
+        "3": "mlx5_0",
+        "4": "mlx5_0",
+        "5": "mlx5_0",
+        "6": "mlx5_0",
+        "7": "mlx5_0"
+      },
+      "mooncake_ip_base": "198.51.100.30"
+    }
+  ],
+  "paths": {
+    "repo": "/workspace/sglang",
+    "python": "/usr/bin/python3",
+    "model": "/models/Qwen3-32B",
+    "energy_model": "/assets/models_v1",
+    "dvfs_library": "/assets/libdvfs_ctrl.so",
+    "remote_output": "/tmp/aflex_benchmark"
+  },
+  "ports": {
+    "router": 24000,
+    "prefill": 24200,
+    "decode": 24400,
+    "bootstrap": 24600,
+    "native": 25000,
+    "nccl": 30000,
+    "sched": 32000,
+    "ucx": 34000
+  },
+  "slo": {
+    "ttft_ms": 5000,
+    "tpot_ms": 300,
+    "eval_ttft_ms": 5000,
+    "eval_tpot_ms": 300
+  },
+  "baseline_freq": 1410,
+  "environment": {},
+  "points": [
+    {
+      "scheme": "aflex_tier1",
+      "dataset": "synthetic",
+      "qps": 2,
+      "workload": "synthetic.jsonl",
+      "plan": "plan.json"
+    },
+    {
+      "scheme": "native_tp1_baseline",
+      "dataset": "synthetic",
+      "qps": 2,
+      "workload": "synthetic.jsonl"
+    },
+    {
+      "scheme": "native_tp1_tier",
+      "dataset": "synthetic",
+      "qps": 2,
+      "workload": "synthetic.jsonl"
+    },
+    {
+      "scheme": "pd_hetero_baseline",
+      "dataset": "synthetic",
+      "qps": 2,
+      "workload": "synthetic.jsonl"
+    },
+    {
+      "scheme": "pd_hetero_tier_biscale",
+      "dataset": "synthetic",
+      "qps": 2,
+      "workload": "synthetic.jsonl"
+    }
+  ],
+  "preflight": {
+    "native_libraries": [
+      "/assets/libdvfs_ctrl.so"
+    ],
+    "prediction_files": [
+      "Prefill_A_GBDT.pkl",
+      "Prefill_F_GBDT.pkl",
+      "Decode_A_GBDT.pkl",
+      "Decode_F_GBDT.pkl",
+      "Prefill_A_lat_LinearReg.pkl",
+      "Prefill_F_lat_LinearReg.pkl",
+      "Decode_A_lat_GBDT.pkl",
+      "Decode_F_lat_GBDT.pkl"
+    ]
+  },
+  "cleanup": {
+    "term_timeout_s": 15,
+    "force_kill": false,
+    "kill_timeout_s": 5
+  }
+}

@@ -1,7 +1,7 @@
 {
-  "_comment": "Minimal AFlex config — no DVFS, no Tier1",
+  "_comment": "Minimal AFlex template: set model.path to your external model. No DVFS, no Tier1, no profile assets required.",
   "model": {
-    "path": "/models/llama3.1-8",
+    "path": null,
     "tp": 1,
     "mem_fraction_static": 0.7
   },
@@ -13,7 +13,7 @@
   "afd": {
     "comm_backend": "ucx",
     "dvfs_enabled": false,
-    "energy_model_dir": "/workspace/sglang/benchmark/test_motivation/energy_models"
+    "energy_model_dir": null
   },
   "tier1": {
     "enable_tier1_pa": false,

@@ -297,3 +297,39 @@ benchmark/test_motivation/
 benchmark/megascale-pdaf-two-node-addon
 
 .ruff_cache/
+
+# AFlex public harness: local generated artifacts only
+/benchmark/test_aflex/results/
+/benchmark/test_aflex/logs/
+/benchmark/test_aflex/models/
+/benchmark/test_aflex/profiles/
+/benchmark/test_aflex/workloads/generated/
+/benchmark/test_aflex/workloads/real/
+/benchmark/test_aflex/data/workloads/
+/benchmark/test_aflex/data/real/
+/benchmark/test_aflex/assets/real/
+/benchmark/test_aflex/assets/models/
+/benchmark/test_aflex/assets/profiles/
+
+# Keep small configuration and synthetic fixtures despite global data patterns
+!/benchmark/test_aflex/configs/**/*.jsonl
+!/benchmark/test_aflex/examples/**/*.jsonl
+!/benchmark/test_aflex/examples/**/*.csv
+!/benchmark/test_aflex/workloads/synthetic/**/*.jsonl
+!/benchmark/test_aflex/workloads/synthetic/**/*.csv
+
+# Energy sampling/training outputs, not profiling or prediction source
+/energy/profiling/profiles/
+/energy/profiling/results/
+/energy/profiling/logs/
+/energy/prediction/models/
+/energy/prediction/profiles/
+/python/sglang/srt/energy/profiling/profiles/
+/python/sglang/srt/energy/profiling/results/
+/python/sglang/srt/energy/profiling/logs/
+/python/sglang/srt/energy/prediction/models/
+/python/sglang/srt/energy/prediction/profiles/
+/python/sglang/srt/energy/**/*.pkl
+/python/sglang/srt/energy/**/*.joblib
+/energy/prediction/**/*.pkl
+/energy/prediction/**/*.joblib

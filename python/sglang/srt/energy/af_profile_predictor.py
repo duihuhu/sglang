@@ -18,50 +18,59 @@ import numpy as np
 import pandas as pd
 
 
-class _ModelUnpickler(pickle.Unpickler):
-    """Resolve classes pickled under __main__ or energy_model modules."""
+class _LegacyGBDT:
+    """Disambiguate historical __main__.GBDTModel using persisted state."""
 
-    _class_cache: dict = {}
+    def __setstate__(self, state):
+        from .prediction import energy_model, energy_model_v2, energy_model_v3
+
+        if "all_features" in state:
+            cls = energy_model.GBDTModel
+        elif "feature_cols" in state:
+            features = state["feature_cols"]
+            cls = (
+                energy_model_v3.GBDTModel
+                if "tp_a" in features
+                else energy_model_v2.GBDTModel
+            )
+        else:
+            raise pickle.UnpicklingError("Cannot identify historical GBDT state")
+        self.__class__ = cls
+        self.__dict__.update(state)
+
+
+class _ModelUnpickler(pickle.Unpickler):
+    """Resolve trusted legacy model pickles using installed package classes.
+
+    This is compatibility handling, not a security sandbox: only load trusted
+    pickle files, since pickle can execute arbitrary code.
+    """
 
     def find_class(self, module: str, name: str):
-        # V1 models (from energy_model.py / energy_model_v1.py)
-        if module in ("energy_model", "energy_model_v1") and name in (
-            "LookupTableModel", "LinearRegressionModel", "GBDTModel",
-        ):
-            if f"v1_{name}" not in self._class_cache:
-                import importlib.util
-                em_path = (
-                    Path(__file__).resolve().parents[4]
-                    / "benchmark" / "test_motivation" / "energy_model.py"
-                )
-                spec = importlib.util.spec_from_file_location("_energy_model", em_path)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                for cn in ("LookupTableModel", "LinearRegressionModel", "GBDTModel"):
-                    self._class_cache[f"v1_{cn}"] = getattr(mod, cn)
-            return self._class_cache[f"v1_{name}"]
-        # V2/V3 models (from energy_model_v2.py / energy_model_v3.py)
-        if module in ("__main__", "energy_model_v2", "energy_model_v3") and name in ("GBDTModel", "LookupModel"):
-            v2_key = f"v2_{name}"
-            if v2_key not in self._class_cache:
-                import importlib.util
-                em_path = (
-                    Path(__file__).resolve().parents[4]
-                    / "benchmark" / "test_motivation" / "energy_model_v2.py"
-                )
-                spec = importlib.util.spec_from_file_location("_energy_model_v2", em_path)
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                self._class_cache["v2_GBDTModel"] = getattr(mod, "GBDTModel")
-                self._class_cache["v2_LookupModel"] = getattr(mod, "LookupModel")
-            return self._class_cache[v2_key]
-        # Fallback for __main__ (V2-style)
-        if module == "__main__" and name in ("GBDTModel", "LookupModel", "LookupTableModel", "LinearRegressionModel"):
-            if name in ("GBDTModel", "LookupModel"):
-                return self.find_class("energy_model_v2", name)
-            else:
-                return self.find_class("energy_model", name)
+        from .prediction import energy_model, energy_model_v2, energy_model_v3
+
+        versions = {
+            "energy_model": energy_model,
+            "energy_model_v1": energy_model,
+            "energy_model_v2": energy_model_v2,
+            "energy_model_v3": energy_model_v3,
+        }
+        names = {
+            "LookupTableModel",
+            "LinearRegressionModel",
+            "GBDTModel",
+            "LookupModel",
+        }
+        if module == "__main__" and name in names:
+            if name == "GBDTModel":
+                return _LegacyGBDT
+            return getattr(
+                energy_model_v2 if name == "LookupModel" else energy_model, name
+            )
+        if module in versions and name in names:
+            return getattr(versions[module], name)
         return super().find_class(module, name)
+
 
 logger = logging.getLogger(__name__)
 
@@ -70,23 +79,23 @@ VALID_FREQS = [210, 450, 690, 930, 1170, 1410]
 _LABEL_MAP = {
     ("prefill", "A", "energy"): "Prefill_A",
     ("prefill", "F", "energy"): "Prefill_F",
-    ("decode",  "A", "energy"): "Decode_A",
-    ("decode",  "F", "energy"): "Decode_F",
+    ("decode", "A", "energy"): "Decode_A",
+    ("decode", "F", "energy"): "Decode_F",
     ("prefill", "A", "latency"): "Prefill_A_lat",
     ("prefill", "F", "latency"): "Prefill_F_lat",
-    ("decode",  "A", "latency"): "Decode_A_lat",
-    ("decode",  "F", "latency"): "Decode_F_lat",
+    ("decode", "A", "latency"): "Decode_A_lat",
+    ("decode", "F", "latency"): "Decode_F_lat",
 }
 
 _BEST_MODEL_TYPE = {
-    "Prefill_A":     "GBDT",
-    "Prefill_F":     "GBDT",
-    "Decode_A":      "GBDT",
-    "Decode_F":      "GBDT",
+    "Prefill_A": "GBDT",
+    "Prefill_F": "GBDT",
+    "Decode_A": "GBDT",
+    "Decode_F": "GBDT",
     "Prefill_A_lat": "LinearReg",
     "Prefill_F_lat": "LinearReg",
-    "Decode_A_lat":  "GBDT",
-    "Decode_F_lat":  "GBDT",
+    "Decode_A_lat": "GBDT",
+    "Decode_F_lat": "GBDT",
 }
 
 # V2 coupled decode pipeline models
@@ -160,7 +169,9 @@ class AFProfilePredictor:
                     pkl_path = v3_dir / f"{label}_{mtype}.pkl"
                     if pkl_path.exists():
                         with open(pkl_path, "rb") as f:
-                            self._v3_models[f"{label}_{mtype}"] = _ModelUnpickler(f).load()
+                            self._v3_models[f"{label}_{mtype}"] = _ModelUnpickler(
+                                f
+                            ).load()
                         loaded += 1
             self._v3_available = any(
                 f"Decode_iter_lat_{t}" in self._v3_models for t in ("GBDT", "LUT")
@@ -176,7 +187,9 @@ class AFProfilePredictor:
                     pkl_path = v4_dir / f"{label}_{mtype}.pkl"
                     if pkl_path.exists():
                         with open(pkl_path, "rb") as f:
-                            self._v4_models[f"{label}_{mtype}"] = _ModelUnpickler(f).load()
+                            self._v4_models[f"{label}_{mtype}"] = _ModelUnpickler(
+                                f
+                            ).load()
                         loaded += 1
             self._v4_available = any(
                 f"Decode_iter_lat_{t}" in self._v4_models for t in ("GBDT", "LUT")
@@ -185,27 +198,52 @@ class AFProfilePredictor:
         logger.info(
             "AFProfilePredictor: loaded %d models from %s "
             "(v2_coupled=%s, v3_hetero=%s, v4_expert=%s)",
-            loaded, self.model_dir, self._v2_available,
-            self._v3_available, self._v4_available)
+            loaded,
+            self.model_dir,
+            self._v2_available,
+            self._v3_available,
+            self._v4_available,
+        )
 
-    def _build_df(self, phase: str, tp: int, freq: int,
-                  bs: int, il: int, ol: Optional[int]) -> pd.DataFrame:
+    def _build_df(
+        self, phase: str, tp: int, freq: int, bs: int, il: int, ol: Optional[int]
+    ) -> pd.DataFrame:
         """Build a single-row DataFrame matching the model's expected input."""
         if phase == "prefill":
-            return pd.DataFrame([{
-                "tp": tp, "gpu_clock": freq,
-                "input_len": il, "batch_size": bs,
-            }])
+            return pd.DataFrame(
+                [
+                    {
+                        "tp": tp,
+                        "gpu_clock": freq,
+                        "input_len": il,
+                        "batch_size": bs,
+                    }
+                ]
+            )
         else:
             assert ol is not None, "output_len required for decode prediction"
-            return pd.DataFrame([{
-                "tp": tp, "gpu_clock": freq,
-                "input_len": il, "output_len": ol, "batch_size": bs,
-            }])
+            return pd.DataFrame(
+                [
+                    {
+                        "tp": tp,
+                        "gpu_clock": freq,
+                        "input_len": il,
+                        "output_len": ol,
+                        "batch_size": bs,
+                    }
+                ]
+            )
 
-    def _predict_single(self, label: str, phase: str, tp: int,
-                        freq: int, bs: int, il: int,
-                        ol: Optional[int]) -> PredictionResult:
+    def _predict_single(
+        self,
+        label: str,
+        phase: str,
+        tp: int,
+        freq: int,
+        bs: int,
+        il: int,
+        ol: Optional[int],
+    ) -> PredictionResult:
         """Core prediction: try LUT exact match, then best model fallback."""
         models = self._models.get(label, {})
         if not models:
@@ -236,9 +274,13 @@ class AFProfilePredictor:
             if model is not None:
                 pred = model.predict(df)
                 if not np.isnan(pred[0]):
-                    return PredictionResult(float(pred[0]), fallback_type, exact_match=False)
+                    return PredictionResult(
+                        float(pred[0]), fallback_type, exact_match=False
+                    )
 
-        raise RuntimeError(f"All models failed for {label} with tp={tp} freq={freq} bs={bs} il={il} ol={ol}")
+        raise RuntimeError(
+            f"All models failed for {label} with tp={tp} freq={freq} bs={bs} il={il} ol={ol}"
+        )
 
     @staticmethod
     def _lut_min_distance(lut, df: pd.DataFrame) -> float:
@@ -252,8 +294,16 @@ class AFProfilePredictor:
         dist, _ = tree.query(normed, k=1)
         return float(dist[0]) if np.ndim(dist) > 0 else float(dist)
 
-    def predict_latency(self, phase: str, op: str, tp: int, freq: int,
-                        bs: int, il: int, ol: Optional[int] = None) -> PredictionResult:
+    def predict_latency(
+        self,
+        phase: str,
+        op: str,
+        tp: int,
+        freq: int,
+        bs: int,
+        il: int,
+        ol: Optional[int] = None,
+    ) -> PredictionResult:
         """Predict per-layer latency (microseconds) for one operator.
 
         Args:
@@ -270,8 +320,16 @@ class AFProfilePredictor:
         label = _LABEL_MAP[(phase, op, "latency")]
         return self._predict_single(label, phase, tp, freq, bs, il, ol)
 
-    def predict_energy(self, phase: str, op: str, tp: int, freq: int,
-                       bs: int, il: int, ol: Optional[int] = None) -> PredictionResult:
+    def predict_energy(
+        self,
+        phase: str,
+        op: str,
+        tp: int,
+        freq: int,
+        bs: int,
+        il: int,
+        ol: Optional[int] = None,
+    ) -> PredictionResult:
         """Predict per-layer energy (millijoules) for one operator.
 
         Args: same as predict_latency.
@@ -282,9 +340,15 @@ class AFProfilePredictor:
         return self._predict_single(label, phase, tp, freq, bs, il, ol)
 
     def find_best_freq_pair(
-        self, phase: str, tp: int, bs: int, il: int,
-        slo_budget_us: float, ol: Optional[int] = None,
-        freqs: Optional[list[int]] = None, M: int = 1,
+        self,
+        phase: str,
+        tp: int,
+        bs: int,
+        il: int,
+        slo_budget_us: float,
+        ol: Optional[int] = None,
+        freqs: Optional[list[int]] = None,
+        M: int = 1,
         t_comm_us: float = 0.0,
         num_layers: int = 1,
     ) -> Optional[tuple[int, int, float]]:
@@ -348,7 +412,7 @@ class AFProfilePredictor:
             model = self._v2_models.get(key)
             if model is not None:
                 pred = model.predict(features)
-                val = pred[0] if hasattr(pred, '__len__') else float(pred)
+                val = pred[0] if hasattr(pred, "__len__") else float(pred)
                 if not np.isnan(val) and val > 0:
                     return float(val)
         return None
@@ -360,7 +424,7 @@ class AFProfilePredictor:
             model = self._v3_models.get(key)
             if model is not None:
                 pred = model.predict(features)
-                val = pred[0] if hasattr(pred, '__len__') else float(pred)
+                val = pred[0] if hasattr(pred, "__len__") else float(pred)
                 if not np.isnan(val) and val > 0:
                     return float(val)
         return None
@@ -372,15 +436,21 @@ class AFProfilePredictor:
             model = self._v4_models.get(key)
             if model is not None:
                 pred = model.predict(features)
-                val = pred[0] if hasattr(pred, '__len__') else float(pred)
+                val = pred[0] if hasattr(pred, "__len__") else float(pred)
                 if not np.isnan(val) and val > 0:
                     return float(val)
         return None
 
     def predict_iteration_latency(
-        self, M: int, f_a: int, f_f: int,
-        bs: int, il: int, tp: int = 1,
-        tp_a: int = None, tp_f: int = None,
+        self,
+        M: int,
+        f_a: int,
+        f_f: int,
+        bs: int,
+        il: int,
+        tp: int = 1,
+        tp_a: int = None,
+        tp_f: int = None,
         lif: float = 1.0,
         max_expert_tokens: int = 0,
         els: float = 1.0,
@@ -401,8 +471,10 @@ class AFProfilePredictor:
 
         # Try V4 (with expert features) first if available
         if self._v4_available and max_expert_tokens > 0:
-            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs,
-                                  max_expert_tokens, els]], dtype=float)
+            features = np.array(
+                [[_tp_a, _tp_f, M, f_a, f_f, il, bs, max_expert_tokens, els]],
+                dtype=float,
+            )
             result = self._v4_predict("Decode_iter_lat", features)
             if result is not None:
                 return result
@@ -416,7 +488,7 @@ class AFProfilePredictor:
 
         # Fallback to V2 (single tp, only if tp_a == tp_f)
         if self._v2_available and _tp_a == _tp_f:
-            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs]], dtype=float)
+            features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
             result = self._v2_predict("Decode_iter_lat", features)
             if result is not None:
                 return result * self._lif_correction(lif)
@@ -441,13 +513,20 @@ class AFProfilePredictor:
         if lif <= 1.0:
             return 1.0
         import math
+
         # Power-law: roughly 50% increase at LIF=3, 100% at LIF=6
         return 1.0 + 0.3 * (lif - 1.0) ** 0.7
 
     def predict_iteration_energy(
-        self, M: int, f_a: int, f_f: int,
-        bs: int, il: int, tp: int = 1,
-        tp_a: int = None, tp_f: int = None,
+        self,
+        M: int,
+        f_a: int,
+        f_f: int,
+        bs: int,
+        il: int,
+        tp: int = 1,
+        tp_a: int = None,
+        tp_f: int = None,
         lif: float = 1.0,
         max_expert_tokens: int = 0,
         els: float = 1.0,
@@ -468,8 +547,10 @@ class AFProfilePredictor:
 
         # Try V4 (with expert features) first
         if self._v4_available and max_expert_tokens > 0:
-            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs,
-                                  max_expert_tokens, els]], dtype=float)
+            features = np.array(
+                [[_tp_a, _tp_f, M, f_a, f_f, il, bs, max_expert_tokens, els]],
+                dtype=float,
+            )
             da_e = self._v4_predict("Decode_iter_energy_A", features)
             df_e = self._v4_predict("Decode_iter_energy_F", features)
             if da_e is not None and df_e is not None:
@@ -485,7 +566,7 @@ class AFProfilePredictor:
 
         # Fallback to V2 (single tp)
         if self._v2_available and _tp_a == _tp_f:
-            features = np.array([[_tp_a, _tp_f, M, f_a, f_f, il, bs]], dtype=float)
+            features = np.array([[M, f_a, f_f, il, bs]], dtype=float)
             da_e = self._v2_predict("Decode_iter_energy_A", features)
             df_e = self._v2_predict("Decode_iter_energy_F", features)
             if da_e is not None and df_e is not None:
@@ -494,11 +575,15 @@ class AFProfilePredictor:
         return None
 
     def find_best_freq_pair_coupled(
-        self, M: int, bs: int, il: int,
+        self,
+        M: int,
+        bs: int,
+        il: int,
         slo_budget_us: float,
         freqs: Optional[list[int]] = None,
         tp: int = 1,
-        tp_a: int = None, tp_f: int = None,
+        tp_a: int = None,
+        tp_f: int = None,
         lif: float = 1.0,
         max_expert_tokens: int = 0,
         els: float = 1.0,
@@ -523,13 +608,33 @@ class AFProfilePredictor:
         for f_a in freqs:
             for f_f in freqs:
                 lat = self.predict_iteration_latency(
-                    M, f_a, f_f, bs, il, tp=tp, tp_a=tp_a, tp_f=tp_f,
-                    lif=lif, max_expert_tokens=max_expert_tokens, els=els)
+                    M,
+                    f_a,
+                    f_f,
+                    bs,
+                    il,
+                    tp=tp,
+                    tp_a=tp_a,
+                    tp_f=tp_f,
+                    lif=lif,
+                    max_expert_tokens=max_expert_tokens,
+                    els=els,
+                )
                 if lat is None or lat > slo_budget_us:
                     continue
                 energy = self.predict_iteration_energy(
-                    M, f_a, f_f, bs, il, tp=tp, tp_a=tp_a, tp_f=tp_f,
-                    lif=lif, max_expert_tokens=max_expert_tokens, els=els)
+                    M,
+                    f_a,
+                    f_f,
+                    bs,
+                    il,
+                    tp=tp,
+                    tp_a=tp_a,
+                    tp_f=tp_f,
+                    lif=lif,
+                    max_expert_tokens=max_expert_tokens,
+                    els=els,
+                )
                 if energy is None:
                     continue
                 total_e = energy[0] + energy[1]
