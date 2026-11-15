@@ -371,7 +371,7 @@ class Tier1Solver:
 
     @staticmethod
     def _pareto_by_gpu_group(pairs):
-        """每个 (tp_a, tp_f) 独立 Pareto，避免不同 GPU 数的 pair 互相支配。"""
+        """Apply Pareto filtering independently to each (tp_a, tp_f) group to prevent pairs with different GPU counts from dominating one another."""
         groups = defaultdict(list)
         for p in pairs:
             groups[(p.tp_a, p.tp_f)].append(p)

@@ -1,10 +1,10 @@
-# AFlex 预测模型与采样工具
+# AFlex Prediction Models and Profiling Tools
 
-这里只迁移源代码，不包含模型权重、采样表、pickle、共享库等资产。所有输入与输出路径均显式传入，不会隐式读取历史 benchmark 目录。训练沿用原脚本的 LUT（归一化 KD-tree 逆距离加权）、对数特征 Ridge 与 LightGBM 算法，以及原有超参数和交叉验证方式。V2/V3 保留 `GBDTModel`、`LookupModel`、`cross_validate`、`train_and_save` 接口。
+Only source code is migrated here; assets such as model weights, profiling tables, pickle files, and shared libraries are not included. All input and output paths are passed explicitly; historical benchmark directories are never read implicitly. Training retains the original scripts' LUT (normalized KD-tree inverse-distance weighting), log-feature Ridge, and LightGBM algorithms, along with their original hyperparameters and cross-validation procedures. V2/V3 retain the `GBDTModel`, `LookupModel`, `cross_validate`, and `train_and_save` interfaces.
 
-## 安装与 CPU 帮助
+## Installation and CPU Help
 
-在完整 SGLang 环境中，从仓库根目录安装 `pip install -e python/.`；CPU 训练还需 `numpy pandas scipy scikit-learn`，可选 `lightgbm`（缺失时跳过 GBDT）。采样工具仅在真正开始采样时导入 torch、NVML 与服务运行时，`--help` 不导入它们；不过普通 `python -m sglang...` 仍会执行 SGLang 顶层初始化，须满足其基础依赖（包括 pybase64），本迁移不更改顶层初始化。CPU 测试采用独立 namespace bootstrap，因此无需这些服务依赖。
+In a complete SGLang environment, install from the repository root using `pip install -e python/.`; CPU training also requires `numpy pandas scipy scikit-learn`, with optional `lightgbm` (GBDT is skipped if unavailable). Profiling tools import torch, NVML, and the serving runtime only when profiling actually starts; `--help` does not import them. However, ordinary `python -m sglang...` still executes SGLang's top-level initialization and requires its basic dependencies (including pybase64); this migration does not change top-level initialization. CPU tests use an independent namespace bootstrap and therefore do not require these serving dependencies.
 
 ```bash
 python -m sglang.srt.energy.prediction.train --help
@@ -15,18 +15,18 @@ python -m sglang.srt.energy.profiling.bench_decode_af --help
 python -m sglang.srt.energy.profiling.normalize --help
 ```
 
-## 真实 GPU 采样（需要用户自行运行）
+## Real GPU Profiling (Users Must Run It Themselves)
 
-须提供外部模型、可用 CUDA/NVML、频率控制权限；原采样算法使用真实模型首层算子，保留 TP 同步、预热、探测与重复测量。DVFS 库使用运行时的构建/发现机制，或显式设置 `DVFS_CTRL_LIB`，不从旧目录加载库。输出路径相对于当前工作目录，而非安装目录。`--help` 展示采样参数与常用服务参数，真正运行仍支持 `ServerArgs` 的完整参数集。
+An external model, working CUDA/NVML, and frequency-control privileges are required. The original profiling algorithms use operators from the real model's first layer, retaining TP synchronization, warmup, probing, and repeated measurements. The DVFS library uses the runtime's build/discovery mechanism or an explicit `DVFS_CTRL_LIB`; it is not loaded from the old directory. Output paths are relative to the current working directory, not the installation directory. `--help` shows profiling parameters and common server parameters; actual runs still support the full `ServerArgs` parameter set.
 
 ```bash
 python -m sglang.srt.energy.profiling.bench_prefill_af --model-path /external/model --tp-size 1 --output /external/profiles/prefill_raw.tsv --quick
 python -m sglang.srt.energy.profiling.bench_decode_af --model-path /external/model --tp-size 1 --output /external/profiles/decode_raw.tsv --quick
 ```
 
-## 规范化与 V1 训练
+## Normalization and V1 Training
 
-原始 `P_A_lat/P_F_lat/P_A_energy/P_F_energy` 或 `D_*` 表头转换为 `A/F/A_energy_mj/F_energy_mj`。延迟已经是微秒，能量已经是 rank0 单 GPU 每层 mJ：**不乘 TP、不除 TP、不乘 1000**。除 decode 额外的 `output_len` 外，V1 表头依次为 `tp,input_len,gpu_clock,batch_size,A,F,A_energy_mj,F_energy_mj`（制表符分隔）；规范化文件首行是说明行。训练也能直接读取原始表或无说明行的标准表。
+Raw `P_A_lat/P_F_lat/P_A_energy/P_F_energy` or `D_*` headers are converted to `A/F/A_energy_mj/F_energy_mj`. Latency is already in microseconds, and energy is already in mJ per layer for the single GPU on rank0: **do not multiply by TP, divide by TP, or multiply by 1000**. Except for the additional `output_len` in decode, V1 headers are ordered as `tp,input_len,gpu_clock,batch_size,A,F,A_energy_mj,F_energy_mj` (tab-separated); the first line of a normalized file is a description line. Training can also read raw tables or standard tables without a description line directly.
 
 ```bash
 python -m sglang.srt.energy.profiling.normalize --phase prefill --input /external/profiles/prefill_raw.tsv --output /external/profiles/prefill_v1.tsv
@@ -34,25 +34,25 @@ python -m sglang.srt.energy.profiling.normalize --phase decode --input /external
 python -m sglang.srt.energy.prediction.train --prefill /external/profiles/prefill_v1.tsv --decode /external/profiles/decode_v1.tsv --output-dir /external/models/v1 --folds 5
 ```
 
-V1 输出 8 个任务的 LUT、LinearReg，以及可用时的 GBDT pickle 和 `cv_mape_report.tsv`。`prediction.energy_model` 同样可作为 V1 CLI。CLI 调用包内定义的训练函数，因此新 pickle 类路径稳定为 `sglang.srt.energy.prediction.energy_model*`，而非 `__main__`。
+V1 outputs LUT, LinearReg, and, when available, GBDT pickle files for eight tasks, along with `cv_mape_report.tsv`. `prediction.energy_model` can also serve as the V1 CLI. The CLI calls training functions defined in the package, so new pickle class paths are stable as `sglang.srt.energy.prediction.energy_model*` rather than `__main__`.
 
-## V2/V3 训练兼容
+## V2/V3 Training Compatibility
 
-V2 必需列：`tp,M,f_A,f_F,input_len,batch_size,iter_lat_us,DA_energy_mj,DF_energy_mj`，实际模型特征是 `M,f_A,f_F,input_len,batch_size`。V3 将表中的 `tp` 换为 `tp_a,tp_f`，模型特征为 `tp_a,tp_f,M,f_A,f_F,input_len,batch_size`。这两种输入是外部已有 pipeline 采样数据，本包的独立 A/F 采样器不生成 pipeline 数据。
+V2 requires the columns `tp,M,f_A,f_F,input_len,batch_size,iter_lat_us,DA_energy_mj,DF_energy_mj`; the actual model features are `M,f_A,f_F,input_len,batch_size`. V3 replaces `tp` in the table with `tp_a,tp_f`, with model features `tp_a,tp_f,M,f_A,f_F,input_len,batch_size`. Both inputs are externally available pipeline profiling data; this package's independent A/F profilers do not generate pipeline data.
 
 ```bash
 python -m sglang.srt.energy.prediction.energy_model_v2 --data /external/profiles/decode_pipeline_v2.tsv --output-dir /external/models/v2 --folds 5
 python -m sglang.srt.energy.prediction.energy_model_v3 --data /external/profiles/decode_pipeline_v3.tsv --output-dir /external/models/v3 --skip-cv
 ```
 
-各自输出 `Decode_iter_lat`、`Decode_iter_energy_A`、`Decode_iter_energy_F` 的 GBDT/LUT 文件。运行预测器的 `model_dir` 可放 V1 和 V2 文件，V3 使用显式 `v3_model_dir`。保留既有预测器对相邻 `models_v3/models_v4` 的兼容发现行为；训练 CLI 本身没有历史默认资产路径。
+Each outputs GBDT/LUT files for `Decode_iter_lat`, `Decode_iter_energy_A`, and `Decode_iter_energy_F`. The runtime predictor's `model_dir` may contain V1 and V2 files; V3 uses an explicit `v3_model_dir`. Existing compatibility discovery of adjacent `models_v3/models_v4` by predictors is retained; the training CLIs themselves have no historical default asset paths.
 
-预测器兼容旧 `energy_model`、`energy_model_v1/v2/v3` 与 `__main__` 类引用，不读取忽略目录中的脚本。历史 `__main__.GBDTModel` 含 `all_features` 时解释为 V1，否则根据 `feature_cols` 中是否包含 `tp_a` 区分 V2/V3。pickle 可执行任意代码，**仅加载可信文件**；兼容 unpickler 不是安全沙箱。
+The predictor supports legacy `energy_model`, `energy_model_v1/v2/v3`, and `__main__` class references without reading scripts in ignored directories. Historical `__main__.GBDTModel` is interpreted as V1 when it contains `all_features`; otherwise, V2/V3 are distinguished by whether `feature_cols` contains `tp_a`. Pickle can execute arbitrary code: **load only trusted files**; the compatibility unpickler is not a security sandbox.
 
-## CPU 测试
+## CPU Tests
 
 ```bash
 python -m pytest test/srt/test_aflex_prediction.py -q
 ```
 
-覆盖类路径与 pickle 往返、历史 GBDT 状态区分、原始表规范化与单位不变、小数据拟合、V2 运行特征布局，以及六个模块 CLI 的无 GPU 帮助入口。本次迁移不运行 GPU 采样。
+Coverage includes class paths and pickle round trips, distinguishing historical GBDT states, raw-table normalization and unit preservation, small-data fitting, V2 runtime feature layouts, and GPU-free CLI help entry points for six modules. This migration does not run GPU profiling.

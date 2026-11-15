@@ -1,307 +1,307 @@
-# SGLang AFD（Attention-FFN Disaggregation）迁移与优化报告
+# SGLang AFD (Attention-FFN Disaggregation) Migration and Optimization Report
 
-## 一、概述
+## I. Overview
 
-### 什么是 AFD
+### What Is AFD?
 
-AFD 将 Transformer 每一层拆分为 Attention（A）和 FFN（F）两部分，分别部署在不同 GPU 节点上。每层有 2 次跨节点传输（A->F 和 F->A），通过 microbatch 流水线隐藏通信延迟。
+AFD splits each Transformer layer into Attention (A) and FFN (F), deployed on different GPU nodes. Each layer requires two cross-node transfers (A->F and F->A); a microbatch pipeline hides communication latency.
 
-### 核心价值
+### Core Benefits
 
-- MoE 模型中 Attn 节点不加载 Expert 权重，KV Cache 容量提升约 4 倍
-- 更高并发 → 更高吞吐 + 更低 P99 延迟
+- For MoE models, Attn nodes do not load Expert weights, increasing KV Cache capacity by approximately 4x
+- Higher concurrency → higher throughput + lower P99 latency
 
-### 迁移来源与目标
+### Migration Source and Target
 
-- **源**: `sglang_af/sglang_v1`（AFD PoC 实现）
-- **目标**: `sglang`（新版，原本无 AFD 代码）
+- **Source**: `sglang_af/sglang_v1` (AFD PoC implementation)
+- **Target**: `sglang` (newer version, originally without AFD code)
 
 ---
 
-## 二、文件清单
+## II. File Inventory
 
-### 新建文件（7 个）
+### New Files (7)
 
-| 文件路径 | 作用 |
+| File Path | Purpose |
 |----------|------|
-| `python/sglang/srt/layers/afd_type.py` | `AFDPerspective` 枚举和 micro_batch 参数解析 |
-| `python/sglang/srt/layers/afd.py` | 核心逻辑：通信器（ZMQ/StepMesh/分片并行）、流水线调度、`model_forward_afd`、`AFDCommunicator`、`AsyncTensorCommunicator`、Proxy 模块 |
-| `python/sglang/srt/layers/afd_mixin.py` | 通用 Mixin（`AFDDecoderLayerMixin`）和权重过滤器（`AFDWeightFilter`） |
-| `python/sglang/srt/batch_overlap/afd_overlap.py` | `AfdForwardBatchPreparer`——microbatch 切分与子 batch 组装 |
-| `python/sglang/srt/managers/scheduler_afd_mixin.py` | 可复用的 AFD 调度辅助方法 Mixin |
-| `test/srt/test_afd_fixture.py` | 测试 fixture（双进程启动） |
-| `test/srt/test_afd_basic.py` | 端到端测试用例 |
+| `python/sglang/srt/layers/afd_type.py` | `AFDPerspective` enum and micro_batch argument parsing |
+| `python/sglang/srt/layers/afd.py` | Core logic: communicators (ZMQ/StepMesh/sharded parallel), pipeline scheduling, `model_forward_afd`, `AFDCommunicator`, `AsyncTensorCommunicator`, Proxy modules |
+| `python/sglang/srt/layers/afd_mixin.py` | Generic Mixin (`AFDDecoderLayerMixin`) and weight filter (`AFDWeightFilter`) |
+| `python/sglang/srt/batch_overlap/afd_overlap.py` | `AfdForwardBatchPreparer`—microbatch splitting and sub-batch assembly |
+| `python/sglang/srt/managers/scheduler_afd_mixin.py` | Mixin with reusable AFD scheduling helpers |
+| `test/srt/test_afd_fixture.py` | Test fixture (dual-process startup) |
+| `test/srt/test_afd_basic.py` | End-to-end test cases |
 
-### 修改文件（13 个）
+### Modified Files (13)
 
-| 文件路径 | 修改内容 |
+| File Path | Changes |
 |----------|----------|
-| `server_args.py` | 新增 `afd_perspective`、`afd_micro_batch`、`afd_attn_ratio`、`afd_attn_tp`、`afd_ffn_tp` + `_handle_afd()` 验证 |
-| `io_struct.py` | 新增 `AFDReqInput`（继承 `BaseReq`，含 `req_ids`/`seq_lens`/`extend_lens`） |
-| `schedule_batch.py` | `ScheduleBatch` + `ModelWorkerBatch` 新增 `afd_split_seq_index: Optional[List[int]]` |
-| `forward_batch_info.py` | AFD 字段 + `init_new` 直接传入 `afd_split_seq_index` |
-| `model_runner.py` | `init_attention_backend` 新增 `AfdAttnBackend` 分支 |
-| `tbo_backend.py` | 新增 `AfdAttnBackend` 类 |
-| `qwen3_moe.py` | DecoderLayer 加入 `_afd_init`/`forward_afd_A`/`forward_afd_F`；`load_weights` 加入 `AFDWeightFilter` |
-| `qwen2_moe.py` | 同上 + Model.forward 加入 AFD 分支 + `load_weights` 加入 `AFDWeightFilter` |
-| `qwen3.py` | DecoderLayer 加入 AFD；Qwen3Model 重写 forward 加入 AFD 分支 |
-| `deepseek_v2.py` | DecoderLayer 加入 AFD；Model.forward 加入 AFD 分支 |
-| `scheduler.py` | AFD ZMQ 通道 + `event_loop_afd` + `dispatch_event_loop` PREFILL/DECODE AFD 分支 |
-| `disaggregation/prefill.py` | 新增 `event_loop_afd_disagg_prefill` |
-| `disaggregation/decode.py` | 新增 `event_loop_afd_disagg_decode` |
+| `server_args.py` | Added `afd_perspective`, `afd_micro_batch`, `afd_attn_ratio`, `afd_attn_tp`, `afd_ffn_tp` + `_handle_afd()` validation |
+| `io_struct.py` | Added `AFDReqInput` (inherits `BaseReq`, includes `req_ids`/`seq_lens`/`extend_lens`) |
+| `schedule_batch.py` | Added `afd_split_seq_index: Optional[List[int]]` to `ScheduleBatch` + `ModelWorkerBatch` |
+| `forward_batch_info.py` | AFD fields + direct forwarding of `afd_split_seq_index` in `init_new` |
+| `model_runner.py` | Added `AfdAttnBackend` branch in `init_attention_backend` |
+| `tbo_backend.py` | Added `AfdAttnBackend` class |
+| `qwen3_moe.py` | Added `_afd_init`/`forward_afd_A`/`forward_afd_F` to DecoderLayer; added `AFDWeightFilter` to `load_weights` |
+| `qwen2_moe.py` | Same as above + AFD branch in Model.forward + `AFDWeightFilter` in `load_weights` |
+| `qwen3.py` | Added AFD to DecoderLayer; rewrote Qwen3Model forward with an AFD branch |
+| `deepseek_v2.py` | Added AFD to DecoderLayer; added an AFD branch to Model.forward |
+| `scheduler.py` | AFD ZMQ channel + `event_loop_afd` + PREFILL/DECODE AFD branches in `dispatch_event_loop` |
+| `disaggregation/prefill.py` | Added `event_loop_afd_disagg_prefill` |
+| `disaggregation/decode.py` | Added `event_loop_afd_disagg_decode` |
 
 ---
 
-## 三、已应用的优化
+## III. Applied Optimizations
 
-### 通信层
+### Communication Layer
 
-| 编号 | 内容 | 位置 |
+| ID | Content | Location |
 |------|------|------|
-| C1 | ZMQ 零拷贝传输（metadata + raw bytes） | `afd.py` ZMQSimpleTensorCommunicator |
-| C2 | 独立 CUDA stream + `AsyncTensorCommunicator` + 跨 stage `postprocess_layer_start_recv` | `afd.py` |
-| C3 | `deque` 替代 `list`、去掉 `zero_()`、动态 buffer pool | `afd.py` StepMeshTensorCommunicator |
-| C5 | 端口通过环境变量可配置 | `afd.py` + `scheduler.py` |
+| C1 | ZMQ zero-copy transfer (metadata + raw bytes) | `afd.py` ZMQSimpleTensorCommunicator |
+| C2 | Dedicated CUDA stream + `AsyncTensorCommunicator` + cross-stage `postprocess_layer_start_recv` | `afd.py` |
+| C3 | Replaced `list` with `deque`, removed `zero_()`, dynamic buffer pool | `afd.py` StepMeshTensorCommunicator |
+| C5 | Ports configurable through environment variables | `afd.py` + `scheduler.py` |
 
-### 调度层
+### Scheduling Layer
 
-| 编号 | 内容 | 位置 |
+| ID | Content | Location |
 |------|------|------|
-| S1 | `AFDReqInput` 传递 `req_ids` 精确对齐 batch | `io_struct.py` + `scheduler_afd_mixin.py` |
-| S2 | `zmq.Poller` 替代 busy-wait | `scheduler.py` event_loop_afd |
-| S3 | `AFDReqInput` 含 `seq_lens`/`extend_lens` | `io_struct.py` |
+| S1 | `AFDReqInput` carries `req_ids` for precise batch alignment | `io_struct.py` + `scheduler_afd_mixin.py` |
+| S2 | Replaced busy-wait with `zmq.Poller` | `scheduler.py` event_loop_afd |
+| S3 | `AFDReqInput` includes `seq_lens`/`extend_lens` | `io_struct.py` |
 
-### 计算层
+### Compute Layer
 
-| 编号 | 内容 | 位置 |
+| ID | Content | Location |
 |------|------|------|
-| G3 | Token-count-aware 贪心切分 | `afd_overlap.py` |
-| G5 | 预分配 output tensor，消除 `torch.cat` | `afd.py` model_forward_afd |
-| G6 | `NamedTuple`（`StageIO`）替代 `dict` | `afd.py` |
-| G4 | `--afd-attn-ratio` 非对称 microbatch 参数 | `server_args.py` |
+| G3 | Token-count-aware greedy splitting | `afd_overlap.py` |
+| G5 | Preallocated output tensor, eliminating `torch.cat` | `afd.py` model_forward_afd |
+| G6 | Replaced `dict` with `NamedTuple` (`StageIO`) | `afd.py` |
+| G4 | `--afd-attn-ratio` asymmetric microbatch argument | `server_args.py` |
 
-### 工程化
+### Engineering
 
-| 编号 | 内容 | 位置 |
+| ID | Content | Location |
 |------|------|------|
-| E1 | 通用 Mixin + `AFDWeightFilter` | `afd_mixin.py` |
-| E2 | AFD 代码独立文件 | `batch_overlap/afd_overlap.py` |
-| E3 | 通用 m 路切分（循环实现） | `afd_overlap.py` |
-| E5 | ZMQ 超时 + 异常处理 | `afd.py` |
+| E1 | Generic Mixin + `AFDWeightFilter` | `afd_mixin.py` |
+| E2 | Separate file for AFD code | `batch_overlap/afd_overlap.py` |
+| E3 | Generic m-way splitting (loop implementation) | `afd_overlap.py` |
+| E5 | ZMQ timeouts + exception handling | `afd.py` |
 
-### 异构 TP
+### Heterogeneous TP
 
-| 编号 | 内容 | 位置 |
+| ID | Content | Location |
 |------|------|------|
-| Phase 6 | `--afd-attn-tp`/`--afd-ffn-tp` + `ShardedParallelCommunicator`（分片并行 + metadata 传递 + padding 截断） | `server_args.py` + `afd.py` |
-| F9 | `--afd-grouped-stepmesh` + GCD-based 分组 StepMesh（per-group DMLC + NVLink all_gather + stride 去重） | `server_args.py` + `afd.py` |
-| F2-A | `torch.compile(dynamic=True)` 编译 `_run_attn` / `_run_mlp` + AFD 通信方法 `@torch.compiler.disable()` | `afd_mixin.py` + `afd.py` |
-| F3 | `--afd-enable-overlap-schedule` CPU/GPU overlap scheduling（`event_loop_afd` 中 `result_queue` + async `run_batch`） | `server_args.py` + `scheduler.py` |
+| Phase 6 | `--afd-attn-tp`/`--afd-ffn-tp` + `ShardedParallelCommunicator` (sharded parallelism + metadata transfer + padding truncation) | `server_args.py` + `afd.py` |
+| F9 | `--afd-grouped-stepmesh` + GCD-based grouped StepMesh (per-group DMLC + NVLink all_gather + stride deduplication) | `server_args.py` + `afd.py` |
+| F2-A | `torch.compile(dynamic=True)` compiles `_run_attn` / `_run_mlp` + `@torch.compiler.disable()` on AFD communication methods | `afd_mixin.py` + `afd.py` |
+| F3 | `--afd-enable-overlap-schedule` CPU/GPU overlap scheduling (`result_queue` + async `run_batch` in `event_loop_afd`) | `server_args.py` + `scheduler.py` |
 
-### PD+AFD 独立控制
+### Independent PD+AFD Control
 
-| 编号 | 内容 | 位置 |
+| ID | Content | Location |
 |------|------|------|
-| Task 6 | P/D 各自独立控制 `--afd-perspective`；`SchedulerAFDMixin` 可复用调度方法；PREFILL/DECODE 分支均支持 AFD | `scheduler_afd_mixin.py` + `prefill.py` + `decode.py` + `scheduler.py` |
+| Task 6 | Independent `--afd-perspective` control for P/D; reusable scheduling methods in `SchedulerAFDMixin`; both PREFILL/DECODE branches support AFD | `scheduler_afd_mixin.py` + `prefill.py` + `decode.py` + `scheduler.py` |
 
 ---
 
-## 四、支持的模型
+## IV. Supported Models
 
-| 模型 | 类型 | AFD 状态 | 说明 |
+| Model | Type | AFD Status | Notes |
 |------|------|----------|------|
-| Qwen3-MoE | MoE | 已集成 | Mixin + 权重过滤 |
-| Qwen2-MoE | MoE | 已集成 | Mixin + 权重过滤 + Model.forward AFD 分支 |
-| DeepSeek-V2/V3 | MoE | 已集成 | Mixin + Model.forward AFD 分支 |
-| Qwen3（Dense） | Dense | 已集成 | Mixin + Qwen3Model 重写 forward |
-| LLaMA / Llama3 | Dense | 已集成 | init 中创建 LayerCommunicator + Mixin + AFDWeightFilter |
-| 其他使用 LayerCommunicator 的模型 | 各种 | 可快速适配 | DecoderLayer 加 `_afd_init()` + `forward_afd_A/F` |
-| Qwen2（Dense） | Dense | 可适配 | 与 LLaMA 相同方式：在 init 中按需创建 LayerCommunicator |
+| Qwen3-MoE | MoE | Integrated | Mixin + weight filtering |
+| Qwen2-MoE | MoE | Integrated | Mixin + weight filtering + Model.forward AFD branch |
+| DeepSeek-V2/V3 | MoE | Integrated | Mixin + Model.forward AFD branch |
+| Qwen3 (Dense) | Dense | Integrated | Mixin + rewritten Qwen3Model forward |
+| LLaMA / Llama3 | Dense | Integrated | LayerCommunicator created in init + Mixin + AFDWeightFilter |
+| Other models using LayerCommunicator | Various | Can be adapted quickly | Add `_afd_init()` + `forward_afd_A/F` to DecoderLayer |
+| Qwen2 (Dense) | Dense | Adaptable | Same approach as LLaMA: create LayerCommunicator in init as needed |
 
 ---
 
-## 五、运行方式
+## V. Running AFD
 
-> 以下示例使用 `<模型>` 指代模型路径，`<attn_ip>` / `<ffn_ip>` 指代节点 IP，`<RDMA网卡>` 指代 RDMA 网卡名（如 `mlx5_0`）。
-> AFD 自动 disable overlap schedule 和 CUDA graph（无需手动传 `--disable-overlap-schedule` 或 `--disable-cuda-graph`）。
-> 可选开关：`--enable-torch-compile`（kernel fusion ~5-8%）、`--afd-enable-overlap-schedule`（CPU/GPU overlap ~5-10%）。
+> The examples below use `<model>` for the model path, `<attn_ip>` / `<ffn_ip>` for node IP addresses, and `<RDMA_nic>` for the RDMA NIC name (e.g., `mlx5_0`).
+> AFD automatically disables overlap scheduling and CUDA graph (no need to pass `--disable-overlap-schedule` or `--disable-cuda-graph` manually).
+> Optional flags: `--enable-torch-compile` (kernel fusion ~5-8%), `--afd-enable-overlap-schedule` (CPU/GPU overlap ~5-10%).
 
-### 1. ZMQ 同构 TP（快速测试，无 RDMA）
+### 1. ZMQ Homogeneous TP (Quick Test, No RDMA)
 
 ```bash
-# ═══ Attn 节点（TP=4）═══
+# ═══ Attn node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export AFD_SCHED_HOST=<ffn_ip>
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --afd-perspective attn --afd-micro-batch 3
 
-# ═══ FFN 节点（TP=4）═══
+# ═══ FFN node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=4,5,6,7
 export AFD_SCHED_HOST=<ffn_ip>
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3
 ```
 
-### 2. ZMQ 异构 TP（快速测试，无 RDMA，4A:8F，跨节点 2NH）
+### 2. ZMQ Heterogeneous TP (Quick Test, No RDMA, 4A:8F, Cross-Node 2NH)
 
-> ZMQ 路径通过 `ShardedParallelCommunicator` 包裹实现异构 TP：每个 local rank 只发送 1/TP_local 的 shard（1:1 点对点），接收侧 NVLink all_gather 重建完整 tensor。跨节点流量固定为 **2NH**（与 TP 配比无关），但受限于 TCP 延迟。
+> The ZMQ path supports heterogeneous TP through the `ShardedParallelCommunicator` wrapper: each local rank sends only its 1/TP_local shard (1:1 point-to-point), and NVLink all_gather on the receiving side reconstructs the full tensor. Cross-node traffic is fixed at **2NH** (independent of the TP ratio), but is limited by TCP latency.
 
 ```bash
-# ═══ Attn 节点（TP=4）═══
+# ═══ Attn node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export AFD_SCHED_HOST=<ffn_ip>
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8
 
-# ═══ FFN 节点（TP=8）═══
+# ═══ FFN node(TP=8)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export AFD_SCHED_HOST=<ffn_ip>
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8
 ```
 
-### 3. ZMQ 异构 TP（快速测试，无 RDMA，8A:4F，跨节点 2NH）
+### 3. ZMQ Heterogeneous TP (Quick Test, No RDMA, 8A:4F, Cross-Node 2NH)
 
 ```bash
-# ═══ Attn 节点（TP=8）═══
+# ═══ Attn node(TP=8)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export AFD_SCHED_HOST=<ffn_ip>
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --disable-overlap-schedule \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 8 --afd-ffn-tp 4
 
-# ═══ FFN 节点（TP=4）═══
+# ═══ FFN node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export AFD_SCHED_HOST=<ffn_ip>
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3 \
     --afd-attn-tp 8 --afd-ffn-tp 4
 ```
 
-### 4. StepMesh 同构 TP（高性能 RDMA，TP_A == TP_F）
+### 4. StepMesh Homogeneous TP (High-Performance RDMA, TP_A == TP_F)
 
 ```bash
-# ═══ 公共环境变量（两节点都设置）═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables (set on both nodes)═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
-# ═══ Attn 节点（TP=4）═══
+# ═══ Attn node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --afd-perspective attn --afd-micro-batch 3
 
-# ═══ FFN 节点（TP=4）═══
+# ═══ FFN node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3
 ```
 
-### 5. StepMesh 异构 TP — 不分组（4A:8F，跨节点 12NH）
+### 5. StepMesh Heterogeneous TP — Ungrouped (4A:8F, Cross-Node 12NH)
 
 ```bash
-# ═══ 公共环境变量 ═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables ═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
-# ═══ Attn 节点（TP=4，告知对端 FFN TP=8）═══
+# ═══ Attn node(TP=4, inform the peer that FFN TP=8)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8
 
-# ═══ FFN 节点（TP=8，告知对端 Attn TP=4）═══
+# ═══ FFN node(TP=8, inform the peer that Attn TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8
 ```
 
-### 6. StepMesh 异构 TP — 不分组（8A:4F，跨节点 12NH）
+### 6. StepMesh Heterogeneous TP — Ungrouped (8A:4F, Cross-Node 12NH)
 
 ```bash
-# ═══ 公共环境变量 ═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables ═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
-# ═══ Attn 节点（TP=8）═══
+# ═══ Attn node(TP=8)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --disable-overlap-schedule \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 8 --afd-ffn-tp 4
 
-# ═══ FFN 节点（TP=4）═══
+# ═══ FFN node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3 \
     --afd-attn-tp 8 --afd-ffn-tp 4
 ```
 
-### 7. StepMesh 异构 TP — 分组（4A:8F，跨节点 3NH，4 组 1W:2S）
+### 7. StepMesh Heterogeneous TP — Grouped (4A:8F, Cross-Node 3NH, 4 Groups of 1W:2S)
 
 ```bash
-# ═══ 公共环境变量 ═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables ═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
-# ═══ Attn 节点（TP=4）═══
+# ═══ Attn node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
     --afd-grouped-stepmesh
 
-# ═══ FFN 节点（TP=8）═══
+# ═══ FFN node(TP=8)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3 \
@@ -309,28 +309,28 @@ python -m sglang.launch_server \
     --afd-grouped-stepmesh
 ```
 
-### 8. StepMesh 异构 TP — 分组（8A:4F，跨节点 3NH，4 组 2W:1S）
+### 8. StepMesh Heterogeneous TP — Grouped (8A:4F, Cross-Node 3NH, 4 Groups of 2W:1S)
 
 ```bash
-# ═══ 公共环境变量 ═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables ═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
-# ═══ Attn 节点（TP=8）═══
+# ═══ Attn node(TP=8)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --disable-overlap-schedule \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 8 --afd-ffn-tp 4 \
     --afd-grouped-stepmesh
 
-# ═══ FFN 节点（TP=4）═══
+# ═══ FFN node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3 \
@@ -338,28 +338,28 @@ python -m sglang.launch_server \
     --afd-grouped-stepmesh
 ```
 
-### 9. StepMesh 异构 TP — 分组 + 非对称切分（6A:4F，跨节点 5NH，2 组 3W:2S）
+### 9. StepMesh Heterogeneous TP — Grouped + Asymmetric Splitting (6A:4F, Cross-Node 5NH, 2 Groups of 3W:2S)
 
 ```bash
-# ═══ 公共环境变量 ═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables ═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
-# ═══ Attn 节点（TP=6）═══
+# ═══ Attn node(TP=6)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 6 \
+    --model-path <model> --tp 6 \
     --disable-overlap-schedule \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 6 --afd-ffn-tp 4 --afd-attn-ratio 0.6 \
     --afd-grouped-stepmesh
 
-# ═══ FFN 节点（TP=4）═══
+# ═══ FFN node(TP=4)═══
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3 \
@@ -367,25 +367,25 @@ python -m sglang.launch_server \
     --afd-grouped-stepmesh
 ```
 
-### 10. PD 分离 + AFD + 分组 StepMesh（4A:8F）
+### 10. PD Disaggregation + AFD + Grouped StepMesh (4A:8F)
 
 ```bash
-# ═══ 公共环境变量 ═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables ═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
-# ═══ Prefill Attn 节点 ═══
+# ═══ Prefill Attn node ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --disaggregation-mode prefill \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
     --afd-grouped-stepmesh
 
-# ═══ Prefill FFN 节点 ═══
+# ═══ Prefill FFN node ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --disable-overlap-schedule \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --disaggregation-mode prefill \
@@ -393,18 +393,18 @@ python -m sglang.launch_server \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
     --afd-grouped-stepmesh
 
-# ═══ Decode Attn 节点 ═══
+# ═══ Decode Attn node ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disable-overlap-schedule \
     --disaggregation-mode decode \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
     --afd-grouped-stepmesh
 
-# ═══ Decode FFN 节点 ═══
+# ═══ Decode FFN node ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --disable-overlap-schedule \
     --port 30002 --skip-server-warmup --watchdog-timeout 3600 \
     --disaggregation-mode decode \
@@ -413,98 +413,98 @@ python -m sglang.launch_server \
     --afd-grouped-stepmesh
 ```
 
-### 配置速查表
+### Configuration Quick Reference
 
-| # | 场景 | 通信方式 | Attn 侧关键参数 | FFN 侧关键参数 | 跨节点流量 |
+| # | Scenario | Communication | Key Attn-Side Arguments | Key FFN-Side Arguments | Cross-Node Traffic |
 |---|------|---------|-----------------|----------------|-----------|
-| 1 | 同构 4:4 | ZMQ (TCP) | `--afd-perspective attn` | `--afd-perspective ffn` | 2NH |
-| 2 | 异构 4:8 | ZMQ (TCP) | `--afd-attn-tp 4 --afd-ffn-tp 8` | 同左 | 2NH |
-| 3 | 异构 8:4 | ZMQ (TCP) | `--afd-attn-tp 8 --afd-ffn-tp 4` | 同左 | 2NH |
-| 4 | 同构 4:4 | StepMesh (RDMA) | 同 #1 + `MLC_INTERFACE` | 同左 | 2NH |
-| 5 | 异构 4:8 不分组 | StepMesh (RDMA) | `--afd-attn-tp 4 --afd-ffn-tp 8` | 同左 | 12NH |
-| 6 | 异构 8:4 不分组 | StepMesh (RDMA) | `--afd-attn-tp 8 --afd-ffn-tp 4` | 同左 | 12NH |
-| 7 | 异构 4:8 **分组** | StepMesh (RDMA) | 同 #5 + `--afd-grouped-stepmesh` | 同左 | **3NH** |
-| 8 | 异构 8:4 **分组** | StepMesh (RDMA) | 同 #6 + `--afd-grouped-stepmesh` | 同左 | **3NH** |
-| 9 | 异构 6:4 **分组** | StepMesh (RDMA) | `--afd-attn-tp 6 --afd-ffn-tp 4 --afd-grouped-stepmesh` | 同左 | **5NH** |
-| 10 | PD + 异构 4:8 **分组** | StepMesh (RDMA) | 同 #7 + `--disaggregation-mode prefill/decode` | 同左 | **3NH** |
+| 1 | Homogeneous 4:4 | ZMQ (TCP) | `--afd-perspective attn` | `--afd-perspective ffn` | 2NH |
+| 2 | Heterogeneous 4:8 | ZMQ (TCP) | `--afd-attn-tp 4 --afd-ffn-tp 8` | Same as left | 2NH |
+| 3 | Heterogeneous 8:4 | ZMQ (TCP) | `--afd-attn-tp 8 --afd-ffn-tp 4` | Same as left | 2NH |
+| 4 | Homogeneous 4:4 | StepMesh (RDMA) | Same as #1 + `MLC_INTERFACE` | Same as left | 2NH |
+| 5 | Heterogeneous 4:8 ungrouped | StepMesh (RDMA) | `--afd-attn-tp 4 --afd-ffn-tp 8` | Same as left | 12NH |
+| 6 | Heterogeneous 8:4 ungrouped | StepMesh (RDMA) | `--afd-attn-tp 8 --afd-ffn-tp 4` | Same as left | 12NH |
+| 7 | Heterogeneous 4:8 **grouped** | StepMesh (RDMA) | Same as #5 + `--afd-grouped-stepmesh` | Same as left | **3NH** |
+| 8 | Heterogeneous 8:4 **grouped** | StepMesh (RDMA) | Same as #6 + `--afd-grouped-stepmesh` | Same as left | **3NH** |
+| 9 | Heterogeneous 6:4 **grouped** | StepMesh (RDMA) | `--afd-attn-tp 6 --afd-ffn-tp 4 --afd-grouped-stepmesh` | Same as left | **5NH** |
+| 10 | PD + heterogeneous 4:8 **grouped** | StepMesh (RDMA) | Same as #7 + `--disaggregation-mode prefill/decode` | Same as left | **3NH** |
 
-> **注意**:
-> - `--afd-attn-tp` 和 `--afd-ffn-tp` 需要在 **Attn 和 FFN 两侧都设置**，且值相同。`--afd-grouped-stepmesh` 同理。
-> - ZMQ 异构 TP（#2, #3）通过 `ShardedParallelCommunicator` 包裹 1:1 ZMQ 通信实现，跨节点流量固定 2NH（与 TP 配比无关），但受限于 TCP 延迟，适合功能验证。
-> - StepMesh 不分组异构（#5, #6）跨节点流量高（12NH），但 RDMA 延迟低；加 `--afd-grouped-stepmesh`（#7-#10）可降至 3-5NH。
-> - `--afd-grouped-stepmesh` 仅对 StepMesh 生效（需 `MLC_INTERFACE`），ZMQ 路径自动忽略。
+> **Notes**:
+> - `--afd-attn-tp` and `--afd-ffn-tp` must be set **on both the Attn and FFN sides**, with identical values. The same applies to `--afd-grouped-stepmesh`.
+> - ZMQ heterogeneous TP (#2, #3) wraps 1:1 ZMQ communication with `ShardedParallelCommunicator`, fixing cross-node traffic at 2NH (independent of the TP ratio), but is limited by TCP latency and suitable for functional validation.
+> - Ungrouped heterogeneous StepMesh (#5, #6) has high cross-node traffic (12NH), but low RDMA latency; adding `--afd-grouped-stepmesh` (#7-#10) reduces traffic to 3-5NH.
+> - `--afd-grouped-stepmesh` only applies to StepMesh (requires `MLC_INTERFACE`); the ZMQ path ignores it automatically.
 
-### 功能模块开关速查
+### Feature Flag Quick Reference
 
-| 模块 | 开关 | 默认 | 效果 | 依赖 |
+| Module | Flag | Default | Effect | Dependencies |
 |------|------|------|------|------|
-| AFD 基础 | `--afd-perspective attn/ffn` | 关 | Attn-FFN 分离部署 | 自动 disable CUDA graph |
-| Microbatch | `--afd-micro-batch N` | 3 | 流水线隐藏通信延迟 | AFD 基础 |
-| 非对称切分 | `--afd-attn-ratio R` | 0.5 | Attn/FFN 计算量配比 | AFD 基础 |
-| 异构 TP | `--afd-attn-tp A --afd-ffn-tp F` | 同 `--tp` | 不同 TP 大小 | AFD 基础 |
-| 分组 StepMesh | `--afd-grouped-stepmesh` | 关 | 跨节点流量降至 NH×(A+F)/gcd | 异构 TP + `MLC_INTERFACE` |
-| Overlap 调度 | `--afd-enable-overlap-schedule` | 关 | CPU/GPU 并行调度 ~5-10% | AFD 基础 |
-| Kernel Fusion | `--enable-torch-compile` | 关 | torch.compile ~5-8% | AFD 基础 |
+| Basic AFD | `--afd-perspective attn/ffn` | Off | Separate Attn-FFN deployment | Automatically disables CUDA graph |
+| Microbatch | `--afd-micro-batch N` | 3 | Pipeline hides communication latency | Basic AFD |
+| Asymmetric splitting | `--afd-attn-ratio R` | 0.5 | Attn/FFN compute ratio | Basic AFD |
+| Heterogeneous TP | `--afd-attn-tp A --afd-ffn-tp F` | Same as `--tp` | Different TP sizes | Basic AFD |
+| Grouped StepMesh | `--afd-grouped-stepmesh` | Off | Reduces cross-node traffic to NH×(A+F)/gcd | Heterogeneous TP + `MLC_INTERFACE` |
+| Overlap scheduling | `--afd-enable-overlap-schedule` | Off | CPU/GPU parallel scheduling ~5-10% | Basic AFD |
+| Kernel Fusion | `--enable-torch-compile` | Off | torch.compile ~5-8% | Basic AFD |
 
-### 按功能模块组合的启动命令
+### Launch Commands by Feature Combination
 
-#### A. 最简 AFD（ZMQ，功能验证）
+#### A. Minimal AFD (ZMQ, Functional Validation)
 
 ```bash
-# ═══ Attn 节点 ═══
+# ═══ Attn node ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
         --afd-perspective attn --afd-micro-batch 3
 
-# ═══ FFN 节点 ═══
+# ═══ FFN node ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
         --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3
 ```
 
-#### B. StepMesh RDMA + 异构 TP + 分组（生产推荐基线）
+#### B. StepMesh RDMA + Heterogeneous TP + Grouping (Recommended Production Baseline)
 
 ```bash
-# ═══ 公共环境变量 ═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables ═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
-# ═══ Attn 节点（TP=4）═══
+# ═══ Attn node(TP=4)═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
         --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
     --afd-grouped-stepmesh
 
-# ═══ FFN 节点（TP=8）═══
+# ═══ FFN node(TP=8)═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
         --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
     --afd-grouped-stepmesh
 ```
 
-#### C. 全部优化开启（最高性能）
+#### C. All Optimizations Enabled (Maximum Performance)
 
 ```bash
-# ═══ 公共环境变量 ═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables ═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
-# ═══ Attn 节点（TP=4）═══
+# ═══ Attn node(TP=4)═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
         --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
     --afd-grouped-stepmesh \
     --afd-enable-overlap-schedule \
     --enable-torch-compile
 
-# ═══ FFN 节点（TP=8）═══
+# ═══ FFN node(TP=8)═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
         --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --afd-perspective ffn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
@@ -513,16 +513,16 @@ python -m sglang.launch_server \
     --enable-torch-compile
 ```
 
-#### D. PD 分离 + AFD 全部优化
+#### D. PD Disaggregation + All AFD Optimizations
 
 ```bash
-# ═══ 公共环境变量 ═══
-export MLC_INTERFACE=<RDMA网卡>
+# ═══ Shared environment variables ═══
+export MLC_INTERFACE=<RDMA_nic>
 export DMLC_PS_ROOT_URI=<attn_ip>
 
 # ═══ Prefill Attn ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disaggregation-mode prefill \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
@@ -530,7 +530,7 @@ python -m sglang.launch_server \
 
 # ═══ Prefill FFN ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --port 30001 --skip-server-warmup --watchdog-timeout 3600 \
     --disaggregation-mode prefill \
     --afd-perspective ffn --afd-micro-batch 3 \
@@ -539,7 +539,7 @@ python -m sglang.launch_server \
 
 # ═══ Decode Attn ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 4 \
+    --model-path <model> --tp 4 \
     --disaggregation-mode decode \
     --afd-perspective attn --afd-micro-batch 3 \
     --afd-attn-tp 4 --afd-ffn-tp 8 \
@@ -547,7 +547,7 @@ python -m sglang.launch_server \
 
 # ═══ Decode FFN ═══
 python -m sglang.launch_server \
-    --model-path <模型> --tp 8 \
+    --model-path <model> --tp 8 \
     --port 30002 --skip-server-warmup --watchdog-timeout 3600 \
     --disaggregation-mode decode \
     --afd-perspective ffn --afd-micro-batch 3 \
@@ -555,145 +555,145 @@ python -m sglang.launch_server \
     --afd-grouped-stepmesh --afd-enable-overlap-schedule --enable-torch-compile
 ```
 
-#### E. 性能优化组合推荐
+#### E. Recommended Performance Optimization Combinations
 
-| 场景 | 命令组合 | 预期提升（vs 基础 AFD）|
+| Scenario | Command Combination | Expected Improvement (vs Basic AFD) |
 |------|---------|----------------------|
-| 功能验证 | A（最简 ZMQ） | 基线 |
-| 生产基线 | B（StepMesh + 分组） | 跨节点流量 4x 降低 |
-| 加 overlap 调度 | B + `--afd-enable-overlap-schedule` | +5-10% 吞吐 |
-| 加 kernel fusion | B + `--enable-torch-compile` | +5-8% 计算 |
-| **全部拉满** | **C（B + overlap + compile）** | **+10-18% 综合** |
-| PD 分离 + 全部拉满 | D | 同 C，支持 PD 独立 |
+| Functional validation | A (minimal ZMQ) | Baseline |
+| Production baseline | B (StepMesh + grouping) | 4x reduction in cross-node traffic |
+| Add overlap scheduling | B + `--afd-enable-overlap-schedule` | +5-10% throughput |
+| Add kernel fusion | B + `--enable-torch-compile` | +5-8% compute |
+| **All enabled** | **C (B + overlap + compile)** | **+10-18% overall** |
+| PD disaggregation + all enabled | D | Same as C, with independent PD support |
 
 ---
 
-## 六、架构限制与待办
+## VI. Architectural Limitations and TODOs
 
-| 编号 | 描述 | 状态 |
+| ID | Description | Status |
 |------|------|------|
-| F1 | StepMesh N:M 双向分片通信（详见下方） | **已实现** |
-| F2 | CUDA graph 自动 disable（`_handle_afd`）；Phase A（`torch.compile` 逐 stage 编译）已实现，Phase B（`reduce-overhead` CUDA Graph）待实现 | **Phase A 已实现** |
-| F3 | ~~TBO 与 AFD 互斥~~ → `--afd-enable-overlap-schedule` CPU/GPU overlap scheduling（`event_loop_afd` 中复用 `forward_stream` + `result_queue` 模式） | **已实现** |
-| F4 | 自动 profiling + `afd_attn_ratio` 自适应调参 | 待实现 |
-| F6 | DeepSeek-V2 `load_weights` 添加 AFDWeightFilter（generator 包装过滤） | **已修复** |
-| F7 | `afd_prepare_overlap` 添加 `is_target_verify()` 处理（scheduler.py + scheduler_afd_mixin.py） | **已修复** |
-| F8 | `afd_overlap.py` 移除冗余 `m is None` 检查 | **已修复** |
-| F9 | GCD-based 分组 StepMesh（`--afd-grouped-stepmesh`），跨节点流量降至 NH×(TP_A+TP_F)/gcd | **已实现** |
-| F5 | Qwen2（Dense）AFD 支持——可用 LLaMA 相同方式适配（init 中创建 LayerCommunicator） | 可快速适配 |
+| F1 | StepMesh N:M bidirectional sharded communication (see below) | **Implemented** |
+| F2 | CUDA graph automatically disabled (`_handle_afd`); Phase A (`torch.compile` per-stage compilation) implemented, Phase B (`reduce-overhead` CUDA Graph) not yet implemented | **Phase A implemented** |
+| F3 | ~~TBO and AFD mutually exclusive~~ → `--afd-enable-overlap-schedule` CPU/GPU overlap scheduling (reuses the `forward_stream` + `result_queue` pattern in `event_loop_afd`) | **Implemented** |
+| F4 | Automatic profiling + adaptive `afd_attn_ratio` tuning | Not yet implemented |
+| F6 | Add AFDWeightFilter to DeepSeek-V2 `load_weights` (generator-wrapper filtering) | **Fixed** |
+| F7 | Add `is_target_verify()` handling to `afd_prepare_overlap` (scheduler.py + scheduler_afd_mixin.py) | **Fixed** |
+| F8 | Remove redundant `m is None` check in `afd_overlap.py` | **Fixed** |
+| F9 | GCD-based grouped StepMesh (`--afd-grouped-stepmesh`), reducing cross-node traffic to NH×(TP_A+TP_F)/gcd | **Implemented** |
+| F5 | Qwen2 (Dense) AFD support—can use the same adaptation as LLaMA (create LayerCommunicator in init) | Can be adapted quickly |
 
 ---
 
-## 七、F1 StepMesh N:M 双向分片通信
+## VII. F1 StepMesh N:M Bidirectional Sharded Communication
 
-### 设计原理
+### Design Principles
 
-通过调研 StepMesh 源码（`af_tensor_app.h` + `public.hpp`）发现：
+Inspection of the StepMesh source (`af_tensor_app.h` + `public.hpp`) revealed:
 
-1. **`push_pull` 支持多个 pull_tensor**：`pull_tensors` 数组大小 = `server_count × batch_size`，每个 Server 有独立的 pull 缓冲区，不会覆盖
-2. **`get_batch` 按 Worker rank 排序返回**：内部用 `q_[worker_rank]` 队列，返回顺序即 rank 顺序
-3. **`respond` 按 key 匹配**：Server respond 的数据写入 Worker 对应 key 的 pull 缓冲区
-4. **`RegisterRecvTensor` 支持按 Worker 分片注册**：同一 tensor 的不同 chunk 注册给不同 Worker
+1. **`push_pull` supports multiple pull_tensor objects**: `pull_tensors` array size = `server_count × batch_size`; each Server has an independent pull buffer, preventing overwrites
+2. **`get_batch` returns results sorted by Worker rank**: internally uses the `q_[worker_rank]` queue; return order matches rank order
+3. **`respond` matches by key**: Server response data is written to the Worker's pull buffer for the corresponding key
+4. **`RegisterRecvTensor` supports per-Worker shard registration**: different chunks of the same tensor are registered for different Workers
 
-### 实现方式
+### Implementation
 
-**A→F 方向（分片广播）**：
-- `attn_send`：每个 Attn rank 只 push 1/TP_A 的 token shard（广播到所有 FFN）
-- 同时注册 **TP_F 个 pull_tensor**（每个 FFN Server 一个独立缓冲区用于接收 F→A shard）
-- `ffn_recv`：`get_batch()` 返回 TP_A 个 shard（按 Worker rank 排序），`torch.cat` 拼接
+**A→F Direction (Sharded Broadcast)**:
+- `attn_send`: each Attn rank pushes only its 1/TP_A token shard (broadcast to all FFN ranks)
+- Registers **TP_F pull_tensor objects** concurrently (one independent buffer per FFN Server to receive F→A shards)
+- `ffn_recv`: `get_batch()` returns TP_A shards (sorted by Worker rank), concatenated with `torch.cat`
 
-**F→A 方向（分片 respond）**：
-- `ffn_send`：每个 FFN rank respond 自己的 1/TP_F shard 给每个 Worker（按 key 匹配写入 Worker 对应的 pull 缓冲区）
-- `attn_recv`：`wait` 后所有 TP_F 个 pull_tensor 已填充，`torch.cat` + 截断 padding
+**F→A Direction (Sharded Respond)**:
+- `ffn_send`: each FFN rank responds with its own 1/TP_F shard to every Worker (key matching writes into the corresponding Worker pull buffer)
+- `attn_recv`: after `wait`, all TP_F pull_tensor objects are filled; `torch.cat` + truncate padding
 
-### 跨节点流量（4A:8F 示例）
+### Cross-Node Traffic (4A:8F Example)
 
-| 方向 | 流量 |
+| Direction | Traffic |
 |------|------|
-| A→F | 4 × (NH/4) × 8 = 8NH（每个 Attn 发 1/4，广播 8 份） |
-| F→A | 8 × (NH/8) × 4 = 4NH（每个 FFN 发 1/8，respond 给 4 个 Worker） |
-| **总计** | **12NH**（vs 同构 1:1 的 2NH，vs 全广播的 64NH） |
+| A→F | 4 × (NH/4) × 8 = 8NH (each Attn sends 1/4, broadcasting 8 copies) |
+| F→A | 8 × (NH/8) × 4 = 4NH (each FFN sends 1/8, responding to 4 Workers) |
+| **Total** | **12NH** (vs 2NH for homogeneous 1:1, vs 64NH for full broadcast) |
 
-### 向后兼容
+### Backward Compatibility
 
-同构 TP（`attn_tp == ffn_tp`）时 `_heterogeneous=False`，所有方法走原始 1:1 代码路径。
+For homogeneous TP (`attn_tp == ffn_tp`), `_heterogeneous=False`, and all methods use the original 1:1 code path.
 
-### 本轮 Review 已修复的问题
+### Issues Fixed in This Review Round
 
-| 编号 | 问题 | 修复 |
+| ID | Issue | Fix |
 |------|------|------|
-| H1 | `attn_send` 中 `self.key += 2` 只留 2 个 key 空间，但 pull 需要 TP_F 个 key，第二次调用时 key 碰撞 | 改为 `self.key += 1 + self.ffn_tp` |
-| H2 | docstring 描述了旧的"选择性 respond + all_gather"方案 | 更新为多 pull_tensor 方案 |
-| H3 | `ffn_recv` 只为第一个 Worker 的 key 注册了 recv buffer | 改为为每个 Worker 的 key 都注册 |
+| H1 | In `attn_send`, `self.key += 2` reserves only 2 keys, but pull needs TP_F keys, causing a key collision on the second call | Changed to `self.key += 1 + self.ffn_tp` |
+| H2 | Docstring described the old "selective respond + all_gather" scheme | Updated to the multiple-pull_tensor scheme |
+| H3 | `ffn_recv` registered a recv buffer only for the first Worker's key | Changed to register one for every Worker's key |
 
-### 遗留事项
+### Remaining Items
 
-| 编号 | 描述 |
+| ID | Description |
 |------|------|
-| G3 | token 数不整除 TP 时末尾 shard 较短，StepMesh RDMA 写入到较大的 pull_buf 时尾部有未初始化数据。`attn_recv` 中 `full[:original_num_tokens]` 已截断，但 RDMA 层是否要求 respond 数据大小 == pull_buf 大小需实际验证 |
-| G6 | `attn_send` 异构路径没有 buffer 复用（每次 `torch.empty_like`），同构路径用 `StepMeshTensorCache` + free pool。异构路径可优化但不影响正确性 |
+| G3 | When the token count is not divisible by TP, the last shard is shorter; StepMesh RDMA writes into a larger pull_buf, leaving uninitialized tail data. `full[:original_num_tokens]` in `attn_recv` already truncates it, but whether the RDMA layer requires response data size == pull_buf size needs practical validation |
+| G6 | The heterogeneous `attn_send` path does not reuse buffers (`torch.empty_like` each time); the homogeneous path uses `StepMeshTensorCache` + a free pool. The heterogeneous path can be optimized, but correctness is unaffected |
 
-### F→A 流量优化分析
+### F→A Traffic Optimization Analysis
 
-当前 F→A 流量为 4NH（4A:8F 示例），原因是每个 FFN Server 必须 respond 给每个 Worker（StepMesh `push_pull` 要求所有 pull 请求都被 respond，否则 Worker hang）。
+Current F→A traffic is 4NH (4A:8F example), because each FFN Server must respond to every Worker (StepMesh `push_pull` requires all pull requests to receive responses; otherwise the Worker hangs).
 
-**进一步优化方案**：每个 Worker 只注册 1 个 pull_tensor（只从 1 个 Server 取 1/TP_F shard），Attn 侧 NVLink all_gather 拼回完整 tensor。F→A 跨节点降到 NH，代价是增加一次节点内 all_gather（NVLink ~600GB/s，延迟 5-10us）。
+**Further optimization proposal**: each Worker registers only 1 pull_tensor (fetching one 1/TP_F shard from only 1 Server); Attn-side NVLink all_gather reconstructs the full tensor. Cross-node F→A traffic drops to NH at the cost of an additional intra-node all_gather (NVLink ~600GB/s, latency 5-10us).
 
-但此方案在 StepMesh 层有限制：`ZPull_` 内部 `pull_tensors.size() / server_count` 计算 `pull_batch_size`，如果 pull_tensor 数 < server_count 则 `pull_batch_size=0`，不发 pull。因此 **Worker 必须传 server_count 的整数倍个 pull_tensor**。
+However, StepMesh imposes a limitation: `ZPull_` internally computes `pull_batch_size` as `pull_tensors.size() / server_count`; if the pull_tensor count < server_count, then `pull_batch_size=0` and no pull is issued. Therefore, **Workers must pass an integer multiple of server_count pull_tensor objects**.
 
-可行的折中方案：传 TP_F 个 pull_tensor 但只让需要的 Server respond 真实数据、其余 respond 空占位（避免 hang），然后 Attn 只取需要的 shard + all_gather。这等价于当前实现 + 加 all_gather 但不减少跨节点流量（仍是 4NH），无实际收益。
+A feasible compromise: pass TP_F pull_tensor objects but have only the required Servers respond with real data; the others respond with empty placeholders (avoiding hangs). Attn then takes only the required shards + all_gather. This is equivalent to the current implementation + an all_gather without reducing cross-node traffic (still 4NH), so it offers no practical benefit.
 
-**结论**：4NH 是 StepMesh push_pull API 的固有下限（每个 Server 必须 respond 每个 Worker 的 pull）。真正降到 NH 需要分组 StepMesh 实例（极高复杂度），建议作为远期目标。实际部署中 RDMA 200Gbps+ 下 4NH 的绝对延迟仍在 SLA 范围内。
+**Conclusion**: 4NH is the inherent lower bound of the StepMesh push_pull API (each Server must respond to every Worker's pull). Reducing it to NH requires grouped StepMesh instances (extremely high complexity), recommended as a long-term goal. In actual deployments with RDMA 200Gbps+, the absolute latency of 4NH still falls within the SLA.
 
 ---
 
-## 八、最终 Review（当前轮）
+## VIII. Final Review (Current Round)
 
-### 发现的问题
+### Issues Found
 
-| 编号 | 严重度 | 文件 | 问题 |
+| ID | Severity | File | Issue |
 |------|--------|------|------|
-| F6 | **严重** | `deepseek_v2.py` | `load_weights` 缺少 `AFDWeightFilter`，Attn/FFN 节点都加载全部权重，浪费显存 |
-| F7 | **中等** | `scheduler.py` + `scheduler_afd_mixin.py` | `afd_prepare_overlap` 未处理 `TARGET_VERIFY` 模式，speculative decoding 下 AFD microbatch 切分不工作 |
-| F8 | **低** | `afd_overlap.py` | `m is None` 检查冗余（`_get_afd_micro_batch()` 总返回 int） |
+| F6 | **Critical** | `deepseek_v2.py` | `load_weights` lacks `AFDWeightFilter`; both Attn/FFN nodes load all weights, wasting GPU memory |
+| F7 | **Medium** | `scheduler.py` + `scheduler_afd_mixin.py` | `afd_prepare_overlap` does not handle `TARGET_VERIFY` mode; AFD microbatch splitting fails under speculative decoding |
+| F8 | **Low** | `afd_overlap.py` | Redundant `m is None` check (`_get_afd_micro_batch()` always returns int) |
 
-### 已验证为正确的部分
+### Verified Correct Components
 
-| 检查项 | 状态 |
+| Check | Status |
 |--------|------|
-| `afd_split_seq_index` 字段流转（ScheduleBatch → ModelWorkerBatch → ForwardBatch） | OK |
-| StepMesh `attn_send` key 分配（`self.key += 1 + self.ffn_tp`） | OK |
-| StepMesh `ffn_send` respond n_workers 次 | OK |
-| StepMesh 异构路径（分片广播 + 多 pull_tensor）| OK |
-| `model_forward_afd` 流水线 overlap（`postprocess_layer_start_recv`） | OK |
-| Qwen3Model.forward AFD 分支 | OK |
-| Qwen2.py 不含 AFD（Qwen2DecoderLayer 无 LayerCommunicator，正确排除） | OK |
-| AFDReqInput 继承 BaseReq | OK |
-| server_args `afd_micro_batch` 拼写 | OK |
-| `event_loop_afd_disagg_prefill/decode` 调用 Mixin 方法顺序 | OK |
-| `_compute_token_indices_m_way` 自主计算 | OK |
+| `afd_split_seq_index` field propagation (ScheduleBatch → ModelWorkerBatch → ForwardBatch) | OK |
+| StepMesh `attn_send` key allocation (`self.key += 1 + self.ffn_tp`) | OK |
+| StepMesh `ffn_send` responds n_workers times | OK |
+| StepMesh heterogeneous path (sharded broadcast + multiple pull_tensor objects) | OK |
+| `model_forward_afd` pipeline overlap (`postprocess_layer_start_recv`) | OK |
+| Qwen3Model.forward AFD branch | OK |
+| Qwen2.py contains no AFD (Qwen2DecoderLayer has no LayerCommunicator, correctly excluded) | OK |
+| AFDReqInput inherits BaseReq | OK |
+| server_args `afd_micro_batch` spelling | OK |
+| Order of Mixin method calls in `event_loop_afd_disagg_prefill/decode` | OK |
+| `_compute_token_indices_m_way` computes independently | OK |
 
-### 后续任务优先级
+### Follow-up Task Priorities
 
-| 优先级 | 任务 | 描述 | 状态 |
+| Priority | Task | Description | Status |
 |--------|------|------|------|
-| ~~P0~~ | ~~F6~~ | ~~DeepSeek-V2 添加 AFDWeightFilter~~ | **已修复** |
-| ~~P0~~ | ~~F7~~ | ~~`afd_prepare_overlap` 添加 `is_target_verify()` 处理~~ | **已修复** |
-| ~~P1~~ | ~~F8~~ | ~~移除冗余 `m is None` 检查~~ | **已修复** |
-| P2 | F2 | CUDA Graph 支持 | 待实现 |
-| P2 | F3 | TBO + AFD 共存 | 待实现 |
-| P3 | F4 | 自动 profiling | 待实现 |
-| ~~P2~~ | ~~F9~~ | ~~分组 StepMesh：GCD-based 分组，跨节点流量 NH×(TP_A+TP_F)/gcd~~ | **已实现** |
-| ~~P3~~ | ~~G3~~ | ~~RDMA 末尾 shard 短于 pull_buf~~ — `ffn_send` 中对末尾 shard padding 到 `chunk_size`，`attn_recv` 中 `full[:original_num_tokens]` 截断 | **已修复** |
-| P3 | G6 | 异构路径 buffer 复用 | 待优化 |
+| ~~P0~~ | ~~F6~~ | ~~Add AFDWeightFilter to DeepSeek-V2~~ | **Fixed** |
+| ~~P0~~ | ~~F7~~ | ~~Add `is_target_verify()` handling to `afd_prepare_overlap`~~ | **Fixed** |
+| ~~P1~~ | ~~F8~~ | ~~Remove redundant `m is None` check~~ | **Fixed** |
+| P2 | F2 | CUDA Graph support | Not yet implemented |
+| P2 | F3 | TBO + AFD coexistence | Not yet implemented |
+| P3 | F4 | Automatic profiling | Not yet implemented |
+| ~~P2~~ | ~~F9~~ | ~~Grouped StepMesh: GCD-based grouping, cross-node traffic NH×(TP_A+TP_F)/gcd~~ | **Implemented** |
+| ~~P3~~ | ~~G3~~ | ~~RDMA final shard shorter than pull_buf~~ — pad the final shard to `chunk_size` in `ffn_send`, truncate with `full[:original_num_tokens]` in `attn_recv` | **Fixed** |
+| P3 | G6 | Heterogeneous-path buffer reuse | To be optimized |
 
 ---
 
-## 九、F9 分组 StepMesh 实现（GCD-based 通用分组）
+## IX. F9 Grouped StepMesh Implementation (Generic GCD-Based Grouping)
 
-### 设计
+### Design
 
-使用 `num_groups = gcd(TP_A, TP_F)` 将全局 N:M StepMesh 拆成多个独立小组，**同时支持 TP_A > TP_F 和 TP_A < TP_F**：
+Use `num_groups = gcd(TP_A, TP_F)` to split global N:M StepMesh into independent small groups, **supporting both TP_A > TP_F and TP_A < TP_F**:
 
 ```
 num_groups        = gcd(TP_A, TP_F)
@@ -701,83 +701,83 @@ workers_per_group = TP_A / num_groups
 servers_per_group = TP_F / num_groups
 ```
 
-- 新增 `--afd-grouped-stepmesh` 开关（默认 False），可选启用
-- 每组独立 StepMesh 实例（独立端口 + scheduler 进程）
-- 组内复用现有异构 N:M 通信代码，组后 NVLink `all_gather` + stride 去重重建完整 tensor
-- 当 `gcd=1`（如 3A:2F）自动禁用（无收益）
-- 当两侧都大于 1（如 6A:4F → 3W:2S 组）可工作但收益较小，会 warn
+- Added optional `--afd-grouped-stepmesh` flag (default False)
+- Independent StepMesh instance per group (separate port + scheduler process)
+- Reuse existing heterogeneous N:M communication code within groups, then reconstruct the full tensor with NVLink `all_gather` + stride deduplication
+- Automatically disabled when `gcd=1` (e.g., 3A:2F), since there is no benefit
+- Works when both sides exceed 1 (e.g., 6A:4F → 3W:2S groups), but benefits are smaller and a warning is emitted
 
-### 通用流量公式
+### General Traffic Formula
 
 ```
 A→F = NH × (TP_F / gcd)
 F→A = NH × (TP_A / gcd)
-总计 = NH × (TP_A + TP_F) / gcd
+Total = NH × (TP_A + TP_F) / gcd
 ```
 
-| TP_A:TP_F | gcd | 每组 | 无分组 | 有分组 | 改善 |
+| TP_A:TP_F | gcd | Per Group | Ungrouped | Grouped | Improvement |
 |-----------|-----|------|--------|--------|------|
 | 4:8 | 4 | 1W:2S | 12NH | 3NH | 4x |
 | 8:4 | 4 | 2W:1S | 12NH | 3NH | 4x |
 | 6:4 | 2 | 3W:2S | 10NH | 5NH | 2x |
 | 4:6 | 2 | 2W:3S | 10NH | 5NH | 2x |
 | 8:2 | 2 | 4W:1S | 10NH | 5NH | 2x |
-| 3:2 | 1 | — | 6NH | 6NH | 无 |
+| 3:2 | 1 | — | 6NH | 6NH | None |
 
-### 实现步骤（8 步，仅改 `afd.py` + `server_args.py`）
+### Implementation Steps (8 Steps, Only `afd.py` + `server_args.py` Modified)
 
-1. **`server_args.py`**：新增 `afd_grouped_stepmesh` 字段 + `--afd-grouped-stepmesh` CLI + `_handle_afd` 验证
-2. **`__init__` 分组映射**：计算 `num_groups`、`workers_per_group`、`servers_per_group`、`group_id`、`intra_group_rank`
-3. **`_start_stepmesh_scheduler`**：per-group DMLC 配置（`NUM_WORKER=workers_per_group`、`NUM_SERVER=servers_per_group`、独立端口），每组第一个 Worker 启动 scheduler
-4. **`attn_send`**：push shard pad 到 `chunk_size`（保证 all_gather 尺寸一致），`n_pull = servers_per_group`
-5. **`ffn_recv`**：收 `workers_per_group` 个 shard + `all_gather` on TP_F group + stride `servers_per_group` 去重
-6. **`ffn_send`**：无需改动（`n_workers` 自动正确，shard 基于全局 TP_F 计算）
-7. **`attn_recv`**：cat `servers_per_group` 个 pull_tensor + `all_gather` on TP_A group + stride `workers_per_group` 去重 + 截断 `original_num_tokens`
-8. **更新文档**
+1. **`server_args.py`**: add `afd_grouped_stepmesh` field + `--afd-grouped-stepmesh` CLI + `_handle_afd` validation
+2. **`__init__` group mapping**: compute `num_groups`, `workers_per_group`, `servers_per_group`, `group_id`, `intra_group_rank`
+3. **`_start_stepmesh_scheduler`**: per-group DMLC configuration (`NUM_WORKER=workers_per_group`, `NUM_SERVER=servers_per_group`, independent ports); first Worker in each group starts the scheduler
+4. **`attn_send`**: pad push shards to `chunk_size` (ensuring equal all_gather sizes), `n_pull = servers_per_group`
+5. **`ffn_recv`**: receive `workers_per_group` shards + `all_gather` on TP_F group + stride `servers_per_group` deduplication
+6. **`ffn_send`**: no changes needed (`n_workers` is automatically correct, shards computed from global TP_F)
+7. **`attn_recv`**: concatenate `servers_per_group` pull_tensor objects + `all_gather` on TP_A group + stride `workers_per_group` deduplication + truncate to `original_num_tokens`
+8. **Update documentation**
 
-### 使用方式
+### Usage
 
-详细启动命令见**第五节**（场景 5-8）。核心要点：
+See **Section V** (scenarios 5-8) for detailed launch commands. Key points:
 
-- 在已有异构 TP 命令基础上，两侧同时添加 `--afd-grouped-stepmesh` 即可
-- 需要 `MLC_INTERFACE` 环境变量（StepMesh RDMA 模式）
-- `--afd-attn-tp` 和 `--afd-ffn-tp` 需两侧一致
-- `gcd(TP_A, TP_F) > 1` 时才有收益（`gcd=1` 时自动禁用并 warn）
+- Add `--afd-grouped-stepmesh` on both sides to existing heterogeneous TP commands
+- Requires the `MLC_INTERFACE` environment variable (StepMesh RDMA mode)
+- `--afd-attn-tp` and `--afd-ffn-tp` must match on both sides
+- Benefits apply only when `gcd(TP_A, TP_F) > 1` (automatically disabled with a warning when `gcd=1`)
 
-### F9 Review 结果
+### F9 Review Results
 
-#### 发现的问题
+#### Issues Found
 
-| 编号 | 严重度 | 位置 | 问题 | 影响 |
+| ID | Severity | Location | Issue | Impact |
 |------|--------|------|------|------|
-| F9-1 | **低** | `ffn_recv` grouped path | FFN 处理 padded tensor（最多多 TP_A-1 个零 token 经过 MLP） | batch=1000 tokens 时 <0.7% 计算开销，可忽略 |
-| F9-2 | **低** | `_start_stepmesh_scheduler` | per-group scheduler flag 技术上冗余（每进程只调用一次 init） | 防御性编程，不影响正确性 |
-| F9-3 | **低** | `_start_stepmesh_scheduler` | 分组路径 force-set `DMLC_PS_ROOT_PORT`，与非分组路径 `_env_def` 语义略有不同 | 行为正确，仅风格差异 |
+| F9-1 | **Low** | `ffn_recv` grouped path | FFN processes padded tensors (at most TP_A-1 extra zero tokens through MLP) | <0.7% compute overhead for batch=1000 tokens, negligible |
+| F9-2 | **Low** | `_start_stepmesh_scheduler` | Per-group scheduler flag is technically redundant (each process calls init only once) | Defensive programming, no correctness impact |
+| F9-3 | **Low** | `_start_stepmesh_scheduler` | Grouped path force-sets `DMLC_PS_ROOT_PORT`, slightly different from `_env_def` semantics in the ungrouped path | Correct behavior, style difference only |
 
-#### 已验证正确的部分
+#### Verified Correct Components
 
-| 检查项 | 状态 |
+| Check | Status |
 |--------|------|
-| GCD 分组计算：4A:8F → 4 组 1W:2S | OK |
-| GCD 分组计算：8A:4F → 4 组 2W:1S | OK |
-| GCD 分组计算：6A:4F → 2 组 3W:2S（混合组） | OK |
-| GCD 分组计算：3A:2F → gcd=1 → 自动禁用 | OK |
-| GCD 分组计算：4A:4F → 同构 → 自动禁用 | OK |
-| `attn_send` push shard padding 仅在 `_grouped` 模式生效，不影响非分组路径 | OK |
-| `attn_send` pull buffer 尺寸基于 `effective_tokens`（padded）匹配 `ffn_send` shard 大小 | OK |
-| `attn_send` key 增量 `1 + servers_per_group`（分组）vs `1 + ffn_tp`（非分组）| OK |
+| GCD grouping: 4A:8F → 4 groups of 1W:2S | OK |
+| GCD grouping: 8A:4F → 4 groups of 2W:1S | OK |
+| GCD grouping: 6A:4F → 2 groups of 3W:2S (mixed groups) | OK |
+| GCD grouping: 3A:2F → gcd=1 → automatically disabled | OK |
+| GCD grouping: 4A:4F → homogeneous → automatically disabled | OK |
+| `attn_send` push shard padding applies only in `_grouped` mode, leaving the ungrouped path unaffected | OK |
+| `attn_send` pull buffer size uses `effective_tokens` (padded), matching `ffn_send` shard size | OK |
+| `attn_send` key increment `1 + servers_per_group` (grouped) vs `1 + ffn_tp` (ungrouped) | OK |
 | `ffn_recv` all_gather size=`self.ffn_tp` == `tp_group.size()` | OK |
-| `ffn_recv` stride-select 正确跳过组内重复数据 | OK |
-| `ffn_send` 无需改动：`n_workers` 自动正确，shard 基于全局 `ffn_tp` | OK |
+| `ffn_recv` stride-select correctly skips intra-group duplicate data | OK |
+| `ffn_send` needs no changes: `n_workers` is automatically correct, shards use global `ffn_tp` | OK |
 | `attn_recv` all_gather size=`self.attn_tp` == `tp_group.size()` | OK |
-| `attn_recv` stride-select + `full[:original_num_tokens]` 截断 | OK |
-| per-group DMLC 配置（独立 NUM_WORKER/NUM_SERVER/PORT） | OK |
-| per-group scheduler 启动（`intra_group_rank == 0` 条件） | OK |
-| `server_args.py` 验证逻辑（同构禁用、gcd=1 禁用、混合组 warn） | OK |
-| 后向兼容：`_grouped=False` 时所有代码路径与原实现完全一致 | OK |
-| `num_tokens=1` 极端 case 数据流正确 | OK |
+| `attn_recv` stride-select + `full[:original_num_tokens]` truncation | OK |
+| Per-group DMLC configuration (independent NUM_WORKER/NUM_SERVER/PORT) | OK |
+| Per-group scheduler startup (`intra_group_rank == 0` condition) | OK |
+| `server_args.py` validation (disable for homogeneous TP, disable for gcd=1, warn for mixed groups) | OK |
+| Backward compatibility: all code paths match the original implementation when `_grouped=False` | OK |
+| Correct data flow for the `num_tokens=1` edge case | OK |
 
-#### 逐配置数据流验证摘要
+#### Per-Configuration Data-Flow Validation Summary
 
 **4A:8F** (`G=4, 1W:2S`): `chunk_a=4, eff=16, f2a=2` → `ffn_recv` stride=2 → 16 tokens → MLP → `ffn_send` 2/rank → `attn_recv` stride=1 → `[:15]` ✓
 
@@ -785,260 +785,260 @@ F→A = NH × (TP_A / gcd)
 
 **6A:4F** (`G=2, 3W:2S`): `chunk_a=2, eff=12, f2a=3` → `ffn_recv` stride=2 → 12 tokens → MLP → `ffn_send` 3/rank → `attn_recv` stride=3 → `[:10]` ✓
 
-### 后续优化方向
+### Further Optimization Directions
 
-- **Custom process sub-groups**：用 `num_groups`-way all_gather 替代全 TP all_gather + stride 去重，消除冗余 NVLink 传输（当 stride > 1 时）
-- **Grouped buffer pool**：将 `StepMeshTensorCache` free pool 扩展到分组路径（当前仅同构路径复用 buffer）
-- **F9-1 优化**：在 `ffn_recv` 重建 `original_num_tokens`（通过 metadata 嵌入或 broadcast），避免 padding tokens 经过 MLP
+- **Custom process sub-groups**: replace full-TP all_gather + stride deduplication with `num_groups`-way all_gather, eliminating redundant NVLink transfers (when stride > 1)
+- **Grouped buffer pool**: extend the `StepMeshTensorCache` free pool to the grouped path (currently only the homogeneous path reuses buffers)
+- **F9-1 optimization**: reconstruct `original_num_tokens` in `ffn_recv` (via embedded metadata or broadcast), avoiding MLP execution on padding tokens
 
 ---
 
-## 十、总结：代码 Review 结果与未完成任务
+## X. Summary: Code Review Results and Outstanding Tasks
 
-### 本轮代码 Review（全部改动文件）
+### Code Review This Round (All Modified Files)
 
-#### 审查范围
+#### Review Scope
 
-| 文件 | 改动内容 |
+| File | Changes |
 |------|---------|
-| `server_args.py` | `afd_grouped_stepmesh` + `afd_enable_overlap_schedule` 字段/CLI/验证 + AFD 自动 disable overlap |
-| `afd.py` — `StepMeshTensorCommunicator` | `__init__` GCD 分组 + `_start_stepmesh_scheduler` per-group + `attn_send`/`ffn_recv`/`attn_recv` 分组路径 |
-| `afd.py` — `AsyncTensorCommunicator` | 5 个方法加 `@torch.compiler.disable()` |
-| `afd.py` — `AFDCommunicator` | 3 个方法加 `@torch.compiler.disable()` |
-| `afd_mixin.py` | `_afd_init` 中 `torch.compile` `_run_attn`/`_run_mlp` |
-| `scheduler.py` | `afd_overlap_enabled` 初始化 + `event_loop_afd` overlap 模式（`result_queue` + `_pop_and_process`） |
+| `server_args.py` | `afd_grouped_stepmesh` + `afd_enable_overlap_schedule` fields/CLI/validation + AFD automatically disables overlap |
+| `afd.py` — `StepMeshTensorCommunicator` | GCD grouping in `__init__` + per-group `_start_stepmesh_scheduler` + grouped paths in `attn_send`/`ffn_recv`/`attn_recv` |
+| `afd.py` — `AsyncTensorCommunicator` | Added `@torch.compiler.disable()` to 5 methods |
+| `afd.py` — `AFDCommunicator` | Added `@torch.compiler.disable()` to 3 methods |
+| `afd_mixin.py` | `torch.compile` for `_run_attn`/`_run_mlp` in `_afd_init` |
+| `scheduler.py` | `afd_overlap_enabled` initialization + `event_loop_afd` overlap mode (`result_queue` + `_pop_and_process`) |
 
-#### 发现的问题
+#### Issues Found
 
-| 编号 | 严重度 | 文件 | 问题 | 状态 |
+| ID | Severity | File | Issue | Status |
 |------|--------|------|------|------|
-| ~~R1~~ | ~~低~~ | `afd_mixin.py` | ~~Proxy 侧编译 no-op 模块~~ → 按 perspective 只编译实际计算侧 | **已修复** |
-| ~~R2~~ | ~~低~~ | `afd.py` | ~~`prepare_attn` 缺 `@torch.compiler.disable()`~~ → 已补充（共 10 个通信方法全覆盖） | **已修复** |
-| F9-1 | **低** | `afd.py` | 分组模式 FFN 处理 padded tensor（最多 TP_A-1 个零 token） | 不修复（<1%，远期优化） |
-| ~~F9-2~~ | ~~低~~ | `afd.py` | ~~per-group scheduler flag 冗余~~ → 已移除 | **已修复** |
-| ~~F9-3~~ | ~~低~~ | `afd.py` | ~~分组路径 force-set 注释不清~~ → 已补充注释 | **已修复** |
-| ~~F3-R1~~ | ~~极低~~ | `server_args.py` | ~~矛盾 flag 无 warn~~ → 已加 warn | **已修复** |
+| ~~R1~~ | ~~Low~~ | `afd_mixin.py` | ~~Compiling no-op modules on the Proxy side~~ → compile only the actual compute side according to perspective | **Fixed** |
+| ~~R2~~ | ~~Low~~ | `afd.py` | ~~`prepare_attn` missing `@torch.compiler.disable()`~~ → added (all 10 communication methods now covered) | **Fixed** |
+| F9-1 | **Low** | `afd.py` | FFN processes padded tensors in grouped mode (at most TP_A-1 zero tokens) | Not fixed (<1%, long-term optimization) |
+| ~~F9-2~~ | ~~Low~~ | `afd.py` | ~~Redundant per-group scheduler flag~~ → removed | **Fixed** |
+| ~~F9-3~~ | ~~Low~~ | `afd.py` | ~~Unclear force-set comment in grouped path~~ → clarified comment | **Fixed** |
+| ~~F3-R1~~ | ~~Very low~~ | `server_args.py` | ~~No warning for conflicting flags~~ → added warning | **Fixed** |
 
-#### 最终 Review（全量验证）
+#### Final Review (Full Validation)
 
-本次对全部改动文件做了最终逐行 review，确认以下功能点全部正确：
+A final line-by-line review of all modified files confirmed that the following features are correct:
 
-| 功能 | 验证结果 |
+| Feature | Validation Result |
 |------|---------|
-| **F9 分组 StepMesh** | GCD 分组 + padding + all_gather + stride 去重 + 截断：全路径正确 |
-| **F2-A torch.compile** | 按 perspective 只编译实际计算侧，10 个通信方法全部 `@torch.compiler.disable()` |
-| **F3 overlap scheduling** | `_handle_afd` 自动 disable overlap + `--afd-enable-overlap-schedule` 显式开启；`event_loop_afd` overlap 路径的 `result_queue` 入队/出队时序与 `event_loop_overlap` 完全对齐；首次迭代、batch=None、连续 prefill 等边界 case 均安全 |
-| **后向兼容** | 非 AFD 场景不受任何影响；AFD 默认行为（不传新 flag）与改动前完全一致 |
+| **F9 grouped StepMesh** | GCD grouping + padding + all_gather + stride deduplication + truncation: all paths correct |
+| **F2-A torch.compile** | Compiles only the actual compute side according to perspective; all 10 communication methods use `@torch.compiler.disable()` |
+| **F3 overlap scheduling** | `_handle_afd` automatically disables overlap + `--afd-enable-overlap-schedule` explicitly enables it; `result_queue` enqueue/dequeue timing in the `event_loop_afd` overlap path exactly matches `event_loop_overlap`; edge cases including first iteration, batch=None, and consecutive prefill are safe |
+| **Backward compatibility** | Non-AFD scenarios unaffected; default AFD behavior (without new flags) exactly matches behavior before the changes |
 
-**无新增问题。** 唯一剩余已知问题为 F9-1（padding tokens，<1%，已决定不修复）。
+**No new issues.** The only remaining known issue is F9-1 (padding tokens, <1%, deliberately left unfixed).
 
-#### 已验证正确的部分
+#### Verified Correct Components
 
-| 检查项 | 状态 |
+| Check | Status |
 |--------|------|
-| **F9 分组 StepMesh** | |
-| GCD 分组：4A:8F / 8A:4F / 6A:4F / 3A:2F / 4A:4F | OK |
-| `attn_send` push shard padding 仅 `_grouped` 模式 | OK |
-| `attn_send` pull buffer 基于 `effective_tokens` 匹配 `ffn_send` shard 大小 | OK |
-| `attn_send` key 增量 `1 + servers_per_group` / `1 + ffn_tp` | OK |
-| `ffn_recv` / `attn_recv` all_gather + stride-select 正确 | OK |
-| `ffn_send` 无需改动 | OK |
-| per-group DMLC config + scheduler 启动 | OK |
-| 后向兼容 + 极端 case | OK |
+| **F9 grouped StepMesh** | |
+| GCD grouping: 4A:8F / 8A:4F / 6A:4F / 3A:2F / 4A:4F | OK |
+| `attn_send` push shard padding only in `_grouped` mode | OK |
+| `attn_send` pull buffer uses `effective_tokens` to match `ffn_send` shard size | OK |
+| `attn_send` key increment `1 + servers_per_group` / `1 + ffn_tp` | OK |
+| Correct `ffn_recv` / `attn_recv` all_gather + stride-select | OK |
+| `ffn_send` needs no changes | OK |
+| Per-group DMLC config + scheduler startup | OK |
+| Backward compatibility + edge cases | OK |
 | **F2-A torch.compile** | |
-| `_run_attn` / `_run_mlp` 编译条件 + `@torch.compiler.disable()` 8 个通信方法 | OK |
-| `dynamic=True` + dynamo cache + Mixin 覆盖 + Proxy 无害 | OK |
+| `_run_attn` / `_run_mlp` compilation conditions + `@torch.compiler.disable()` on 8 communication methods | OK |
+| `dynamic=True` + dynamo cache + Mixin coverage + harmless Proxy | OK |
 | **F3 overlap scheduling** | |
-| `_handle_afd` 自动 `disable_overlap_schedule`（无 `--afd-enable-overlap-schedule` 时） | OK |
-| `afd_overlap_enabled=True` 时 `enable_overlap=True`，`run_batch` 走 async 路径 | OK |
-| `init_overlap()` 初始化 `forward_stream` + `FutureMap` | OK |
-| `event_loop_afd` overlap 路径：`result_queue` + `_pop_and_process` + `batch.copy()` | OK |
-| `is_disable_overlap_for_batch`：连续 prefill 禁用 overlap，first iteration 安全 | OK |
-| `launch_batch_sample_if_needed` 在 `_pop_and_process` 后调用（匹配 `event_loop_overlap`） | OK |
-| `dispatch_event_loop`：AFD 优先级高于 overlap，不走 `event_loop_overlap` | OK |
-| 非 AFD 场景完全不受影响 | OK |
-| 非 overlap AFD 路径（`afd_overlap=False`）与原实现一致 | OK |
+| `_handle_afd` automatically sets `disable_overlap_schedule` (without `--afd-enable-overlap-schedule`) | OK |
+| When `afd_overlap_enabled=True`, `enable_overlap=True`, and `run_batch` uses the async path | OK |
+| `init_overlap()` initializes `forward_stream` + `FutureMap` | OK |
+| `event_loop_afd` overlap path: `result_queue` + `_pop_and_process` + `batch.copy()` | OK |
+| `is_disable_overlap_for_batch`: consecutive prefill disables overlap; first iteration is safe | OK |
+| `launch_batch_sample_if_needed` called after `_pop_and_process` (matching `event_loop_overlap`) | OK |
+| `dispatch_event_loop`: AFD takes precedence over overlap, bypassing `event_loop_overlap` | OK |
+| Non-AFD scenarios completely unaffected | OK |
+| Non-overlap AFD path (`afd_overlap=False`) matches the original implementation | OK |
 
 ---
 
-### 已完成任务一览
+### Completed Task Overview
 
-| 编号 | 描述 | 轮次 |
+| ID | Description | Round |
 |------|------|------|
-| F1 | StepMesh N:M 双向分片通信（任意 TP_A:TP_F） | 第一轮 |
-| F6 | DeepSeek-V2 `load_weights` 添加 `AFDWeightFilter` | 第一轮 |
-| F7 | `afd_prepare_overlap` 添加 `is_target_verify()` 处理 | 第一轮 |
-| F8 | `afd_overlap.py` 移除冗余 `m is None` 检查 | 第一轮 |
-| G3 | RDMA 末尾 shard padding + 截断 | 第一轮 |
-| H1-H3 | StepMesh key 碰撞 / docstring / recv buffer 注册 | 第一轮 |
-| F9 | GCD-based 分组 StepMesh（`--afd-grouped-stepmesh`） | 第二轮 |
-| F2-A | `torch.compile` 逐 stage 编译 + AFD 通信 `compiler.disable()` | 第二轮 |
-| F3 | `--afd-enable-overlap-schedule` CPU/GPU overlap scheduling | 第二轮 |
-| Phase 6 | 异构 TP（`ShardedParallelCommunicator` + StepMesh N:M） | 早期 |
-| Task 6 | PD + AFD 独立控制 | 早期 |
-| C1-C5, S1-S3, G3-G6, E1-E5 | 通信/调度/计算/工程化优化 | 早期 |
-| T1-T2 | Universal AFD Toggle：消除 microbatch 依赖 + TP>1 broadcast 修复 | 第三轮 |
-| T4 | `_handle_afd` 自动 disable CUDA graph + piecewise CUDA graph | 第三轮 |
-| L1 | LLaMA/Llama3 AFD 支持（LayerCommunicator + Mixin + Model.forward + WeightFilter） | 第四轮 |
-| L2 | FFN 侧 `AfdAttnBackend.init_forward_metadata` 子 backend 崩溃修复 | 第四轮 |
-| L3 | `_run_attn`/`_run_mlp` 绑定修复（影响所有使用 Mixin 的模型） | 第四轮 |
-| L4 | `scheduler_afd_mixin.py` `r.seq_len` → `r.seqlen` 拼写修复 | 第四轮 |
+| F1 | StepMesh N:M bidirectional sharded communication (arbitrary TP_A:TP_F) | Round 1 |
+| F6 | Added `AFDWeightFilter` to DeepSeek-V2 `load_weights` | Round 1 |
+| F7 | Added `is_target_verify()` handling to `afd_prepare_overlap` | Round 1 |
+| F8 | Removed redundant `m is None` check in `afd_overlap.py` | Round 1 |
+| G3 | RDMA final-shard padding + truncation | Round 1 |
+| H1-H3 | StepMesh key collisions / docstring / recv buffer registration | Round 1 |
+| F9 | GCD-based grouped StepMesh (`--afd-grouped-stepmesh`) | Round 2 |
+| F2-A | `torch.compile` per-stage compilation + AFD communication `compiler.disable()` | Round 2 |
+| F3 | `--afd-enable-overlap-schedule` CPU/GPU overlap scheduling | Round 2 |
+| Phase 6 | Heterogeneous TP (`ShardedParallelCommunicator` + StepMesh N:M) | Early |
+| Task 6 | Independent PD + AFD control | Early |
+| C1-C5, S1-S3, G3-G6, E1-E5 | Communication/scheduling/compute/engineering optimizations | Early |
+| T1-T2 | Universal AFD Toggle: removed microbatch dependency + TP>1 broadcast fix | Round 3 |
+| T4 | `_handle_afd` automatically disables CUDA graph + piecewise CUDA graph | Round 3 |
+| L1 | LLaMA/Llama3 AFD support (LayerCommunicator + Mixin + Model.forward + WeightFilter) | Round 4 |
+| L2 | Fixed FFN-side sub-backend crash in `AfdAttnBackend.init_forward_metadata` | Round 4 |
+| L3 | `_run_attn`/`_run_mlp` binding fix (affects all models using the Mixin) | Round 4 |
+| L4 | `r.seq_len` → `r.seqlen` typo fix in `scheduler_afd_mixin.py` | Round 4 |
 
 ---
 
-### 未完成任务总表
+### Complete Outstanding Task List
 
-| 优先级 | 编号 | 描述 | 影响 | 复杂度 | 前置依赖 |
+| Priority | ID | Description | Impact | Complexity | Prerequisites |
 |--------|------|------|------|--------|---------|
-| ~~P1~~ | ~~F3~~ | ~~`event_loop_afd` CPU/GPU overlap scheduling~~ | ~~5-10%~~ | ~~低（1 周）~~ | **已实现** |
-| P1 | L5 | FFN sync 标志在 batch=None 时未清除，可能导致 batch 不匹配 | 正确性 | 低（1 天） | 无 |
-| P1 | L6 | ZMQ drain last-one-wins，Attn 领先时 batch metadata 可能不匹配 | 正确性 | 低（1 天） | 无 |
-| P2 | F2-B | CUDA Graph（reduce-overhead 模式） | ~2-4% 额外提升 | 中（1-2 周） | F2-A ✓，需 microbatch padding + stream 同步 |
-| P2 | F5 | Qwen2（Dense）AFD 支持 | Qwen2 模型可用 | 低（2 天） | 与 LLaMA 相同方式 |
-| P3 | F4 | 自动 profiling + `afd_attn_ratio` 自适应 | 便利性 | 中（1 周） | 无 |
-| P3 | G6 | 异构路径 buffer 复用 | <1% | 低（2 天） | 无 |
-| P4 | T3 | 清理 `can_run_afd_overlap` dead code（`forward_batch_info.py` + `afd_overlap.py`） | 代码整洁 | 极低（30 分钟） | T1-T2 ✓ |
-| P4 | F9-opt-1 | 分组 StepMesh: custom sub-groups | 1-5%（仅 stride>1） | 中（3-5 天） | F9 ✓ |
-| P4 | F9-opt-2 | 分组 StepMesh: grouped buffer pool | <1% | 低（2 天） | F9 ✓ |
-| P4 | F9-opt-3 | 分组 StepMesh: 避免 padding tokens 经过 MLP | <1%（典型负载） | 低（3 天） | F9 ✓ |
-| ~~P4~~ | ~~R1~~ | ~~跳过 Proxy 侧 torch.compile~~ | | | **已修复** |
-| ~~P4~~ | ~~R2~~ | ~~prepare_attn 补充 compiler.disable~~ | | | **已修复** |
-| ~~P4~~ | ~~F9-2~~ | ~~per-group scheduler flag 冗余~~ | | | **已修复** |
-| ~~P4~~ | ~~F9-3~~ | ~~分组路径 force-set 注释~~ | | | **已修复** |
-| ~~P4~~ | ~~F3-R1~~ | ~~矛盾 flag 组合加 warn~~ | | | **已修复** |
+| ~~P1~~ | ~~F3~~ | ~~`event_loop_afd` CPU/GPU overlap scheduling~~ | ~~5-10%~~ | ~~Low (1 week)~~ | **Implemented** |
+| P1 | L5 | FFN sync flag not cleared when batch=None, potentially causing batch mismatch | Correctness | Low (1 day) | None |
+| P1 | L6 | ZMQ drain last-one-wins may mismatch batch metadata when Attn runs ahead | Correctness | Low (1 day) | None |
+| P2 | F2-B | CUDA Graph (reduce-overhead mode) | ~2-4% additional improvement | Medium (1-2 weeks) | F2-A ✓, requires microbatch padding + stream synchronization |
+| P2 | F5 | Qwen2 (Dense) AFD support | Enables Qwen2 models | Low (2 days) | Same approach as LLaMA |
+| P3 | F4 | Automatic profiling + adaptive `afd_attn_ratio` | Convenience | Medium (1 week) | None |
+| P3 | G6 | Heterogeneous-path buffer reuse | <1% | Low (2 days) | None |
+| P4 | T3 | Remove `can_run_afd_overlap` dead code (`forward_batch_info.py` + `afd_overlap.py`) | Code cleanliness | Very low (30 minutes) | T1-T2 ✓ |
+| P4 | F9-opt-1 | Grouped StepMesh: custom sub-groups | 1-5% (only stride>1) | Medium (3-5 days) | F9 ✓ |
+| P4 | F9-opt-2 | Grouped StepMesh: grouped buffer pool | <1% | Low (2 days) | F9 ✓ |
+| P4 | F9-opt-3 | Grouped StepMesh: avoid MLP execution on padding tokens | <1% (typical workloads) | Low (3 days) | F9 ✓ |
+| ~~P4~~ | ~~R1~~ | ~~Skip Proxy-side torch.compile~~ | | | **Fixed** |
+| ~~P4~~ | ~~R2~~ | ~~Add compiler.disable to prepare_attn~~ | | | **Fixed** |
+| ~~P4~~ | ~~F9-2~~ | ~~Redundant per-group scheduler flag~~ | | | **Fixed** |
+| ~~P4~~ | ~~F9-3~~ | ~~Force-set comment in grouped path~~ | | | **Fixed** |
+| ~~P4~~ | ~~F3-R1~~ | ~~Warn about conflicting flag combinations~~ | | | **Fixed** |
 
 ---
 
-### 影响分级
+### Impact Levels
 
 ```
-中等（2-4%）:       F2-B
-低（1-5%）:         F5, F4, F9-opt-1
-极低（<1%）:        G6, F9-opt-2, F9-opt-3
+Medium (2-4%):       F2-B
+Low (1-5%):          F5, F4, F9-opt-1
+Very low (<1%):     G6, F9-opt-2, F9-opt-3
 ```
 
-### F3 重新评估：TBO + AFD 共存分析
+### F3 Reassessment: TBO + AFD Coexistence Analysis
 
-经过代码分析，原 F3（"TBO + AFD 共存"）需要重新定义：
+Code analysis suggests that the original F3 ("TBO + AFD coexistence") needs to be redefined:
 
-| 方案 | 描述 | 收益 | 复杂度 | 结论 |
+| Approach | Description | Benefit | Complexity | Conclusion |
 |------|------|------|--------|------|
-| ~~全量共存~~ | TBO batch splitting + AFD microbatch pipeline 嵌套 | <5%（batch 碎片化：原 batch 切成 2×m=6 份，每份太小 overlap 失效） | 极高（6-8 周） | **不推荐** |
-| **CPU/GPU overlap** | `event_loop_afd` 引入 overlap scheduling（CPU 调度与 GPU 执行并行） | **5-10%** | **低（1 周）** | **推荐** |
+| ~~Full coexistence~~ | Nested TBO batch splitting + AFD microbatch pipeline | <5% (batch fragmentation: original batch split into 2×m=6 pieces, each too small for effective overlap) | Very high (6-8 weeks) | **Not recommended** |
+| **CPU/GPU overlap** | Introduce overlap scheduling in `event_loop_afd` (CPU scheduling parallel to GPU execution) | **5-10%** | **Low (1 week)** | **Recommended** |
 
-**原因**：TBO 的价值分两层——(1) batch splitting + stage overlap（与 AFD 冲突且收益低）；(2) CPU/GPU scheduling overlap（与 AFD 完全正交）。只取 (2) 即可获得大部分收益。
+**Reason**: TBO provides value at two levels—(1) batch splitting + stage overlap (conflicts with AFD and offers limited benefit); (2) CPU/GPU scheduling overlap (fully orthogonal to AFD). Taking only (2) captures most of the benefit.
 
-**具体改动**：仅修改 `scheduler.py` 的 `event_loop_afd`，让 CPU 在 GPU 执行当前 batch 时提前调度下一个 batch（recv_requests + get_next_batch + afd_send_to_ffn），不涉及 attention backend、forward path、batch preparer。
+**Specific changes**: modify only `event_loop_afd` in `scheduler.py`, allowing the CPU to schedule the next batch ahead of time while the GPU executes the current batch (recv_requests + get_next_batch + afd_send_to_ffn), without changing the attention backend, forward path, or batch preparer.
 
-### 建议执行路径
+### Recommended Execution Path
 
 ```
-阶段 1（已完成 ✓）:
-  F9    — 分组 StepMesh → 跨节点流量 12NH→3NH
-  F2-A  — torch.compile 逐 stage → kernel fusion ~5-8%
+Phase 1 (completed ✓):
+  F9    — Grouped StepMesh → cross-node traffic 12NH→3NH
+  F2-A  — torch.compile per stage → kernel fusion ~5-8%
   F3    — CPU/GPU overlap scheduling → 5-10%
-  L1-L4 — LLaMA 支持 + 跨模型 Mixin 修复 + 调度器拼写修复
+  L1-L4 — LLaMA support + cross-model Mixin fixes + scheduler typo fix
 
-阶段 1.5（优先修复）:
-  L5    — FFN sync 标志清除
-  L6    — ZMQ batch metadata 对齐
+Phase 1.5 (priority fixes):
+  L5    — Clear FFN sync flag
+  L6    — ZMQ batch metadata alignment
 
-阶段 2（下一优先级）:
-  F2-B  — reduce-overhead CUDA Graph → 额外 ~2-4%（1-2 周，含 R2 前置）
+Phase 2 (next priority):
+  F2-B  — reduce-overhead CUDA Graph → additional ~2-4% (1-2 weeks, including R2 prerequisite)
 
-阶段 3（扩展 & 便利性）:
-  F5    — Qwen2 Dense AFD（与 LLaMA 相同方式，~2 天）
-  F4    — 自动 profiling
+Phase 3 (extensions & convenience):
+  F5    — Qwen2 Dense AFD (same approach as LLaMA, ~2 days)
+  F4    — Automatic profiling
 
-阶段 4（锦上添花）:
-  G6, F9-opt-1/2/3, L7-L12 — 合计 <5%
+Phase 4 (nice-to-haves):
+  G6, F9-opt-1/2/3, L7-L12 — combined <5%
 ```
 
-### 当前 AFD 功能完整性
+### Current AFD Feature Completeness
 
-| 维度 | 状态 | 说明 |
+| Dimension | Status | Notes |
 |------|------|------|
-| 通信层 | **完整** | ZMQ（同构+异构）+ StepMesh（同构+异构+分组），任意 N:M |
-| 调度层 | **完整** | microbatch 切分、batch 对齐、PD 独立控制、CPU/GPU overlap scheduling（`--afd-enable-overlap-schedule`） |
-| 计算层 | **完整** | 流水线 overlap、非对称切分、预分配 output |
-| 编译优化 | **Phase A 完成** | `torch.compile` kernel fusion；Phase B（CUDA Graph）待实现 |
-| 模型支持 | **基本完整** | Qwen3-MoE/Qwen2-MoE/DeepSeek-V2/V3/Qwen3(Dense)/LLaMA(Dense)，缺 Qwen2(Dense) |
-| 工程化 | **完整** | Mixin 抽象、权重过滤、独立文件、超时处理 |
-| **最大未解锁收益** | **F2-B** | reduce-overhead CUDA Graph（~2-4%，1-2 周） |
+| Communication layer | **Complete** | ZMQ (homogeneous+heterogeneous) + StepMesh (homogeneous+heterogeneous+grouped), arbitrary N:M |
+| Scheduling layer | **Complete** | Microbatch splitting, batch alignment, independent PD control, CPU/GPU overlap scheduling (`--afd-enable-overlap-schedule`) |
+| Compute layer | **Complete** | Pipeline overlap, asymmetric splitting, preallocated output |
+| Compilation optimization | **Phase A complete** | `torch.compile` kernel fusion; Phase B (CUDA Graph) not yet implemented |
+| Model support | **Mostly complete** | Qwen3-MoE/Qwen2-MoE/DeepSeek-V2/V3/Qwen3(Dense)/LLaMA(Dense), missing Qwen2(Dense) |
+| Engineering | **Complete** | Mixin abstraction, weight filtering, separate files, timeout handling |
+| **Largest untapped benefit** | **F2-B** | reduce-overhead CUDA Graph (~2-4%, 1-2 weeks) |
 
 ---
 
-## 十一、Universal AFD Toggle：消除 microbatch 依赖
+## XI. Universal AFD Toggle: Removing the Microbatch Dependency
 
-### 背景
+### Background
 
-原实现中，AFD 流水线（`model_forward_afd`）是否激活受 `can_run_afd_overlap` 控制，该 flag 在 `AfdForwardBatchPreparer.prepare` 中设置，依赖两个条件：
+In the original implementation, activation of the AFD pipeline (`model_forward_afd`) was controlled by `can_run_afd_overlap`, set in `AfdForwardBatchPreparer.prepare` based on two conditions:
 
-1. `batch_size >= afd_micro_batch`（batch 太小则不切分）
-2. `afd_split_seq_index is not None`（scheduler 未提供切分索引）
+1. `batch_size >= afd_micro_batch` (no splitting if the batch is too small)
+2. `afd_split_seq_index is not None` (the scheduler did not provide split indices)
 
-这意味着 **batch_size=1** 或 **`--afd-micro-batch` 设置不当** 时，AFD 不会激活，model forward 走常规路径。对于 Attn-FFN 分离部署，这会导致 A 节点尝试本地执行 FFN（缺少权重，崩溃或结果错误），F 节点空闲。
+This means that with **batch_size=1** or **an inappropriate `--afd-micro-batch` setting**, AFD is not activated and model forward uses the normal path. In an Attn-FFN disaggregated deployment, the A node then attempts to execute FFN locally (missing weights, causing crashes or incorrect results), while the F node stays idle.
 
-### 改动目标
+### Change Objective
 
-**只要 `--afd-perspective` 被设置，就无条件走 `model_forward_afd` 路径**，不再受 `--afd-micro-batch` 和 batch size 限制。microbatch 切分仍可用（有 `afd_children` 时），但没有切分时（`afd_children=None`）以 `m_stage=1` 退化为无 pipeline 的单步 AFD forward。
+**Whenever `--afd-perspective` is set, unconditionally use the `model_forward_afd` path**, no longer constrained by `--afd-micro-batch` or batch size. Microbatch splitting remains available (when `afd_children` exists), but without splitting (`afd_children=None`), `m_stage=1` reduces execution to a single-step AFD forward without pipelining.
 
-### 改动文件与内容
+### Modified Files and Changes
 
-#### 1. Model Forward 层（3 个模型文件）
+#### 1. Model Forward Layer (3 Model Files)
 
-| 文件 | 改动 |
+| File | Changes |
 |------|------|
-| `python/sglang/srt/models/qwen3.py` | `Qwen3Model.forward`：条件从 `getattr(forward_batch, "can_run_afd_overlap", False)` 改为 `get_afd_perspective() is not None` |
-| `python/sglang/srt/models/qwen2_moe.py` | `Qwen2MoeModel.forward`：同上 |
-| `python/sglang/srt/models/deepseek_v2.py` | `DeepseekV2Model.forward`：同上 |
+| `python/sglang/srt/models/qwen3.py` | `Qwen3Model.forward`: changed condition from `getattr(forward_batch, "can_run_afd_overlap", False)` to `get_afd_perspective() is not None` |
+| `python/sglang/srt/models/qwen2_moe.py` | `Qwen2MoeModel.forward`: same as above |
+| `python/sglang/srt/models/deepseek_v2.py` | `DeepseekV2Model.forward`: same as above |
 
-**效果**：只要进程以 `--afd-perspective attn/ffn` 启动，model forward 就走 AFD 路径。`get_afd_perspective()` 是进程级全局状态，无运行时开销。
+**Effect**: whenever the process starts with `--afd-perspective attn/ffn`, model forward uses the AFD path. `get_afd_perspective()` is process-global state, with no runtime overhead.
 
-#### 2. AFD Pipeline 层（`afd.py`）
+#### 2. AFD Pipeline Layer (`afd.py`)
 
-| 函数 | 改动 |
+| Function | Changes |
 |------|------|
-| `model_forward_afd_split_inputs._split_raw` | 新增 `afd_children is None` fallback：返回单元素列表，包含完整 batch（不切分） |
-| `model_forward_afd` | `m_stage` 从硬编码 `afd_micro_batch` 改为 `len(afd_children)` or `1`；与 `_split_raw` 的返回数量始终一致 |
+| `model_forward_afd_split_inputs._split_raw` | Added `afd_children is None` fallback: returns a one-element list containing the full batch (no splitting) |
+| `model_forward_afd` | Changed `m_stage` from hard-coded `afd_micro_batch` to `len(afd_children)` or `1`; always matches the number of items returned by `_split_raw` |
 
-**效果**：无 microbatch 时 `m_stage=1`，pipeline 退化为单步 A→F→A→F...，仍经过 `AFDCommunicator` 完成跨节点通信。
+**Effect**: without microbatches, `m_stage=1` reduces the pipeline to single-step A→F→A→F..., still using `AFDCommunicator` for cross-node communication.
 
-#### 3. Scheduler 层（消息转发与合并）
+#### 3. Scheduler Layer (Message Forwarding and Merging)
 
-| 文件 | 改动 |
+| File | Changes |
 |------|------|
-| `scheduler.py` — `_recv_afd_messages` | 不再丢弃非 `AFDReqInput` 消息（如 `TokenizedGenerateReqInput`），收集到 `extra_reqs` 列表返回 |
-| `scheduler.py` — `event_loop_afd` | FFN 侧合并 `extra_reqs` 到 `recv_reqs`；TP > 1 时 re-broadcast（**所有 rank 参与**） |
-| `scheduler_afd_mixin.py` — `afd_recv_messages` | 同 `_recv_afd_messages` 修复 |
-| `disaggregation/prefill.py` | 合并 `extra_reqs` + TP > 1 re-broadcast |
-| `disaggregation/decode.py` | 合并 `extra_reqs` + TP > 1 re-broadcast |
+| `scheduler.py` — `_recv_afd_messages` | No longer drops non-`AFDReqInput` messages (e.g., `TokenizedGenerateReqInput`); collects them into an `extra_reqs` list and returns it |
+| `scheduler.py` — `event_loop_afd` | FFN side merges `extra_reqs` into `recv_reqs`; re-broadcast when TP > 1 (**all ranks participate**) |
+| `scheduler_afd_mixin.py` — `afd_recv_messages` | Same fix as `_recv_afd_messages` |
+| `disaggregation/prefill.py` | Merge `extra_reqs` + TP > 1 re-broadcast |
+| `disaggregation/decode.py` | Merge `extra_reqs` + TP > 1 re-broadcast |
 
-**效果**：Attn 通过 `afd_forward_work_requests` 将用户请求转发到 FFN；FFN 通过 `_recv_afd_messages` / `afd_recv_messages` 接收并合并到主请求流，确保 FFN 独立建立请求队列、执行 `run_batch`、输出日志。
+**Effect**: Attn forwards user requests to FFN through `afd_forward_work_requests`; FFN receives and merges them into its main request stream through `_recv_afd_messages` / `afd_recv_messages`, ensuring that FFN independently builds its request queue, executes `run_batch`, and emits logs.
 
-### Review 发现的问题
+### Issues Found During Review
 
-| 编号 | 严重度 | 位置 | 问题 | 状态 |
+| ID | Severity | Location | Issue | Status |
 |------|--------|------|------|------|
-| T1 | **严重** | `scheduler.py` `event_loop_afd` | `broadcast_pyobj` 在 `if extra_reqs:` 内部 → TP > 1 时只有 TP0 调用 broadcast，其他 rank 跳过 → **死锁** | **已修复** |
-| T2 | **严重** | `disaggregation/prefill.py` + `decode.py` | 合并 `extra_reqs` 后缺少 TP > 1 re-broadcast → 非 TP0 rank 看不到 AFD 转发的请求 | **已修复** |
-| T3 | **低** | `forward_batch_info.py` + `afd_overlap.py` | `can_run_afd_overlap` 字段仍被设置但不再被读取（dead code） | 不影响正确性，可后续清理 |
-| T4 | **中等** | `server_args.py` `_handle_afd` | AFD 未自动 disable CUDA graph / piecewise CUDA graph → FFN warmup 时 `AfdAttnBackend` 子 batch 缺少 attention 字段导致崩溃 | **已修复**（auto-disable） |
+| T1 | **Critical** | `scheduler.py` `event_loop_afd` | `broadcast_pyobj` inside `if extra_reqs:` → only TP0 calls broadcast when TP > 1, other ranks skip it → **deadlock** | **Fixed** |
+| T2 | **Critical** | `disaggregation/prefill.py` + `decode.py` | Missing TP > 1 re-broadcast after merging `extra_reqs` → non-TP0 ranks cannot see AFD-forwarded requests | **Fixed** |
+| T3 | **Low** | `forward_batch_info.py` + `afd_overlap.py` | `can_run_afd_overlap` still set but no longer read (dead code) | No correctness impact; can be cleaned up later |
+| T4 | **Medium** | `server_args.py` `_handle_afd` | AFD does not automatically disable CUDA graph / piecewise CUDA graph → FFN warmup crashes because `AfdAttnBackend` sub-batches lack attention fields | **Fixed** (auto-disable) |
 
-### 已验证正确的部分
+### Verified Correct Components
 
-| 检查项 | 状态 |
+| Check | Status |
 |--------|------|
-| `_split_raw` fallback：`afd_children=None` 时返回单元素列表，`afd_subbatch_index=0` | OK |
-| `model_forward_afd`：`m_stage=1` 时 `AFDStageScheduleGenerator` 生成正确的 A→F 序列 | OK |
-| 三个模型的 `get_afd_perspective()` import 位于 `forward` 方法内（lazy import，一致风格） | OK |
-| `_recv_afd_messages`：读取所有排队消息，`AFDReqInput` last-one-wins（正常情况只有一个排队） | OK |
-| `afd_recv_messages`（mixin 版本）与 `_recv_afd_messages` 逻辑一致 | OK |
-| `broadcast_pyobj` 在 `if extra_reqs:` **外部**，所有 TP rank 参与（修复后） | OK |
-| 非 AFD 场景：`get_afd_perspective()` 返回 `None`，model forward 走常规路径，不受影响 | OK |
-| 非 TP > 1 场景：不执行 broadcast，无额外开销 | OK |
+| `_split_raw` fallback: returns a one-element list when `afd_children=None`, `afd_subbatch_index=0` | OK |
+| `model_forward_afd`: `AFDStageScheduleGenerator` generates the correct A→F sequence when `m_stage=1` | OK |
+| `get_afd_perspective()` imports in all three models are inside `forward` (lazy imports, consistent style) | OK |
+| `_recv_afd_messages`: reads all queued messages; `AFDReqInput` last-one-wins (normally only one queued) | OK |
+| `afd_recv_messages` (mixin version) matches `_recv_afd_messages` logic | OK |
+| `broadcast_pyobj` **outside** `if extra_reqs:`, all TP ranks participate (after fix) | OK |
+| Non-AFD scenarios: `get_afd_perspective()` returns `None`, model forward uses the normal path, unaffected | OK |
+| Without TP > 1: no broadcast, no additional overhead | OK |
 
-### 数据流（修复后）
+### Data Flow (After Fix)
 
 ```
 ┌──────── Attn Node ────────┐        ┌──────── FFN Node ────────┐
@@ -1048,13 +1048,13 @@ F→A = NH × (TP_A / gcd)
 │  recv_requests()           │        │  recv_requests()         │
 │       │                    │        │       │                  │
 │  afd_forward_work_requests │──ZMQ──▶│  _recv_afd_messages()   │
-│  (转发 TokenizedReq 到 FFN)│        │  (收集 extra_reqs)       │
+│  (forward TokenizedReq to FFN)│     │  (collect extra_reqs)     │
 │       │                    │        │       │                  │
 │  process_input_requests    │        │  merge extra→recv_reqs  │
 │       │                    │        │  broadcast (TP > 1)      │
 │  get_next_batch            │        │       │                  │
 │       │                    │        │  process_input_requests  │
-│  afd_send_batch_info ──ZMQ─┼───────▶│  (FFN 建立请求队列)      │
+│  afd_send_batch_info ──ZMQ─┼───────▶│  (FFN builds request queue)│
 │  (AFDReqInput)             │        │       │                  │
 │       │                    │        │  get_next_batch          │
 │  run_batch                 │        │       │                  │
@@ -1064,259 +1064,259 @@ F→A = NH × (TP_A / gcd)
 │  └─ done                   │        │  └─ done                │
 │       │                    │        │       │                  │
 │  process_batch_result      │        │  process_batch_result   │
-│  (返回 HTTP 响应)           │        │  (输出 batch 日志)       │
+│  (return HTTP response)    │        │  (emit batch logs)        │
 └────────────────────────────┘        └──────────────────────────┘
 ```
 
 ---
 
-## 十二、第四轮 Review：LLaMA AFD 集成 + 跨模型修复
+## XII. Round 4 Review: LLaMA AFD Integration + Cross-Model Fixes
 
-### 背景
+### Background
 
-使用 `llama3.1-8B --tp 2 --afd-perspective attn/ffn` 测试时发现：
-1. FFN 端 `init_forward_metadata` 崩溃（`req_pool_indices` 为 `None`）
-2. 关掉 FFN 后 Attn 仍可正常推理 → AFD pipeline 未实际激活
-3. `_run_attn` / `_run_mlp` 未绑定到 DecoderLayer 实例 → 所有模型 AFD forward 路径潜在崩溃
+Testing with `llama3.1-8B --tp 2 --afd-perspective attn/ffn` revealed:
+1. FFN-side `init_forward_metadata` crashes (`req_pool_indices` is `None`)
+2. Attn continues normal inference after FFN is stopped → AFD pipeline not actually activated
+3. `_run_attn` / `_run_mlp` not bound to DecoderLayer instances → potential crashes in every model's AFD forward path
 
-### 发现的问题
+### Issues Found
 
-| 编号 | 严重度 | 文件 | 问题 | 状态 |
+| ID | Severity | File | Issue | Status |
 |------|--------|------|------|------|
-| L1 | **严重** | `llama.py` | LLaMA 模型无 AFD 支持——无 `model_forward_afd` 分支、无 `forward_afd_A/F`、无 `LayerCommunicator`、无 `AFDWeightFilter` | **已修复** |
-| L2 | **严重** | `tbo_backend.py` | FFN 侧 `AfdAttnBackend.init_forward_metadata` 对 `afd_children` 调用 flashinfer `call_begin_forward`，子 batch 的 `req_pool_indices=None` 导致 `TypeError` | **已修复** |
-| L3 | **严重** | `afd_mixin.py` | `_afd_init` 仅在 `--enable-torch-compile` 时绑定 `_run_attn`/`_run_mlp` 到实例；无 compile 时 `forward_afd_A/F` 调用 `self._run_attn()` 触发 `AttributeError`——**影响所有使用 Mixin 的模型** | **已修复** |
-| L4 | **严重** | `scheduler_afd_mixin.py` | `afd_send_batch_info` 中 `r.seq_len` 应为 `r.seqlen`（`Req` 类属性名）——disagg prefill/decode 路径调用会 `AttributeError` | **已修复** |
-| L5 | **中等** | `scheduler.py` ~1444 | FFN 侧 `_afd_batchsize_attn` 仅在 `batch is not None` 时清除；若 FFN 消费了 `AFDReqInput` 但 `get_next_batch` 返回 `None`，sync 标志残留导致下一次迭代跳过等待 | 待修复 |
-| L6 | **中等** | `scheduler.py` ~1327 | ZMQ drain 循环 last-one-wins：若 Attn 领先 FFN 多个 step，`AFDReqInput` 可能指向更新的 batch，与 FFN 实际运行的 batch 不匹配 | 待修复 |
-| L7 | **中等** | `afd_overlap.py` ~343 | `_filter_batch` 硬编码字段列表：未来新增 `ForwardBatch` 字段（如 `encoder_*`、`mamba_track_*`、`nsa_cp_metadata`）时，非 `None` 字段会触发 `Exception: N errors: Field ... not yet supported` | 需关注 |
-| L8 | **低** | `llama.py` AFD branch | `LlamaModel.forward` AFD 分支返回纯 `hidden_states`（无 `aux_hidden_states`），若 `capture_aux_hidden_states=True`（EAGLE3），`LlamaForCausalLM.forward` 解包会失败 | 不影响当前使用（AFD + EAGLE3 不共存） |
-| L9 | **低** | `afd_mixin.py` ~130 | `forward_afd_F` 对 0-token 子 batch 仍调用 `_run_mlp`（`forward_afd_A` 有 `shape[0] != 0` 保护，F 没有） | 边界条件，实际不触发 |
-| L10 | **低** | `scheduler_afd_mixin.py` ~58-60 | `_afd_forward_mode` 存储但从未读取，`afd_reset_state` 也未清除 | dead code |
-| L11 | **低** | `afd.py` ~807 | `get_afd_mirco_batch`（拼写错误别名）仍保留 | 代码整洁 |
-| L12 | **低** | 跨模型 | DeepSeek-V2/Qwen3/Qwen2-MoE 的 `forward_afd_A/F` 走 Mixin 默认 `_run_attn`/`_run_mlp`，不传模型特有参数（如 `quant_format`、`zero_allocator`、`use_reduce_scatter`） | AFD 路径与非 AFD 有微小行为差异 |
+| L1 | **Critical** | `llama.py` | LLaMA has no AFD support—no `model_forward_afd` branch, `forward_afd_A/F`, `LayerCommunicator`, or `AFDWeightFilter` | **Fixed** |
+| L2 | **Critical** | `tbo_backend.py` | FFN-side `AfdAttnBackend.init_forward_metadata` calls flashinfer `call_begin_forward` on `afd_children`; sub-batch `req_pool_indices=None` causes `TypeError` | **Fixed** |
+| L3 | **Critical** | `afd_mixin.py` | `_afd_init` binds `_run_attn`/`_run_mlp` to the instance only with `--enable-torch-compile`; without compile, `forward_afd_A/F` calls `self._run_attn()`, triggering `AttributeError`—**affects all models using the Mixin** | **Fixed** |
+| L4 | **Critical** | `scheduler_afd_mixin.py` | `r.seq_len` in `afd_send_batch_info` should be `r.seqlen` (`Req` attribute name)—disagg prefill/decode calls raise `AttributeError` | **Fixed** |
+| L5 | **Medium** | `scheduler.py` ~1444 | FFN-side `_afd_batchsize_attn` cleared only when `batch is not None`; if FFN consumes `AFDReqInput` but `get_next_batch` returns `None`, the stale sync flag skips waiting in the next iteration | To be fixed |
+| L6 | **Medium** | `scheduler.py` ~1327 | ZMQ drain loop uses last-one-wins: if Attn runs several steps ahead of FFN, `AFDReqInput` may refer to a newer batch, mismatching the batch actually run by FFN | To be fixed |
+| L7 | **Medium** | `afd_overlap.py` ~343 | `_filter_batch` hard-codes its field list: future non-`None` `ForwardBatch` fields (e.g., `encoder_*`, `mamba_track_*`, `nsa_cp_metadata`) trigger `Exception: N errors: Field ... not yet supported` | Needs attention |
+| L8 | **Low** | `llama.py` AFD branch | `LlamaModel.forward` AFD branch returns only `hidden_states` (no `aux_hidden_states`); with `capture_aux_hidden_states=True` (EAGLE3), unpacking in `LlamaForCausalLM.forward` fails | No impact on current usage (AFD + EAGLE3 do not coexist) |
+| L9 | **Low** | `afd_mixin.py` ~130 | `forward_afd_F` still calls `_run_mlp` for 0-token sub-batches (`forward_afd_A` has a `shape[0] != 0` guard, F does not) | Edge case, not triggered in practice |
+| L10 | **Low** | `scheduler_afd_mixin.py` ~58-60 | `_afd_forward_mode` stored but never read, and not cleared by `afd_reset_state` | dead code |
+| L11 | **Low** | `afd.py` ~807 | `get_afd_mirco_batch` (misspelled alias) still retained | Code cleanliness |
+| L12 | **Low** | Cross-model | DeepSeek-V2/Qwen3/Qwen2-MoE `forward_afd_A/F` use default Mixin `_run_attn`/`_run_mlp` without model-specific arguments (e.g., `quant_format`, `zero_allocator`, `use_reduce_scatter`) | Minor behavioral differences between AFD and non-AFD paths |
 
-### 已修复内容
+### Implemented Fixes
 
-#### L1: LLaMA AFD 支持（`llama.py`）
+#### L1: LLaMA AFD Support (`llama.py`)
 
-**改动**：
-- `LlamaDecoderLayer.__init__`：当 `get_afd_perspective() is not None` 时，创建 `LayerScatterModes`（`is_layer_sparse=False`）、`LayerCommunicator`，调用 `_afd_init()`
-- `LlamaDecoderLayer`：新增 `forward_afd_A` / `forward_afd_F` 委托到 Mixin
-- `LlamaModel.forward`：添加 `model_forward_afd` 分支
-- `LlamaForCausalLM.load_weights`：添加 `AFDWeightFilter` 权重过滤
+**Changes**:
+- `LlamaDecoderLayer.__init__`: when `get_afd_perspective() is not None`, create `LayerScatterModes` (`is_layer_sparse=False`), `LayerCommunicator`, and call `_afd_init()`
+- `LlamaDecoderLayer`: add `forward_afd_A` / `forward_afd_F` delegating to the Mixin
+- `LlamaModel.forward`: add `model_forward_afd` branch
+- `LlamaForCausalLM.load_weights`: add `AFDWeightFilter` weight filtering
 
-#### L2: FFN 侧 `init_forward_metadata` 崩溃（`tbo_backend.py`）
+#### L2: FFN-Side `init_forward_metadata` Crash (`tbo_backend.py`)
 
-**根因**：`AfdForwardBatchPreparer._filter_batch` 将 FFN 子 batch 的 `req_pool_indices` 设为 `None`，但 `AfdAttnBackend.init_forward_metadata` 仍对子 backend 调用 `init_forward_metadata`，flashinfer 尝试 `len(req_pool_indices)` 崩溃。
+**Root cause**: `AfdForwardBatchPreparer._filter_batch` sets FFN sub-batch `req_pool_indices` to `None`, but `AfdAttnBackend.init_forward_metadata` still calls sub-backend `init_forward_metadata`; flashinfer attempts `len(req_pool_indices)` and crashes.
 
-**修复**：在 `init_forward_metadata` 中检测 FFN 侧时跳过子 backend 初始化（FFN 使用 `AFDProxyAttention`，子 attention metadata 永远不使用）。
+**Fix**: skip sub-backend initialization in `init_forward_metadata` when on the FFN side (FFN uses `AFDProxyAttention`; sub-attention metadata is never used).
 
-#### L3: `_run_attn`/`_run_mlp` 未绑定（`afd_mixin.py`）
+#### L3: Unbound `_run_attn`/`_run_mlp` (`afd_mixin.py`)
 
-**根因**：所有模型（DeepSeek-V2、Qwen3、Qwen2-MoE、LLaMA）均未继承 `AFDDecoderLayerMixin`，而是通过 `AFDDecoderLayerMixin.forward_afd_A(self, ...)` 调用。内部 `self._run_attn(...)` 查找时，`self` 是 DecoderLayer 实例，MRO 中无 Mixin → `AttributeError`。仅 `--enable-torch-compile` 时 `_afd_init` 会通过 `torch.compile` 赋值到实例。
+**Root cause**: none of the models (DeepSeek-V2, Qwen3, Qwen2-MoE, LLaMA) inherit `AFDDecoderLayerMixin`; instead they call `AFDDecoderLayerMixin.forward_afd_A(self, ...)`. During internal lookup of `self._run_attn(...)`, `self` is a DecoderLayer instance whose MRO contains no Mixin → `AttributeError`. Only with `--enable-torch-compile` does `_afd_init` assign it to the instance through `torch.compile`.
 
-**修复**：在 `_afd_init` 中无条件绑定默认 `_run_attn`/`_run_mlp`（`types.MethodType`），在 `torch.compile` 前。`hasattr` 检查允许模型类覆盖。
+**Fix**: unconditionally bind default `_run_attn`/`_run_mlp` (`types.MethodType`) in `_afd_init`, before `torch.compile`. A `hasattr` check allows model classes to override them.
 
-#### L4: `r.seq_len` 拼写错误（`scheduler_afd_mixin.py`）
+#### L4: `r.seq_len` Typo (`scheduler_afd_mixin.py`)
 
-**根因**：`Req` 类使用 `@property seqlen`（无下划线），Mixin 中写成 `r.seq_len`。
+**Root cause**: `Req` uses `@property seqlen` (no underscore), but the Mixin uses `r.seq_len`.
 
-**修复**：改为 `r.seqlen`。
+**Fix**: change to `r.seqlen`.
 
-### 已验证正确的部分
+### Verified Correct Components
 
-| 检查项 | 状态 |
+| Check | Status |
 |--------|------|
-| LLaMA `LayerScatterModes.init_new` 参数（dense 模型全 False） | OK |
-| LLaMA `LayerCommunicator` 传入 `input_layernorm` + `post_attention_layernorm` | OK |
-| LLaMA `AFDWeightFilter` 与 stacked_params_mapping 兼容（过滤在迭代器层面，不影响 name.replace） | OK |
-| LLaMA `LlamaMLP.forward(x, forward_batch=None)` 与 Mixin `_run_mlp(hidden_states, forward_batch)` 签名兼容 | OK |
-| `types.MethodType` 绑定后 `torch.compile(self._run_attn)` 正确获取绑定方法 | OK |
-| `tbo_backend.py` FFN skip 仅在 `afd_children is not None` 时生效，非 AFD 场景不受影响 | OK |
-| `scheduler_afd_mixin.py` 修复后 `r.seqlen` 与 `scheduler.py` ~1429 一致 | OK |
+| LLaMA `LayerScatterModes.init_new` arguments (all False for dense models) | OK |
+| LLaMA `LayerCommunicator` receives `input_layernorm` + `post_attention_layernorm` | OK |
+| LLaMA `AFDWeightFilter` compatible with stacked_params_mapping (iterator-level filtering, no effect on name.replace) | OK |
+| LLaMA `LlamaMLP.forward(x, forward_batch=None)` signature compatible with Mixin `_run_mlp(hidden_states, forward_batch)` | OK |
+| After `types.MethodType` binding, `torch.compile(self._run_attn)` correctly receives the bound method | OK |
+| FFN skip in `tbo_backend.py` applies only when `afd_children is not None`; non-AFD scenarios unaffected | OK |
+| After fix, `r.seqlen` in `scheduler_afd_mixin.py` matches `scheduler.py` ~1429 | OK |
 
-### 后续任务更新
+### Follow-up Task Updates
 
-| 优先级 | 编号 | 描述 | 状态 |
+| Priority | ID | Description | Status |
 |--------|------|------|------|
-| ~~P0~~ | ~~L1~~ | ~~LLaMA AFD 支持~~ | **已修复** |
-| ~~P0~~ | ~~L2~~ | ~~FFN init_forward_metadata 崩溃~~ | **已修复** |
-| ~~P0~~ | ~~L3~~ | ~~`_run_attn`/`_run_mlp` 未绑定（跨模型）~~ | **已修复** |
-| ~~P0~~ | ~~L4~~ | ~~`r.seq_len` 拼写错误~~ | **已修复** |
-| P1 | L5 | FFN sync 标志未在 batch=None 时清除 | 待修复 |
-| P1 | L6 | ZMQ drain last-one-wins 潜在 batch 不匹配 | 待修复 |
-| P2 | F5 | Qwen2 Dense AFD——与 LLaMA 相同方式适配 | 可快速实现 |
-| P3 | L7 | `_filter_batch` 字段白名单扩展 | 需关注 |
-| P3 | L12 | 模型特有参数在 AFD 路径中缺失 | 低优先级 |
-| P4 | L8-L11 | 边界条件 / dead code / 拼写别名 | 锦上添花 |
+| ~~P0~~ | ~~L1~~ | ~~LLaMA AFD support~~ | **Fixed** |
+| ~~P0~~ | ~~L2~~ | ~~FFN init_forward_metadata crash~~ | **Fixed** |
+| ~~P0~~ | ~~L3~~ | ~~Unbound `_run_attn`/`_run_mlp` (cross-model)~~ | **Fixed** |
+| ~~P0~~ | ~~L4~~ | ~~`r.seq_len` typo~~ | **Fixed** |
+| P1 | L5 | FFN sync flag not cleared when batch=None | To be fixed |
+| P1 | L6 | Potential ZMQ drain last-one-wins batch mismatch | To be fixed |
+| P2 | F5 | Qwen2 Dense AFD—same adaptation approach as LLaMA | Can be implemented quickly |
+| P3 | L7 | Extend `_filter_batch` field whitelist | Needs attention |
+| P3 | L12 | Missing model-specific arguments in AFD path | Low priority |
+| P4 | L8-L11 | Edge cases / dead code / misspelled alias | Nice-to-haves |
 
 ---
 
-## 十三、第五轮：ZMQ 异构 TP + 运行时 Bug 修复
+## XIII. Round 5: ZMQ Heterogeneous TP + Runtime Bug Fixes
 
-### 背景
+### Background
 
-第四轮测试 LLaMA 3.1-8B + TP=2 时暴露了一系列运行时问题，以及 ZMQ 路径不支持异构 TP 的设计缺陷。
+Round 4 testing of LLaMA 3.1-8B + TP=2 exposed a series of runtime issues and the design limitation that the ZMQ path did not support heterogeneous TP.
 
-### 发现并修复的问题
+### Issues Found and Fixed
 
-| 编号 | 严重度 | 文件 | 问题 | 状态 |
+| ID | Severity | File | Issue | Status |
 |------|--------|------|------|------|
-| R5-1 | **严重** | `afd.py` ZMQ send | `cpu_tensor.numpy().tobytes()` 不支持 bfloat16（numpy 无 bf16） | **已修复**：改用 `bytes(cpu_tensor.untyped_storage())` |
-| R5-2 | **严重** | `scheduler.py` `_recv_afd_messages` | `AFDReqInput` 在 TP rank 0 提取后不放入 broadcast → TP rank 1 的 `_afd_batchsize_attn` 永远为 None → **FFN TP>1 死锁** | **已修复**：AFDReqInput 包含在 broadcast 数据中，`_afd_process_input_requests` 过滤后再传给 dispatcher |
-| R5-3 | **严重** | `afd.py` ShardedParallelCommunicator | ZMQ 1:1 端口映射 → 异构 TP（如 1A:2F）FFN rank 1 无对端 → 死锁 | **已修复**：重写为 `BroadcastTensorCommunicator`（rank 0 ZMQ + NVLink broadcast） |
-| R5-4 | **中等** | `communicator.py` `_gather_hidden_states_and_residual` | 0-token batch 时 `RMSNorm(x, res)` 在 `x.numel()==0` 返回单 tensor → unpack 失败 | **已修复**：入口添加 `if hidden_states.shape[0] == 0: return` |
-| R5-5 | **中等** | `llama.py` AFD norm | FFN 侧 `residual=None` 时 `RMSNorm(hs, None)` 返回单 tensor → unpack 失败 | **已修复**：检查 `residual is not None` 分支调用 |
-| R5-6 | **中等** | `afd.py` `model_forward_afd` | 0-token batch 进入 AFD pipeline 触发各种 CUDA kernel 错误 | **已修复**：入口添加 `if hidden_states.shape[0] == 0: return` 短路 |
-| R5-7 | **中等** | `afd.py` ZMQ recv | 接收 0-byte 数据时 `torch.frombuffer(bytearray(0))` 崩溃 | **已修复**：空 buffer 时用 `torch.empty(shape, dtype)` |
-| R5-8 | **中等** | `server_args.py` `_handle_afd` | FFN warmup 死锁（event_loop_afd 等 Attn sync，永远等不到） | **已修复**：FFN 自动 `skip_server_warmup` |
+| R5-1 | **Critical** | `afd.py` ZMQ send | `cpu_tensor.numpy().tobytes()` does not support bfloat16 (numpy has no bf16) | **Fixed**: use `bytes(cpu_tensor.untyped_storage())` |
+| R5-2 | **Critical** | `scheduler.py` `_recv_afd_messages` | `AFDReqInput` extracted on TP rank 0 but excluded from broadcast → TP rank 1 `_afd_batchsize_attn` remains None forever → **FFN TP>1 deadlock** | **Fixed**: include AFDReqInput in broadcast data; `_afd_process_input_requests` filters it before passing to the dispatcher |
+| R5-3 | **Critical** | `afd.py` ShardedParallelCommunicator | ZMQ 1:1 port mapping → with heterogeneous TP (e.g., 1A:2F), FFN rank 1 has no peer → deadlock | **Fixed**: rewritten as `BroadcastTensorCommunicator` (rank 0 ZMQ + NVLink broadcast) |
+| R5-4 | **Medium** | `communicator.py` `_gather_hidden_states_and_residual` | For 0-token batches, `RMSNorm(x, res)` returns a single tensor when `x.numel()==0` → unpacking fails | **Fixed**: add `if hidden_states.shape[0] == 0: return` at entry |
+| R5-5 | **Medium** | `llama.py` AFD norm | FFN-side `RMSNorm(hs, None)` returns a single tensor when `residual=None` → unpacking fails | **Fixed**: branch based on `residual is not None` |
+| R5-6 | **Medium** | `afd.py` `model_forward_afd` | 0-token batches entering the AFD pipeline trigger various CUDA kernel errors | **Fixed**: short-circuit with `if hidden_states.shape[0] == 0: return` at entry |
+| R5-7 | **Medium** | `afd.py` ZMQ recv | `torch.frombuffer(bytearray(0))` crashes when receiving 0-byte data | **Fixed**: use `torch.empty(shape, dtype)` for empty buffers |
+| R5-8 | **Medium** | `server_args.py` `_handle_afd` | FFN warmup deadlocks (event_loop_afd waits for Attn sync that never arrives) | **Fixed**: FFN automatically sets `skip_server_warmup` |
 
-### BroadcastTensorCommunicator 设计（R5-3）
+### BroadcastTensorCommunicator Design (R5-3)
 
-替换旧 `ShardedParallelCommunicator`，用 rank 0 单连接 + NVLink broadcast 实现任意 N:M：
+Replaces the old `ShardedParallelCommunicator`, supporting arbitrary N:M through a single rank 0 connection + NVLink broadcast:
 
-**原理**：AFD 跨节点通信的 tensor 是 all-reduce 后的完整 hidden_states，所有 TP rank 持有相同数据。因此只需 1 个 rank 发送/接收，其余通过 NVLink broadcast 获取。
+**Principle**: the tensor used for cross-node AFD communication is the full hidden_states after all-reduce; all TP ranks hold identical data. Only one rank needs to send/receive, with the others obtaining it through NVLink broadcast.
 
-**数据流**：
-1. 发送侧：`local_tp_rank == 0` 通过 ZMQ 发送完整 tensor，其他 rank 跳过
-2. 接收侧：rank 0 ZMQ 接收 → broadcast shape+dtype（3 个 long）→ 非 rank-0 分配内存 → broadcast 数据 tensor
+**Data flow**:
+1. Sending side: `local_tp_rank == 0` sends the full tensor through ZMQ; other ranks skip
+2. Receiving side: rank 0 ZMQ receive → broadcast shape+dtype (3 longs) → non-rank-0 memory allocation → broadcast data tensor
 
-**流量对比**：
+**Traffic comparison**:
 
-| 配置 | 旧实现（per-rank ZMQ） | 新实现（rank 0 + broadcast） |
+| Configuration | Old Implementation (Per-Rank ZMQ) | New Implementation (Rank 0 + Broadcast) |
 |------|----------------------|---------------------------|
-| 4A:4F 同构 | 8NH（4 条连接各传 NH，冗余） | **2NH** |
-| 4A:8F 异构 | 死锁 | **2NH** |
-| 1A:2F 异构 | 死锁 | **2NH** |
+| 4A:4F homogeneous | 8NH (4 connections each transfer NH, redundant) | **2NH** |
+| 4A:8F heterogeneous | Deadlock | **2NH** |
+| 1A:2F heterogeneous | Deadlock | **2NH** |
 
-**限制**：单 ZMQ 连接，不利用多网卡并行。多网卡高性能场景应用 StepMesh（RDMA）。
+**Limitation**: a single ZMQ connection does not exploit multi-NIC parallelism. High-performance multi-NIC scenarios should use StepMesh (RDMA).
 
-#### Review 结果
+#### Review Results
 
-| 检查项 | 状态 |
+| Check | Status |
 |--------|------|
-| `send_tensor` rank 0 发送，其他 rank 跳过 | OK |
-| `recv_tensor` 两次 broadcast（metadata + data） | OK |
-| `tp_group.ranks[0]` 作为 broadcast src | OK |
-| 0-element tensor broadcast 安全（NCCL no-op） | OK |
-| `get_tensor_communicator` 同构/异构统一路径 | OK |
-| TP=1 跳过包装 | OK |
-| `_dtype_to_int` 覆盖 fp16/bf16/fp32 | OK |
-| StepMesh 路径不受影响 | OK |
+| `send_tensor` sends on rank 0; other ranks skip | OK |
+| `recv_tensor` performs two broadcasts (metadata + data) | OK |
+| `tp_group.ranks[0]` used as broadcast src | OK |
+| 0-element tensor broadcast is safe (NCCL no-op) | OK |
+| Unified homogeneous/heterogeneous path in `get_tensor_communicator` | OK |
+| TP=1 skips wrapping | OK |
+| `_dtype_to_int` covers fp16/bf16/fp32 | OK |
+| StepMesh path unaffected | OK |
 
-### 已完成任务追加
+### Additional Completed Tasks
 
-| 编号 | 描述 | 轮次 |
+| ID | Description | Round |
 |------|------|------|
-| R5-1 | ZMQ bf16 序列化修复 | 第五轮 |
-| R5-2 | FFN TP>1 AFDReqInput broadcast 修复 | 第五轮 |
-| R5-3 | `BroadcastTensorCommunicator`（ZMQ 异构 TP） | 第五轮 |
-| R5-4 | communicator 0-token 保护 | 第五轮 |
-| R5-5 | LLaMA norm residual=None 处理 | 第五轮 |
-| R5-6 | `model_forward_afd` 0-token 短路 | 第五轮 |
-| R5-7 | ZMQ recv 0-byte buffer 处理 | 第五轮 |
-| R5-8 | FFN 自动 skip_server_warmup | 第五轮 |
+| R5-1 | ZMQ bf16 serialization fix | Round 5 |
+| R5-2 | FFN TP>1 AFDReqInput broadcast fix | Round 5 |
+| R5-3 | `BroadcastTensorCommunicator` (ZMQ heterogeneous TP) | Round 5 |
+| R5-4 | Communicator 0-token guard | Round 5 |
+| R5-5 | LLaMA norm residual=None handling | Round 5 |
+| R5-6 | `model_forward_afd` 0-token short-circuit | Round 5 |
+| R5-7 | ZMQ recv 0-byte buffer handling | Round 5 |
+| R5-8 | FFN automatically sets skip_server_warmup | Round 5 |
 
-### 未完成任务更新
+### Outstanding Task Updates
 
-| 优先级 | 编号 | 描述 | 状态 |
+| Priority | ID | Description | Status |
 |--------|------|------|------|
-| P1 | L5 | FFN sync 标志在 batch=None 时未清除 | 待修复 |
-| P1 | L6 | ZMQ drain last-one-wins 潜在 batch 不匹配 | 待修复 |
-| P2 | F5 | Qwen2 Dense AFD | 可快速实现 |
-| P3 | R5-9 | 非 rank-0 避免创建无用 ZMQ socket | 待优化 |
-| P4 | R5-10 | `_dtype_to_int` 未知 dtype 报错而非静默 fallback | 锦上添花 |
+| P1 | L5 | FFN sync flag not cleared when batch=None | To be fixed |
+| P1 | L6 | Potential ZMQ drain last-one-wins batch mismatch | To be fixed |
+| P2 | F5 | Qwen2 Dense AFD | Can be implemented quickly |
+| P3 | R5-9 | Avoid creating unused ZMQ sockets on non-rank-0 processes | To be optimized |
+| P4 | R5-10 | `_dtype_to_int` errors on unknown dtype rather than silently falling back | Nice-to-have |
 
 ---
 
-## 第六轮：UCX RDMA 通信器替换 StepMesh
+## Round 6: UCX RDMA Communicator Replaces StepMesh
 
-### 背景
+### Background
 
-StepMesh（`fserver_lib`）的 CUDA 运行时与 SGLang 框架依赖的库冲突，无法正常部署。用 UCX-Py（RDMA 原生 Python 绑定）重新实现 Attn-FFN 跨节点张量通信全部功能。
+The CUDA runtime in StepMesh (`fserver_lib`) conflicts with libraries required by the SGLang framework, preventing normal deployment. UCX-Py (native Python RDMA bindings) reimplements all cross-node Attn-FFN tensor communication functionality.
 
-### 新增/修改文件
+### New/Modified Files
 
-| 文件路径 | 行数 | 变更 |
+| File Path | Lines | Changes |
 |----------|------|------|
-| `python/sglang/srt/layers/rdma_comm.py` | 658 | 新增：UCX-Py RDMA 通信器 |
-| `python/sglang/srt/layers/afd.py` | +12 | `get_tensor_communicator()` 新增 UCX 路径 |
-| `python/sglang/srt/server_args.py` | +12 | `afd_comm_backend` 字段 + `--afd-comm-backend` CLI |
+| `python/sglang/srt/layers/rdma_comm.py` | 658 | New: UCX-Py RDMA communicator |
+| `python/sglang/srt/layers/afd.py` | +12 | Added UCX path to `get_tensor_communicator()` |
+| `python/sglang/srt/server_args.py` | +12 | `afd_comm_backend` field + `--afd-comm-backend` CLI |
 
-### 架构设计
+### Architectural Design
 
 ```
-rdma_comm.py 分层架构：
+rdma_comm.py layered architecture:
 
-_AsyncBridge              SelectorEventLoop 后台线程（避免 uvloop 冲突）
-_BufferPool               GPU tensor 复用池（自动回收上次 recv buffer）
-_detect_num_nic_groups()  解析 nvidia-smi topo 自动检测 GPU-NIC 亲和性
-_UcxP2PCommunicator       1:1 RDMA 点对点（UCX endpoint send/recv）
-UcxTensorCommunicator     NIC 感知 N:M 通信（K 路 RDMA + NVLink 分发）
+_AsyncBridge              SelectorEventLoop background thread (avoids uvloop conflicts)
+_BufferPool               GPU tensor reuse pool (automatically recycles the previous recv buffer)
+_detect_num_nic_groups()  Parses nvidia-smi topo to detect GPU-NIC affinity automatically
+_UcxP2PCommunicator       1:1 RDMA point-to-point (UCX endpoint send/recv)
+UcxTensorCommunicator     NIC-aware N:M communication (K-way RDMA + NVLink distribution)
 ```
 
-NIC 感知 N:M 通信模型：
-- K = 网卡数（自动检测或 AFD_UCX_NUM_NICS 覆盖），必须整除 local_tp
-- K 个 NIC 组各选一个代表做 RDMA（各传 1/K 数据）
-- 非代表 rank 通过 NVLink broadcast (K=1) 或 all_gather+stride去重 (K>1) 获取完整数据
-- 跨节点 RDMA 总流量恒为 2NH/层，与 K 和 TP 大小无关
+NIC-aware N:M communication model:
+- K = NIC count (automatically detected or overridden by AFD_UCX_NUM_NICS), must divide local_tp
+- Each of K NIC groups selects one representative for RDMA (each transfers 1/K of the data)
+- Non-representative ranks obtain full data through NVLink broadcast (K=1) or all_gather+stride deduplication (K>1)
+- Total cross-node RDMA traffic remains 2NH/layer, independent of K and TP size
 
-K=1：rank 0 RDMA → NVLink broadcast
-K>1：K 代表各 RDMA 1/K → rank0 broadcast shape → 非代表填零 → all_gather → stride 去重 → truncate
+K=1: rank 0 RDMA → NVLink broadcast
+K>1: K representatives each RDMA 1/K → rank0 broadcasts shape → non-representatives fill with zeros → all_gather → stride deduplication → truncate
 
-### 环境变量
+### Environment Variables
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 |------|--------|------|
-| `AFD_UCX_TLS` | `rc,tcp,cuda_copy,cuda_ipc` | UCX 传输列表 |
-| `AFD_UCX_BASE_PORT` | `25000` | FFN 监听基础端口 |
-| `AFD_UCX_FFN_HOST` | `127.0.0.1` | FFN 节点地址 |
-| `AFD_UCX_NUM_NICS` | 自动检测 | 网卡数 K |
-| `AFD_UCX_TIMEOUT` | `60` | 连接超时秒数 |
-| `UCX_LOG_LEVEL` | `fatal`（需 shell 传入） | 抑制 UCX 非致命错误 |
+| `AFD_UCX_TLS` | `rc,tcp,cuda_copy,cuda_ipc` | UCX transport list |
+| `AFD_UCX_BASE_PORT` | `25000` | FFN listening base port |
+| `AFD_UCX_FFN_HOST` | `127.0.0.1` | FFN node address |
+| `AFD_UCX_NUM_NICS` | Auto-detected | NIC count K |
+| `AFD_UCX_TIMEOUT` | `60` | Connection timeout in seconds |
+| `UCX_LOG_LEVEL` | `fatal` (must be set in shell) | Suppress non-fatal UCX errors |
 
-### 验证结果
+### Validation Results
 
-| 测试场景 | 结果 | 备注 |
+| Test Scenario | Result | Notes |
 |----------|:---:|------|
-| 1:1 RDMA 吞吐 | PASS | 15-33 GB/s |
-| K=1 多 TP NVLink broadcast | PASS | FFN TP=2 rank 一致 |
-| K=2 多 NIC all_gather | PASS | Attn TP=2, FFN TP=2 |
-| K=2 异构 TP + 非代表 rank | PASS | Attn TP=4, FFN TP=2 全 4 rank 正确 |
-| TP=1 Llama 3.1 8B E2E | PASS | 文本正确 |
-| TP=2 Llama 3.1 8B E2E | PASS | 文本正确，GPU 空闲 0% |
-| TCP-only fallback | FAIL | 已知限制 L6-1 |
-| GPU-direct RDMA | PASS | nvidia_peermem 生效，IB/TCP=23.9x |
+| 1:1 RDMA throughput | PASS | 15-33 GB/s |
+| K=1 multi-TP NVLink broadcast | PASS | FFN TP=2 ranks agree |
+| K=2 multi-NIC all_gather | PASS | Attn TP=2, FFN TP=2 |
+| K=2 heterogeneous TP + non-representative ranks | PASS | Attn TP=4, FFN TP=2, all 4 ranks correct |
+| TP=1 Llama 3.1 8B E2E | PASS | Correct text |
+| TP=2 Llama 3.1 8B E2E | PASS | Correct text, idle GPU utilization 0% |
+| TCP-only fallback | FAIL | Known limitation L6-1 |
+| GPU-direct RDMA | PASS | nvidia_peermem active, IB/TCP=23.9x |
 
-### 启动命令
+### Launch Commands
 
-TP=1 单卡 AFD（最简模式）：
+TP=1 single-GPU AFD (minimal mode):
 
-    # 终端 1: FFN (先启动)
+    # Terminal 1: FFN (start first)
     UCX_LOG_LEVEL=fatal UCX_WARN_UNUSED_ENV_VARS=n \
     CUDA_VISIBLE_DEVICES=3 \
     AFD_UCX_TLS=rc,tcp,cuda_copy,cuda_ipc \
     AFD_UCX_BASE_PORT=25000 \
     python -m sglang.launch_server \
-      --model-path <模型路径> --tp 1 \
+      --model-path <model_path> --tp 1 \
       --afd-perspective ffn --afd-comm-backend ucx --port 30001
 
-    # 终端 2: Attn (等 FFN 出现 "listening" 后启动)
+    # Terminal 2: Attn (start after FFN reports "listening")
     UCX_LOG_LEVEL=fatal UCX_WARN_UNUSED_ENV_VARS=n \
     CUDA_VISIBLE_DEVICES=2 \
     AFD_UCX_TLS=rc,tcp,cuda_copy,cuda_ipc \
     AFD_UCX_BASE_PORT=25000 AFD_UCX_FFN_HOST=127.0.0.1 \
     python -m sglang.launch_server \
-      --model-path <模型路径> --tp 1 \
+      --model-path <model_path> --tp 1 \
       --afd-perspective attn --afd-comm-backend ucx --port 30000
 
-    # 终端 3: 请求
+    # Terminal 3: Request
     curl -s http://localhost:30000/generate \
       -H "Content-Type: application/json" \
       -d '{"text":"Hello","sampling_params":{"max_new_tokens":16}}'
 
-TP=2 多卡 AFD（K=1 NVLink broadcast）：
+TP=2 multi-GPU AFD (K=1 NVLink broadcast):
 
     # FFN TP=2
     UCX_LOG_LEVEL=fatal UCX_WARN_UNUSED_ENV_VARS=n \
@@ -1324,7 +1324,7 @@ TP=2 多卡 AFD（K=1 NVLink broadcast）：
     AFD_UCX_TLS=rc,tcp,cuda_copy,cuda_ipc \
     AFD_UCX_BASE_PORT=25000 AFD_UCX_NUM_NICS=1 \
     python -m sglang.launch_server \
-      --model-path <模型路径> --tp 2 \
+      --model-path <model_path> --tp 2 \
       --afd-perspective ffn --afd-comm-backend ucx --port 30001
 
     # Attn TP=2
@@ -1333,83 +1333,83 @@ TP=2 多卡 AFD（K=1 NVLink broadcast）：
     AFD_UCX_TLS=rc,tcp,cuda_copy,cuda_ipc \
     AFD_UCX_BASE_PORT=25000 AFD_UCX_FFN_HOST=127.0.0.1 AFD_UCX_NUM_NICS=1 \
     python -m sglang.launch_server \
-      --model-path <模型路径> --tp 2 \
+      --model-path <model_path> --tp 2 \
       --afd-perspective attn --afd-comm-backend ucx --port 30000
 
-多节点部署（跨机 IB RDMA）：
+Multi-node deployment (cross-machine IB RDMA):
 
-    # 节点 B (FFN): 正常启动，监听 0.0.0.0
-    # 节点 A (Attn): 设 AFD_UCX_FFN_HOST 为节点 B 的 IB IP
-    AFD_UCX_FFN_HOST=<FFN节点IB地址> ...
+    # Node B (FFN): start normally, listening on 0.0.0.0
+    # Node A (Attn): set AFD_UCX_FFN_HOST to node B's IB IP
+    AFD_UCX_FFN_HOST=<FFN_node_IB_address> ...
 
-关键说明：
-- UCX_LOG_LEVEL=fatal 和 UCX_WARN_UNUSED_ENV_VARS=n 必须作为 shell 环境变量传入，因为 NCCL 初始化时先加载 UCX C 库
-- AFD_UCX_NUM_NICS 不指定时自动检测 GPU-NIC 亲和性；手动指定时必须整除 TP
-- AFD_UCX_FFN_HOST 仅 Attn 侧需要，FFN 侧自动监听
-- FFN 必须先启动（listener 角色），Attn 后启动（connector 角色）
+Key notes:
+- UCX_LOG_LEVEL=fatal and UCX_WARN_UNUSED_ENV_VARS=n must be passed as shell environment variables, because NCCL initialization loads the UCX C library first
+- AFD_UCX_NUM_NICS automatically detects GPU-NIC affinity if unspecified; a manual value must divide TP
+- AFD_UCX_FFN_HOST is needed only on the Attn side; FFN listens automatically
+- FFN must start first (listener role), followed by Attn (connector role)
 
-### 按模块测试命令
+### Per-Module Test Commands
 
-以下测试脚本位于 `/workspace/` 目录，可独立运行（不依赖完整 SGLang 服务启动）。
-需先设置 Python 路径：`export PYTHONPATH=/workspace/sglang/python:$PYTHONPATH`
+The following test scripts are located in `/workspace/` and can run independently (without starting the full SGLang service).
+First set the Python path: `export PYTHONPATH=/workspace/sglang/python:$PYTHONPATH`
 
-**1. RDMA 基础通信（1:1 P2P，6 项测试）：**
+**1. Basic RDMA Communication (1:1 P2P, 6 Tests):**
 
-    # 测试 IB RDMA / NVLink / TCP fallback / bf16 / 吞吐
-    # 使用 GPU 2 (Attn) 和 GPU 3 (FFN)
+    # Test IB RDMA / NVLink / TCP fallback / bf16 / throughput
+    # Use GPU 2 (Attn) and GPU 3 (FFN)
     python3 /workspace/test_rdma_comm.py
 
-    覆盖项：
-    - 基本连接 + 正确性
-    - FIFO 顺序保证（50 次迭代）
-    - bf16 典型隐藏态吞吐（~4MB）
-    - f32 16MB / 64MB 大张量吞吐
-    - TCP-only fallback（已知限制 L6-1，需 cuda_ipc）
+    Coverage:
+    - Basic connection + correctness
+    - FIFO ordering guarantees (50 iterations)
+    - bf16 typical hidden-state throughput (~4MB)
+    - f32 16MB / 64MB large-tensor throughput
+    - TCP-only fallback (known limitation L6-1, requires cuda_ipc)
 
-**2. K=1 多 TP + NVLink broadcast：**
+**2. K=1 Multi-TP + NVLink Broadcast:**
 
     # Attn TP=1 (GPU 1), FFN TP=2 (GPU 2,3)
-    # FFN rank 0 RDMA 接收，rank 1 NVLink broadcast 获取
+    # FFN rank 0 receives through RDMA; rank 1 obtains data through NVLink broadcast
     python3 /workspace/test_multi_tp.py
 
-    覆盖项：
-    - 非代表 rank 通过 NVLink broadcast 获取数据
-    - FFN 两个 rank 数据一致性验证
-    - Attn send→recv 端到端正确性
+    Coverage:
+    - Non-representative ranks obtain data through NVLink broadcast
+    - Verify data consistency between both FFN ranks
+    - End-to-end correctness of Attn send→recv
 
-**3. K=2 多网卡 + NVLink all_gather：**
+**3. K=2 Multiple NICs + NVLink All_gather:**
 
     # Attn TP=2 (GPU 2,6), FFN TP=2 (GPU 3,7)
-    # 两路 RDMA 各传 1/2 数据，然后 all_gather
+    # Two RDMA paths each transfer 1/2 of the data, followed by all_gather
     python3 /workspace/test_k2_multi_nic.py
 
-    覆盖项：
-    - 多 NIC 并行 RDMA 传输
-    - all_gather + stride 去重重建完整 tensor
-    - 跨 NUMA 节点通信
+    Coverage:
+    - Multi-NIC parallel RDMA transfer
+    - Reconstruct full tensor through all_gather + stride deduplication
+    - Cross-NUMA-node communication
 
-**4. K=2 异构 TP + 非代表 rank（最复杂场景）：**
+**4. K=2 Heterogeneous TP + Non-Representative Ranks (Most Complex Scenario):**
 
     # Attn TP=4 (GPU 2,3,6,7), FFN TP=2 (GPU 4,5)
-    # Attn rank 0,2 为代表做 RDMA，rank 1,3 通过 NVLink 获取
+    # Attn ranks 0,2 represent groups for RDMA; ranks 1,3 obtain data through NVLink
     python3 /workspace/test_k2_hetero.py
 
-    覆盖项：
-    - ranks_per_group > 1 场景
-    - 非代表 rank 填零 + all_gather + stride 去重
-    - Attn 全部 4 个 rank 数据正确性
-    - FFN 两个 rank 数据一致性
+    Coverage:
+    - ranks_per_group > 1 scenarios
+    - Non-representative ranks fill with zeros + all_gather + stride deduplication
+    - Data correctness on all 4 Attn ranks
+    - Data consistency between both FFN ranks
 
-**5. 全量回归（串行运行 1-4）：**
+**5. Full Regression (Run 1-4 Serially):**
 
     echo "=== 1:1 ===" && python3 /workspace/test_rdma_comm.py && \
-    echo "=== K=1 多TP ===" && python3 /workspace/test_multi_tp.py && \
-    echo "=== K=2 多NIC ===" && python3 /workspace/test_k2_multi_nic.py && \
-    echo "=== K=2 异构TP ===" && python3 /workspace/test_k2_hetero.py
+    echo "=== K=1 multi-TP ===" && python3 /workspace/test_multi_tp.py && \
+    echo "=== K=2 multi-NIC ===" && python3 /workspace/test_k2_multi_nic.py && \
+    echo "=== K=2 heterogeneous TP ===" && python3 /workspace/test_k2_hetero.py
 
-**6. E2E 推理验证（需启动完整 server）：**
+**6. E2E Inference Validation (Requires the Full Server):**
 
-    # 启动 TP=2 AFD server（见上方启动命令），然后：
+    # Start the TP=2 AFD server (see launch commands above), then:
     curl -s http://localhost:30000/generate \
       -H "Content-Type: application/json" \
       -d '{"text":"The capital of France is","sampling_params":{"max_new_tokens":16,"temperature":0}}' \
@@ -1417,27 +1417,27 @@ TP=2 多卡 AFD（K=1 NVLink broadcast）：
         print('text:', repr(r['text'])); \
         print('tokens:', r['meta_info']['completion_tokens'])"
 
-    预期：completion_tokens=16，文本语义连贯
+    Expected: completion_tokens=16, semantically coherent text
 
-**7. GPU 空闲利用率检查：**
+**7. Idle GPU Utilization Check:**
 
-    # server 启动后无请求时，GPU 利用率应接近 0%
+    # After server startup, GPU utilization should be near 0% without requests
     nvidia-smi --query-gpu=index,utilization.gpu --format=csv
 
-**8. GPU-direct RDMA 吞吐基准：**
+**8. GPU-Direct RDMA Throughput Benchmark:**
 
-    # 多次迭代热身后测量稳态带宽
-    # 对比 TCP / IB RC / NVLink 三种路径
+    # Measure steady-state bandwidth after multiple warmup iterations
+    # Compare TCP / IB RC / NVLink paths
     python3 /workspace/test_gpudirect.py
 
-    预期：IB RC ~10 GB/s，NVLink ~80-170 GB/s，TCP ~0.4 GB/s
+    Expected: IB RC ~10 GB/s, NVLink ~80-170 GB/s, TCP ~0.4 GB/s
 
-**9. PD 分离 + AFD 组合测试（4 个 server 进程，6 GPU）：**
+**9. Combined PD Disaggregation + AFD Test (4 Server Processes, 6 GPUs):**
 
-PD（Prefill/Decode 分离）的 KV 传输走 Mooncake/Nixl，AFD 的隐藏态传输走 UCX RDMA，两条路径独立。
-Prefill 和 Decode 各自有自己的 Attn+FFN 进程对。
+PD (Prefill/Decode disaggregation) transfers KV through Mooncake/Nixl, while AFD transfers hidden states through UCX RDMA; the two paths are independent.
+Prefill and Decode each have their own Attn+FFN process pair.
 
-    # 终端 1: Prefill FFN (先启动)
+    # Terminal 1: Prefill FFN (start first)
     UCX_LOG_LEVEL=fatal UCX_WARN_UNUSED_ENV_VARS=n \
     CUDA_VISIBLE_DEVICES=4 \
     AFD_UCX_TLS=rc,tcp,cuda_copy,cuda_ipc AFD_UCX_BASE_PORT=25000 \
@@ -1446,7 +1446,7 @@ Prefill 和 Decode 各自有自己的 Attn+FFN 进程对。
       --afd-perspective ffn --afd-comm-backend ucx \
       --disaggregation-mode prefill --port 30011
 
-    # 终端 2: Prefill Attn (等 FFN listening 后)
+    # Terminal 2: Prefill Attn (after FFN is listening)
     UCX_LOG_LEVEL=fatal UCX_WARN_UNUSED_ENV_VARS=n \
     CUDA_VISIBLE_DEVICES=5 \
     AFD_UCX_TLS=rc,tcp,cuda_copy,cuda_ipc AFD_UCX_BASE_PORT=25000 \
@@ -1456,7 +1456,7 @@ Prefill 和 Decode 各自有自己的 Attn+FFN 进程对。
       --afd-perspective attn --afd-comm-backend ucx \
       --disaggregation-mode prefill --port 30010
 
-    # 终端 3: Decode FFN (先启动)
+    # Terminal 3: Decode FFN (start first)
     UCX_LOG_LEVEL=fatal UCX_WARN_UNUSED_ENV_VARS=n \
     CUDA_VISIBLE_DEVICES=6 \
     AFD_UCX_TLS=rc,tcp,cuda_copy,cuda_ipc AFD_UCX_BASE_PORT=25100 \
@@ -1465,7 +1465,7 @@ Prefill 和 Decode 各自有自己的 Attn+FFN 进程对。
       --afd-perspective ffn --afd-comm-backend ucx \
       --disaggregation-mode decode --port 30021
 
-    # 终端 4: Decode Attn (等 FFN listening 后)
+    # Terminal 4: Decode Attn (after FFN is listening)
     UCX_LOG_LEVEL=fatal UCX_WARN_UNUSED_ENV_VARS=n \
     CUDA_VISIBLE_DEVICES=7 \
     AFD_UCX_TLS=rc,tcp,cuda_copy,cuda_ipc AFD_UCX_BASE_PORT=25100 \
@@ -1475,101 +1475,101 @@ Prefill 和 Decode 各自有自己的 Attn+FFN 进程对。
       --afd-perspective attn --afd-comm-backend ucx \
       --disaggregation-mode decode --port 30020
 
-    # 终端 5: 请求（发给 Prefill Attn）
+    # Terminal 5: Request (send to Prefill Attn)
     curl -s http://localhost:30010/generate \
       -H "Content-Type: application/json" \
       -d '{"text":"Hello","sampling_params":{"max_new_tokens":16}}'
 
-    注意：
-    - Prefill 和 Decode 用不同 AFD_UCX_BASE_PORT（25000 vs 25100）避免端口冲突
-    - PD 之间 KV 传输需额外配置 --disaggregation-transfer-backend（mooncake/nixl）
-    - AFD 隐藏态通信（UCX）与 PD KV 传输（Mooncake/Nixl）完全独立
+    Notes:
+    - Prefill and Decode use different AFD_UCX_BASE_PORT values (25000 vs 25100) to avoid port conflicts
+    - PD KV transfer requires additional --disaggregation-transfer-backend configuration (mooncake/nixl)
+    - AFD hidden-state communication (UCX) and PD KV transfer (Mooncake/Nixl) are fully independent
 
-### 已修复问题
+### Fixed Issues
 
-| 编号 | 描述 | 修复 |
+| ID | Description | Fix |
 |------|------|------|
-| R6-1 | uvloop 与 UCX-Py BlockingMode 冲突 | SelectorEventLoop |
-| R6-2 | cuMemGetAddressRange 错误刷屏 | 移除 bridge CUDA context + UCX_LOG_LEVEL=fatal |
-| R6-3 | GPU 空闲 100% 占用 | 移除 bridge 线程 CUDA context |
-| R6-4 | RDMA 读取未完成的 GPU kernel 数据 | send 前 torch.cuda.synchronize() |
-| R6-5 | TP=2 推理文本乱码 | 全设备 synchronize 替代 stream synchronize |
-| R6-6 | K>1 dist.broadcast 非法（不同 src） | rank0 broadcast shape + 填零 + all_gather stride 去重 |
-| R6-7 | K 不整除 local_tp | 自动向下调整 |
-| R6-8 | metadata 仅支持 2D | 先 broadcast ndim 再变长 shape |
-| R6-9 | BufferPool 未回收 | _async_recv 自动 put 上次 buffer |
-| R6-10 | K>1 padding 未截断 | send 记录 num_tokens，recv 截断 |
-| R6-11 | LOCAL_RANK 优先级错误 | 优先 os.environ["LOCAL_RANK"] |
+| R6-1 | uvloop conflicts with UCX-Py BlockingMode | SelectorEventLoop |
+| R6-2 | Repeated cuMemGetAddressRange errors | Remove bridge CUDA context + UCX_LOG_LEVEL=fatal |
+| R6-3 | GPU utilization 100% while idle | Remove bridge-thread CUDA context |
+| R6-4 | RDMA reads unfinished GPU kernel data | torch.cuda.synchronize() before send |
+| R6-5 | Garbled TP=2 inference text | Device-wide synchronize replaces stream synchronize |
+| R6-6 | Invalid K>1 dist.broadcast (different src) | rank0 broadcasts shape + zero fill + all_gather stride deduplication |
+| R6-7 | K does not divide local_tp | Automatically adjust downward |
+| R6-8 | Metadata supports only 2D | Broadcast ndim first, then variable-length shape |
+| R6-9 | BufferPool not recycled | _async_recv automatically puts the previous buffer back |
+| R6-10 | K>1 padding not truncated | send records num_tokens, recv truncates |
+| R6-11 | Incorrect LOCAL_RANK priority | Prioritize os.environ["LOCAL_RANK"] |
 
-### 已知限制
+### Known Limitations
 
-| 编号 | 描述 | 影响 | 处置 |
+| ID | Description | Impact | Handling |
 |------|------|------|------|
-| L6-1 | TCP-only fallback 不可用 | 仅 `UCX_TLS=tcp,cuda_copy`（无 IB 无 NVLink） | 生产路径不受影响 |
-| L6-2 | UCX_LOG_LEVEL 需 shell 环境变量 | NCCL 先于 Python 代码加载 UCX | 启动命令加 `UCX_LOG_LEVEL=fatal` |
-| L6-3 | NIC 自动检测依赖 nvidia-smi topo | 容器内不可用时回退 K=1 | AFD_UCX_NUM_NICS 手动覆盖 |
-| L6-4 | UCX-Py 0.35 已停维 | RAPIDS 推荐 UCXX | 功能满足，长期需迁移 |
+| L6-1 | TCP-only fallback unavailable | Only `UCX_TLS=tcp,cuda_copy` (no IB or NVLink) | Production path unaffected |
+| L6-2 | UCX_LOG_LEVEL must be a shell environment variable | NCCL loads UCX before Python code | Add `UCX_LOG_LEVEL=fatal` to launch command |
+| L6-3 | Automatic NIC detection relies on nvidia-smi topo | Falls back to K=1 if unavailable in containers | Manual AFD_UCX_NUM_NICS override |
+| L6-4 | UCX-Py 0.35 no longer maintained | RAPIDS recommends UCXX | Meets functional needs; long-term migration required |
 
-### 性能优化（已实现）
+### Performance Optimizations (Implemented)
 
-**R6-18：热 BufferPool warmup 预分配**
+**R6-18: Warm BufferPool Preallocation**
 
-`_BufferPool` 新增 `warmup(shape, dtype, device, count)` 方法，在初始化时按模型
-hidden_size 和 microbatch 数预分配 GPU buffer。运行时 recv 路径零 `torch.empty()` 调用。
-不知道 shape 时保持懒分配向后兼容。
+`_BufferPool` adds a `warmup(shape, dtype, device, count)` method, preallocating GPU buffers during initialization according to the model's
+hidden_size and microbatch count. The runtime recv path makes zero `torch.empty()` calls.
+Lazy allocation is retained for backward compatibility when the shape is unknown.
 
-**R6-19：完全异步 send pipeline**
+**R6-19: Fully Asynchronous Send Pipeline**
 
-- `_UcxP2PCommunicator.send_nonblocking(x)` — 提交到 bridge 返回 Future，不等完成
-- `UcxTensorCommunicator.send_tensor_nonblocking(x)` — 上层非阻塞 send
-- `UcxTensorCommunicator.fence()` — 等待 in-flight send 完成
-- `AsyncTensorCommunicator.send_async(x)` — 后台线程等 CUDA event 后提交 nonblocking send
-- `AsyncTensorCommunicator.recv_wait()` — 自动 join send 线程 + 调用 fence
+- `_UcxP2PCommunicator.send_nonblocking(x)` — submits to the bridge and returns a Future without waiting for completion
+- `UcxTensorCommunicator.send_tensor_nonblocking(x)` — upper-level nonblocking send
+- `UcxTensorCommunicator.fence()` — waits for in-flight sends to complete
+- `AsyncTensorCommunicator.send_async(x)` — background thread waits for the CUDA event, then submits a nonblocking send
+- `AsyncTensorCommunicator.recv_wait()` — automatically joins the send thread + calls fence
 
-数据安全保证：后台线程先 `compute_event.synchronize()` 确保 GPU 数据就绪，
-再提交 UCX send。Python GIL 不影响（关键操作 event.synchronize/UCX C 扩展均释放 GIL）。
+Data safety guarantee: the background thread first calls `compute_event.synchronize()` to ensure GPU data is ready,
+then submits the UCX send. The Python GIL is not an issue (critical operations event.synchronize/UCX C extensions release the GIL).
 
-### 性能优化方案历史（R6-13 + R6-14 + R6-16）
+### Performance Optimization Proposal History (R6-13 + R6-14 + R6-16)
 
-**原始瓶颈分析（已解决）：**
+**Original Bottleneck Analysis (Resolved):**
 
-原 UCX 通信器在 `_UcxP2PCommunicator.send()` 中使用 `torch.cuda.synchronize()`
-做全设备同步。这会阻塞所有 CUDA stream，破坏 microbatch pipeline 的通信-计算重叠。
+The original UCX communicator used `torch.cuda.synchronize()` in `_UcxP2PCommunicator.send()`
+for device-wide synchronization. This blocks all CUDA streams and destroys communication-compute overlap in the microbatch pipeline.
 
-AFD 的 microbatch pipeline 依赖 `AsyncTensorCommunicator` 的三个方法实现重叠：
-- `send_async(x)`：在 comm_stream 上发起发送，立即返回
-- `recv_start()`：在 comm_stream 上发起接收，不阻塞 compute stream
-- `recv_wait()`：等待接收完成，同步回 compute stream
+AFD's microbatch pipeline relies on three `AsyncTensorCommunicator` methods for overlap:
+- `send_async(x)`: initiates sending on comm_stream and returns immediately
+- `recv_start()`: initiates receiving on comm_stream without blocking the compute stream
+- `recv_wait()`: waits for reception to complete and synchronizes back to the compute stream
 
-当前 `send_async` 切到 comm_stream 后调用 `send_tensor` → `_p2p.send()` →
-`torch.cuda.synchronize()`。这个全设备同步等待所有 stream（包括 compute stream），
-使得 send 无法与后续 compute 重叠，pipeline 退化为串行。
+Currently, `send_async` switches to comm_stream and calls `send_tensor` → `_p2p.send()` →
+`torch.cuda.synchronize()`. This device-wide synchronization waits for all streams (including the compute stream),
+preventing send from overlapping subsequent compute and reducing the pipeline to serial execution.
 
 ```
-当前（被 synchronize 序列化）：
+Current (serialized by synchronize):
   [Attn m0] → [sync+send m0] → [Attn m1] → [sync+send m1] → [recv m0] → ...
-              ↑ GPU 全停 ↑                  ↑ GPU 全停 ↑
+              ↑ all GPU work stops ↑        ↑ all GPU work stops ↑
 
-目标（CUDA event 精细同步）：
+Target (fine-grained CUDA event synchronization):
   [Attn m0] → [send m0        ] → [Attn m1] → [send m1        ]
                                    [recv m0 ←]
-              ↑ 仅等 m0 的 compute stream ↑   ↑ send 和 compute 重叠 ↑
+              ↑ wait only for m0's compute stream ↑   ↑ send overlaps compute ↑
 ```
 
-**R6-13：torch.cuda.synchronize() → CUDA event 精细同步**
+**R6-13: torch.cuda.synchronize() → Fine-Grained CUDA Event Synchronization**
 
-修改 `_UcxP2PCommunicator.send()` 和 `AsyncTensorCommunicator.send_async()`：
+Modify `_UcxP2PCommunicator.send()` and `AsyncTensorCommunicator.send_async()`:
 
 ```python
-# 方案：在 compute stream 上记录 event，comm stream 等待该 event
+# Approach: record an event on the compute stream; the comm stream waits for it
 
 # AsyncTensorCommunicator.send_async:
 def send_async(self, x: torch.Tensor):
     if self.comm_stream is not None:
-        # 记录 compute stream 的当前进度
+        # Record the compute stream's current progress
         event = torch.cuda.current_stream().record_event()
         with torch.cuda.stream(self.comm_stream):
-            # comm stream 等待 compute stream 完成 x 的写入
+            # The comm stream waits for the compute stream to finish writing x
             event.wait(self.comm_stream)
             self.inner.send_tensor(x)
     else:
@@ -1577,69 +1577,69 @@ def send_async(self, x: torch.Tensor):
 
 # _UcxP2PCommunicator.send:
 def send(self, x: torch.Tensor):
-    # 不再全设备 synchronize，由上层 AsyncTensorCommunicator 用 event 同步
+    # No device-wide synchronize; upper-level AsyncTensorCommunicator synchronizes via events
     self._bridge.run(self._async_send(x))
 ```
 
-收益：send 只等产生 tensor 的 compute stream，不阻塞其他 stream 和 microbatch。
+Benefit: send waits only for the compute stream producing the tensor, without blocking other streams or microbatches.
 
-**R6-14：UCX 参数调优**
+**R6-14: UCX Parameter Tuning**
 
-| 参数 | 当前值 | 建议值 | 说明 |
+| Parameter | Current Value | Suggested Value | Description |
 |------|--------|--------|------|
-| `UCX_RNDV_THRESH` | 8192 | 根据 hidden_size 调整 | 小于此值用 eager（低延迟），大于用 rendezvous（高吞吐） |
-| `UCX_MAX_RNDV_RAILS` | 1 (UCX 默认) | 1（保持） | 确保 GPU-direct RDMA 选最近 NIC |
-| `UCX_RNDV_SCHEME` | auto | `put_zcopy` | 跳过协商，直接 RDMA write |
-| `UCX_ZCOPY_THRESH` | auto | 与 RNDV_THRESH 一致 | 启用零拷贝传输 |
+| `UCX_RNDV_THRESH` | 8192 | Adjust according to hidden_size | Eager below this threshold (low latency), rendezvous above it (high throughput) |
+| `UCX_MAX_RNDV_RAILS` | 1 (UCX default) | 1 (keep) | Ensure GPU-direct RDMA selects the nearest NIC |
+| `UCX_RNDV_SCHEME` | auto | `put_zcopy` | Skip negotiation, perform RDMA write directly |
+| `UCX_ZCOPY_THRESH` | auto | Same as RNDV_THRESH | Enable zero-copy transfer |
 
-**R6-16：M-buffer microbatch pipeline**
+**R6-16: M-Buffer Microbatch Pipeline**
 
-AFD 的 `model_forward_afd` 已有 microbatch pipeline 框架（R4 注释）。
-当前管线中 `postprocess_layer_start_recv()` 在 A stage 之后提前发起 recv_start，
-与下一个 A stage 计算重叠。这部分逻辑已正确，但被 R6-13 的全设备同步破坏。
+AFD's `model_forward_afd` already has a microbatch pipeline framework (R4 comments).
+In the current pipeline, `postprocess_layer_start_recv()` initiates recv_start early after the A stage,
+overlapping the next A-stage computation. This logic is already correct, but is disrupted by R6-13's device-wide synchronization.
 
-修复 R6-13 后，pipeline 自然恢复：
+After fixing R6-13, the pipeline naturally resumes:
 
 ```
-M=3 microbatch pipeline (每层)：
+M=3 microbatch pipeline (per layer):
 
-Attn 侧：
-  A(L,m0) → send(m0)                     ← send 与下一步重叠
-            recv_start(L-1,m0)            ← 提前发起 recv
-  A(L,m1) → send(m1)                     ← compute A(m1) 与 recv(m0) 重叠
+Attn side:
+  A(L,m0) → send(m0)                     ← send overlaps the next step
+            recv_start(L-1,m0)            ← initiate recv early
+  A(L,m1) → send(m1)                     ← compute A(m1) overlaps recv(m0)
             recv_start(L-1,m1)
   A(L,m2) → send(m2)
             recv_start(L-1,m2)
-  F(L-1,m0) ← recv_wait(m0)              ← m0 的 recv 已完成
+  F(L-1,m0) ← recv_wait(m0)              ← m0 recv already completed
   F(L-1,m1) ← recv_wait(m1)
   F(L-1,m2) ← recv_wait(m2)
 
-BufferPool 需要至少 M 个 buffer 同时在途：
-  - 每个 microbatch 有独立的 send/recv buffer
-  - BufferPool 按 shape/dtype 缓存，天然支持多 buffer 复用
+BufferPool needs at least M buffers in flight simultaneously:
+  - Each microbatch has independent send/recv buffers
+  - BufferPool caches by shape/dtype, naturally supporting multi-buffer reuse
 ```
 
-关键前提：R6-13 完成后，send 不再阻塞全设备，pipeline 的 M-way 重叠才能生效。
+Key prerequisite: after R6-13 is complete, send no longer blocks the entire device, enabling M-way pipeline overlap.
 
-**执行顺序：**
-1. R6-13（CUDA event 同步）← 最高优先级，解除 pipeline 瓶颈
-2. R6-14（UCX 参数调优）← 独立可做，提升单次传输性能
-3. R6-16（验证 pipeline 重叠）← R6-13 完成后自然生效，需 profiler 验证
+**Execution Order:**
+1. R6-13 (CUDA event synchronization) ← highest priority, removes pipeline bottleneck
+2. R6-14 (UCX parameter tuning) ← independent, improves individual transfer performance
+3. R6-16 (validate pipeline overlap) ← naturally enabled after R6-13, requires profiler validation
 
-### 未完成任务（全量汇总）
+### Outstanding Tasks (Full Summary)
 
-| 优先级 | 编号 | 描述 | 来源 | 状态 |
+| Priority | ID | Description | Source | Status |
 |--------|------|------|------|------|
-| P1 | L5 | FFN sync 标志在 batch=None 时未清除 | 第五轮 | **已修复** |
-| P1 | L6 | ZMQ drain last-one-wins 潜在 batch 不匹配 | 第五轮 | **已修复** |
-| P2 | R6-12 | 多节点跨机 IB RDMA 实测 | 第六轮 | 待后续（需第二台机器） |
-| P2 | R6-13 | CUDA event 精细同步 | 第六轮 | **已完成**（send_async event + current_stream sync） |
-| P2 | R6-14 | UCX 参数调优 | 第六轮 | **已完成**（put_zcopy + ZCOPY_THRESH） |
-| P2 | R6-18 | 热 BufferPool warmup 预分配 | 第六轮 | **已完成** |
-| P2 | R6-19 | 完全异步 send pipeline + fence | 第六轮 | **已完成** |
-| P2 | F5 | Qwen2 Dense AFD | 第五轮 | 待实现 |
-| P3 | R6-15 | TCP-only fallback 修复 | 第六轮 | 待修复（低优先级） |
-| P3 | R5-9 | 非 rank-0 避免创建无用 ZMQ socket | 第五轮 | **已修复** |
-| P4 | R6-16 | M-buffer pipeline profiler 验证 | 第六轮 | 代码就绪，待 profiler |
-| P4 | R6-17 | UCXX 迁移评估 | 第六轮 | 长期规划 |
-| P4 | R5-10 | `_dtype_to_int` 未知 dtype 报错 | 第五轮 | **已修复** |
+| P1 | L5 | FFN sync flag not cleared when batch=None | Round 5 | **Fixed** |
+| P1 | L6 | Potential ZMQ drain last-one-wins batch mismatch | Round 5 | **Fixed** |
+| P2 | R6-12 | Multi-node cross-machine IB RDMA testing | Round 6 | Follow-up needed (requires a second machine) |
+| P2 | R6-13 | Fine-grained CUDA event synchronization | Round 6 | **Completed** (send_async event + current_stream sync) |
+| P2 | R6-14 | UCX parameter tuning | Round 6 | **Completed** (put_zcopy + ZCOPY_THRESH) |
+| P2 | R6-18 | Warm BufferPool preallocation | Round 6 | **Completed** |
+| P2 | R6-19 | Fully asynchronous send pipeline + fence | Round 6 | **Completed** |
+| P2 | F5 | Qwen2 Dense AFD | Round 5 | Not yet implemented |
+| P3 | R6-15 | TCP-only fallback fix | Round 6 | To be fixed (low priority) |
+| P3 | R5-9 | Avoid creating unused ZMQ sockets on non-rank-0 processes | Round 5 | **Fixed** |
+| P4 | R6-16 | M-buffer pipeline profiler validation | Round 6 | Code ready, awaiting profiler |
+| P4 | R6-17 | UCXX migration evaluation | Round 6 | Long-term plan |
+| P4 | R5-10 | `_dtype_to_int` errors on unknown dtype | Round 5 | **Fixed** |

@@ -1,28 +1,28 @@
-# 启动命令
+# Launch Commands
 
-## 外部资源配置（首次启动前必读）
+## External Resource Configuration (Read Before First Launch)
 
-公开的 `benchmark/test_aflex` 工具不附带模型权重、profile 数据或训练后的预测模型。
-两个 launcher JSON 都是模板：复制到本地配置文件，并将 `model.path` 从 `null`
-设置为自己的模型目录或模型 ID；GPU、网卡和模型几何参数必须匹配实际部署。
-相对路径按启动进程的当前工作目录解析，建议外部资源使用绝对路径。
+The public `benchmark/test_aflex` tools do not include model weights, profile data, or trained prediction models.
+Both launcher JSON files are templates: copy them to local configuration files and change `model.path` from `null`
+to your own model directory or model ID; GPUs, NICs, and model geometry parameters must match the actual deployment.
+Relative paths are resolved against the launching process's current working directory; absolute paths are recommended for external resources.
 
-启用 DVFS 或 Tier 1 时，设置 `afd.energy_model_dir` 为外部预测模型目录；
-启用 Tier 1（含 `--start-with-workload`）时还必须设置：
+When enabling DVFS or Tier 1, set `afd.energy_model_dir` to the external prediction model directory;
+when enabling Tier 1 (including `--start-with-workload`), you must also set:
 - `tier1.prefill_data_path`: `/path/to/aflex-assets/prefill_data_v1.txt`
 - `tier1.decode_data_path`: `/path/to/aflex-assets/decode_data_v1.txt`
 - `afd.energy_model_dir`: `/path/to/aflex-assets/energy_models`
 
-这些资源没有仓库内隐式回退路径。缺少必要配置或文件时，launcher 会在启动子进程前报错。
-最小模式只需要外部模型，不需要 profile 或预测模型。预测模型包含 pickle 文件，只加载可信资源。
-以下 launcher 命令的配置路径应替换为填好的本地副本；完整模式还需在副本中启用相应开关。
-手动命令中的 `/path/to/...` 同样必须替换为实际外部路径。
+These resources have no implicit fallback paths within the repository. If required configuration or files are missing, the launcher reports an error before starting child processes.
+Minimal mode requires only an external model, not profiles or prediction models. Prediction models contain pickle files; load only trusted assets.
+Replace the configuration paths in the launcher commands below with completed local copies; full mode also requires enabling the corresponding switches in those copies.
+Likewise, replace `/path/to/...` in manual commands with actual external paths.
 
-## 1. 使用 af_launcher.py（推荐）
+## 1. Using af_launcher.py (Recommended)
 
-支持完整配置 + Tier 1 预求解 + 自动 GPU 分配 + 频率锁定。
+Supports full configuration + Tier 1 pre-solving + automatic GPU allocation + frequency locking.
 
-### 完整模式（DVFS + Tier 1 + 预求解）
+### Full Mode (DVFS + Tier 1 + Pre-solving)
 
 ```bash
 python python/sglang/srt/energy/af_launcher.py \
@@ -30,25 +30,25 @@ python python/sglang/srt/energy/af_launcher.py \
     --start-with-workload
 ```
 
-启动顺序：**DF → DA → PF → PA → Router**
+Startup order:**DF → DA → PF → PA → Router**
 
-各模块端口：
-| 模块 | 角色 | GPU | 端口 | 描述 |
+Module ports:
+| Module | Role | GPU | Port | Description |
 |---|---|---|---|---|
-| DF | Decode-FFN | GPU 0 | 50021 | FFN 侧 decode |
-| DA | Decode-Attn | GPU 1 | 50020 | Attention 侧 decode, UCX FFN host=127.0.0.1 |
-| PF | Prefill-FFN | GPU 2 | 50011 | FFN 侧 prefill |
-| PA | Prefill-Attn | GPU 3 | 50010 | Attention 侧 prefill + Tier 1 监控 |
-| Router | 路由 | — | 50000 | PD 路由 + 最小负载均衡 |
+| DF | Decode-FFN | GPU 0 | 50021 | FFN-side decode |
+| DA | Decode-Attn | GPU 1 | 50020 | Attention-side decode, UCX FFN host=127.0.0.1 |
+| PF | Prefill-FFN | GPU 2 | 50011 | FFN-side prefill |
+| PA | Prefill-Attn | GPU 3 | 50010 | Attention-side prefill + Tier 1 monitoring |
+| Router | Routing | — | 50000 | PD routing + mini load balancing |
 
-### 最小模式（无 DVFS，无 Tier 1）
+### Minimal Mode (No DVFS, No Tier 1)
 
 ```bash
 python python/sglang/srt/energy/af_launcher.py \
     --config python/sglang/srt/energy/af_launch_config_minimal.json
 ```
 
-### 无预求解（启用 Tier 1 动态监控）
+### Without Pre-solving (Tier 1 Dynamic Monitoring Enabled)
 
 ```bash
 python python/sglang/srt/energy/af_launcher.py \
@@ -56,28 +56,28 @@ python python/sglang/srt/energy/af_launcher.py \
 # Enable tier1.enable_tier1_pa in the local config; the solver initializes lazily on re-plan.
 ```
 
-## 2. 手动启动（调试用）
+## 2. Manual Launch (For Debugging)
 
-### 环境变量
+### Environment Variables
 
 ```bash
-# UCX 通信
+# UCX communication
 export AFD_UCX_BASE_PORT=<base_port>        # DF/DA: 25100, PF/PA: 25000
-export AFD_UCX_FFN_HOST=<ffn_ip>            # Attn 侧需要: FFN 主机 IP
+export AFD_UCX_FFN_HOST=<ffn_ip>            # Required on the Attn side: FFN host IP
 export AFD_UCX_TLS="rc,tcp,cuda_copy,cuda_ipc"
 export UCX_LOG_LEVEL=fatal
 export UCX_WARN_UNUSED_ENV_VARS=n
 
-# 调度
+# Scheduling
 export AFD_SCHED_PORT=<sched_port>           # decode: 65400, prefill: 65300
 
 # GPU
-export CUDA_VISIBLE_DEVICES=<gpu_index>      # 单个 GPU
-export AFD_NVML_DEVICE_INDEX=<nvml_index>    # 物理 NVML GPU index（非 CUDA index）
-export AFD_ATTN_GPU_INDICES="<csv>"          # PA 专用: Attn 模块的 GPU index 列表
-export AFD_FFN_GPU_INDICES="<csv>"           # PA 专用: FFN 模块的 GPU index 列表
+export CUDA_VISIBLE_DEVICES=<gpu_index>      # Single GPU
+export AFD_NVML_DEVICE_INDEX=<nvml_index>    # Physical NVML GPU index (not CUDA index)
+export AFD_ATTN_GPU_INDICES="<csv>"          # PA only: GPU index list for Attn modules
+export AFD_FFN_GPU_INDICES="<csv>"           # PA only: GPU index list for FFN modules
 
-# 日志
+# Logging
 export SGLANG_DISABLE_REQUEST_LOGGING=true
 ```
 
@@ -99,7 +99,7 @@ python -m sglang.launch_server \
     --tier1-stats-path af_launch_logs/decode_stats.json
 ```
 
-环境变量：
+Environment variables:
 ```bash
 CUDA_VISIBLE_DEVICES=1
 AFD_UCX_BASE_PORT=25100
@@ -124,7 +124,7 @@ python -m sglang.launch_server \
     --tier1-stats-path af_launch_logs/decode_stats.json
 ```
 
-环境变量：
+Environment variables:
 ```bash
 CUDA_VISIBLE_DEVICES=0
 AFD_UCX_BASE_PORT=25100
@@ -162,7 +162,7 @@ python -m sglang.launch_server \
     --tier1-stats-path af_launch_logs/decode_stats.json
 ```
 
-环境变量：
+Environment variables:
 ```bash
 CUDA_VISIBLE_DEVICES=3
 AFD_UCX_BASE_PORT=25000
@@ -189,7 +189,7 @@ python -m sglang.launch_server \
     --tier1-stats-path af_launch_logs/decode_stats.json
 ```
 
-环境变量：
+Environment variables:
 ```bash
 CUDA_VISIBLE_DEVICES=2
 AFD_UCX_BASE_PORT=25000
@@ -209,28 +209,28 @@ python -m sglang_router.launch_router \
     --port 50000
 ```
 
-## 3. 日志文件
+## 3. Log Files
 
-默认日志目录：`af_launch_logs/`
+Default log directory:`af_launch_logs/`
 
-| 文件 | 内容 |
+| File | Contents |
 |---|---|
-| `PA.log` | Prefill-Attn 服务器日志 |
-| `PF.log` | Prefill-FFN 服务器日志 |
-| `DA.log` | Decode-Attn 服务器日志 |
-| `DF.log` | Decode-FFN 服务器日志 |
-| `router.log` | 路由服务器日志 |
-| `decode_stats.json` | DA 写入的 decode 计时统计（给 PA Tier 1 监控读取） |
-| `tier1_initial_solution.json` | 预求解产生的 Tier 1 配置（tp/f/k） |
+| `PA.log` | Prefill-Attn server log |
+| `PF.log` | Prefill-FFN server log |
+| `DA.log` | Decode-Attn server log |
+| `DF.log` | Decode-FFN server log |
+| `router.log` | Router server log |
+| `decode_stats.json` | Decode timing statistics written by DA (read by PA Tier 1 monitoring) |
+| `tier1_initial_solution.json` | Tier 1 configuration produced by pre-solving (tp/f/k) |
 
-日志级别通过配置 `logs.level` 控制，默认 `info`。
+The log level is controlled by `logs.level` in the configuration and defaults to `info`.
 
-## 4. 发送请求
+## 4. Sending Requests
 
-通过 router（推荐）或直接发送到 PA/DA：
+Send through the router (recommended) or directly to PA/DA:
 
 ```bash
-# 通过 router
+# Through the router
 curl http://127.0.0.1:50000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -239,7 +239,7 @@ curl http://127.0.0.1:50000/v1/chat/completions \
         "max_tokens": 128
     }'
 
-# 直接到 prefill
+# Directly to prefill
 curl http://127.0.0.1:50010/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -249,10 +249,10 @@ curl http://127.0.0.1:50010/v1/chat/completions \
     }'
 ```
 
-## 5. 停止
+## 5. Stopping
 
 ```bash
-# 停止所有子进程（af_launcher.py 启动的）
+# Stop all child processes (started by af_launcher.py)
 pkill -f "sglang.launch_server"
 pkill -f "launch_router"
 ```

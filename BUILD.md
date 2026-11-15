@@ -19,6 +19,6 @@ pip install "sglang[afd-ucx]"
 ```
 
 ```
-Mooncake缺失：
+Missing Mooncake dependencies:
 apt-get install -y libibverbs1 ibverbs-providers
 ```
